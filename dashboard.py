@@ -631,7 +631,27 @@ if not sell_trades.empty:
         f"{worst_trade['Ticker']} | ${worst_trade['Profit/Loss $']:.2f}"
     )
 
-tickers = ["AAPL", "TSLA", "NVDA", "BTC-USD", "SPY", "ETH-USD"]
+tickers = [
+    # MAIN FOCUS
+    "ETH-USD",
+    "BTC-USD",
+    "AVAX-USD",
+    "UNI-USD",
+    "COMP-USD",
+    "VET-USD",
+    "XRP-USD",
+
+    # MONITOR
+    "ADA-USD",
+    "HBAR-USD",
+    "POL-USD",
+    "ICP-USD",
+    "ATOM-USD",
+    "ALGO-USD",
+    "XTZ-USD",
+    "ETC-USD",
+    "XLM-USD"
+]
 
 # AI WATCHLIST SCANNER
 
@@ -649,6 +669,13 @@ for ticker in tickers:
             continue
 
         current_price = data["Close"].iloc[-1]
+
+        previous_price = data["Close"].iloc[-2]
+
+        price_change_percent = (
+            (current_price - previous_price)
+            / previous_price
+        ) * 100
 
         rsi = RSIIndicator(close=data["Close"]).rsi().iloc[-1]
 
@@ -1122,7 +1149,7 @@ if st.button("Send Daily Market Summary"):
 selected_tickers = st.multiselect(
     "Choose tickers",
     tickers,
-    default=["AAPL", "BTC-USD", "NVDA"]
+    default=["ETH-USD", "BTC-USD", "XRP-USD"]
 )
 
 for selected_ticker in selected_tickers:
