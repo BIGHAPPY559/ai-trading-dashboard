@@ -2,12 +2,13 @@ import yfinance as yf
 from ta.momentum import RSIIndicator
 import requests
 import time
+import os
 
 from datetime import datetime
 
 # DISCORD WEBHOOK
 
-WEBHOOK_URL = "https://discordapp.com/api/webhooks/1501805105954029648/HvBch_wxbW7Sbtao846pmvnAuSsDq71Vx-AfpMgYIVibbhbTt_fvpHtbD7DxAJZXgg4i"
+WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503108901850321147/OzsleBVPn7tnYJH6E4W9i30qsSTiiaRCRCHzznuTPlpD8m1FG5ALhwhLxPEuWOg1iNj2")
 
 # SETTINGS
 SCAN_INTERVAL = 3600
