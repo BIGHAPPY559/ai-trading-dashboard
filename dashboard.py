@@ -72,16 +72,16 @@ starting_balance = 10000
 STOP_LOSS_PERCENT = 5
 TAKE_PROFIT_PERCENT = 10
 
-TRADE_WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503108979587416344/bKmqUo0P4L_Jl7dk3c3Mfnr00J0sHw5jvFw62jIyXV6hi569NcQXIxyQNSIdczJjBk9k")
+TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL")
                     
-NEWS_WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503109186186383441/0bJi5U6xqgL2trDbGLPS_mFWPi8-ryza_0Yabzxmnq5lBuHztQ8Urgw-TEU1Zy9SA9km")
+NEWS_WEBHOOK_URL = os.getenv("NEWS_WEBHOOK_URL")
 
-SUMMARY_WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503109811187876113/cZhSc-DCNDWtlCK-ApoPsH5JCasLmXg0KPyzPoLq1JVukQuE5N-beV7fwGDupIiC6LhW")
+SUMMARY_WEBHOOK_URL = os.getenv("SUMMARY_WEBHOOK_URL")
 
 BULLISH_WORDS = ["beat", "growth", "upgrade", "surge", "profit", "strong", "bullish", "record"]
 BEARISH_WORDS = ["miss", "downgrade", "fall", "drop", "loss", "weak", "bearish", "lawsuit"]
 
-DISCORD_WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503108979587416344/bKmqUo0P4L_Jl7dk3c3Mfnr00J0sHw5jvFw62jIyXV6hi569NcQXIxyQNSIdczJjBk9k")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 if os.path.exists(BALANCE_FILE):
 

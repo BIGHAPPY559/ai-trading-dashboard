@@ -8,7 +8,7 @@ from datetime import datetime
 
 # DISCORD WEBHOOK
 
-WEBHOOK_URL = os.getenv("https://discordapp.com/api/webhooks/1503108901850321147/OzsleBVPn7tnYJH6E4W9i30qsSTiiaRCRCHzznuTPlpD8m1FG5ALhwhLxPEuWOg1iNj2")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # SETTINGS
 SCAN_INTERVAL = 3600
