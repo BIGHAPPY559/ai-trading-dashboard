@@ -14,6 +14,8 @@ BUY_RSI = 35
 SELL_RSI = 70
 
 ALERT_COOLDOWN = 21600
+SUMMARY_INTERVAL = 86400
+last_summary_time = 0
 
 last_signals = {}
 last_alert_times = {}
@@ -338,20 +340,30 @@ while True:
         }
     )
 
-    summary_response = requests.post(
-    SUMMARY_WEBHOOK_URL,
-    json={
-        "embeds": [
-            {
-                "title": "📊 AI Market Summary",
-                "color": 3447003,
-                "fields": summary_fields
-            }
-        ]
-    }
-)
+    current_time = time.time()
 
-print(
-    "Summary Discord status:",
-    summary_response.status_code
-)
+    if current_time - last_summary_time >= SUMMARY_INTERVAL:
+
+        summary_response = requests.post(
+            SUMMARY_WEBHOOK_URL,
+            json={
+                "embeds": [
+                    {
+                        "title": "📊 AI Market Summary",
+                        "color": 3447003,
+                        "fields": summary_fields
+                    }
+                ]
+            }
+        )
+
+        print(
+            "Summary Discord status:",
+            summary_response.status_code
+        )
+
+        last_summary_time = current_time
+
+    else:
+
+        print("Skipping summary. Cooldown active.")
