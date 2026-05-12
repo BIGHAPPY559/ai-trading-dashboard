@@ -28,15 +28,12 @@ tickers = [
     "ETH-USD",
     "BTC-USD",
     "AVAX-USD",
-    "UNI-USD",
-    "COMP-USD",
     "VET-USD",
     "XRP-USD",
 
     # MONITOR
     "ADA-USD",
     "HBAR-USD",
-    "POL-USD",
     "ICP-USD",
     "ATOM-USD",
     "ALGO-USD",
