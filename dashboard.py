@@ -647,19 +647,23 @@ for ticker in tickers:
 
 watchlist_df = pd.DataFrame(watchlist_results)
 
-crypto_watchlist_df = watchlist_df[
-    watchlist_df["Market"] == "Crypto"
-]
-
-stock_watchlist_df = watchlist_df[
-    watchlist_df["Market"] == "Stock"
-]
-
 if not watchlist_df.empty:
     watchlist_df = watchlist_df.sort_values(
         by="AI Confidence %",
         ascending=False
     )
+
+    crypto_watchlist_df = watchlist_df[
+        watchlist_df["Market"] == "Crypto"
+    ]
+
+    stock_watchlist_df = watchlist_df[
+        watchlist_df["Market"] == "Stock"
+    ]
+
+else:
+    crypto_watchlist_df = pd.DataFrame()
+    stock_watchlist_df = pd.DataFrame()
 
 if not watchlist_df.empty:
     top_pick = watchlist_df.iloc[0]
