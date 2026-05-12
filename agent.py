@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+SUMMARY_WEBHOOK_URL = os.getenv("SUMMARY_WEBHOOK_URL")
 
 SCAN_INTERVAL = 3600
 
@@ -337,12 +338,20 @@ while True:
         }
     )
 
-    send_discord_embed(
-        title="📊 AI Market Summary",
-        color=3447003,
-        fields=summary_fields
-    )
+    summary_response = requests.post(
+    SUMMARY_WEBHOOK_URL,
+    json={
+        "embeds": [
+            {
+                "title": "📊 AI Market Summary",
+                "color": 3447003,
+                "fields": summary_fields
+            }
+        ]
+    }
+)
 
-    print("Scan complete. Waiting...")
-
-    time.sleep(SCAN_INTERVAL)
+print(
+    "Summary Discord status:",
+    summary_response.status_code
+)
