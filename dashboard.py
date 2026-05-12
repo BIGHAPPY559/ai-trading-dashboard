@@ -489,7 +489,7 @@ if not sell_trades.empty:
         f"{worst_trade['Ticker']} | ${worst_trade['Profit/Loss $']:.2f}"
     )
 
-tickers = [
+crypto_tickers = [
     "ETH-USD",
     "BTC-USD",
     "AVAX-USD",
@@ -504,6 +504,22 @@ tickers = [
     "ETC-USD",
     "XLM-USD"
 ]
+
+stock_tickers = [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "AMD",
+    "PLTR",
+    "SPY",
+    "QQQ"
+]
+
+tickers = crypto_tickers + stock_tickers
 
 watchlist_results = []
 
@@ -613,6 +629,7 @@ for ticker in tickers:
 
         watchlist_results.append({
             "Ticker": ticker,
+            "Market": "Crypto" if "-USD" in ticker else "Stock",
             "Price": round(current_price, 2),
             "RSI": round(rsi, 2),
             "MACD": round(macd, 2),
@@ -629,6 +646,14 @@ for ticker in tickers:
         continue
 
 watchlist_df = pd.DataFrame(watchlist_results)
+
+crypto_watchlist_df = watchlist_df[
+    watchlist_df["Market"] == "Crypto"
+]
+
+stock_watchlist_df = watchlist_df[
+    watchlist_df["Market"] == "Stock"
+]
 
 if not watchlist_df.empty:
     watchlist_df = watchlist_df.sort_values(
@@ -716,7 +741,19 @@ if st.button("Bulk Buy Top 3 AI Picks"):
         st.success("Bulk buy completed!")
         st.rerun()
 
-st.subheader("Top AI Watchlist")
+st.subheader("Crypto AI Watchlist")
+
+st.dataframe(
+    crypto_watchlist_df,
+    use_container_width=True
+)
+
+st.subheader("Stock AI Watchlist")
+
+st.dataframe(
+    stock_watchlist_df,
+    use_container_width=True
+)
 
 signal_filter = st.selectbox(
     "Filter AI Signals",
@@ -856,7 +893,13 @@ if not watchlist_df.empty:
 selected_tickers = st.multiselect(
     "Choose tickers",
     tickers,
-    default=["ETH-USD", "BTC-USD", "XRP-USD"]
+    default=[
+        "BTC-USD",
+        "ETH-USD",
+        "AAPL",
+        "NVDA",
+        "SPY"
+    ]
 )
 
 for selected_ticker in selected_tickers:
