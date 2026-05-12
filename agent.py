@@ -8,13 +8,13 @@ from datetime import datetime
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 SUMMARY_WEBHOOK_URL = os.getenv("SUMMARY_WEBHOOK_URL")
 
-SCAN_INTERVAL = 3600
+SCAN_INTERVAL = 900
 
 BUY_RSI = 35
 SELL_RSI = 70
 
 ALERT_COOLDOWN = 21600
-SUMMARY_INTERVAL = 86400
+SUMMARY_INTERVAL = 21600
 last_summary_time = 0
 
 last_signals = {}
@@ -367,3 +367,6 @@ while True:
     else:
 
         print("Skipping summary. Cooldown active.")
+
+    print("Waiting for next scan...")
+time.sleep(SCAN_INTERVAL)
