@@ -8,8 +8,10 @@ from datetime import datetime
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 SCAN_INTERVAL = 3600
+
 BUY_RSI = 35
 SELL_RSI = 70
+
 ALERT_COOLDOWN = 21600
 
 last_signals = {}
@@ -33,6 +35,7 @@ tickers = [
 
 
 def send_discord_embed(title, color, fields):
+
     if not WEBHOOK_URL:
         print("WEBHOOK_URL not found.")
         return
@@ -54,17 +57,21 @@ def send_discord_embed(title, color, fields):
 
 
 while True:
+
     summary = {
-        "STRONG BUY 🚀": [],
-        "SELL 🚨": [],
-        "HOLD ⏸️": []
+        "🟢 BUY SIGNALS": [],
+        "🟡 HOLD SIGNALS": [],
+        "🔴 SELL SIGNALS": []
     }
 
     print("Starting scan...")
 
     for ticker in tickers:
+
         try:
+
             stock = yf.Ticker(ticker)
+
             data = stock.history(period="1y")
 
             if data.empty:
@@ -72,27 +79,80 @@ while True:
                 continue
 
             current_price = data["Close"].iloc[-1]
+
             previous_price = data["Close"].iloc[-2]
 
             price_change_percent = (
-                (current_price - previous_price) / previous_price
+                (current_price - previous_price)
+                / previous_price
             ) * 100
 
-            rsi = RSIIndicator(close=data["Close"]).rsi()
+            # RSI
+
+            rsi = RSIIndicator(
+                close=data["Close"]
+            ).rsi()
+
             current_rsi = rsi.iloc[-1]
 
-            ma50 = data["Close"].rolling(window=50).mean().iloc[-1]
-            ma200 = data["Close"].rolling(window=200).mean().iloc[-1]
+            # MOVING AVERAGES
 
-            if ma50 > ma200 and current_rsi < BUY_RSI:
+            ma50 = (
+                data["Close"]
+                .rolling(window=50)
+                .mean()
+                .iloc[-1]
+            )
+
+            ma200 = (
+                data["Close"]
+                .rolling(window=200)
+                .mean()
+                .iloc[-1]
+            )
+
+            # SIGNAL LOGIC
+
+            if ma50 > ma200 and current_rsi < 30:
+
                 decision = "STRONG BUY 🚀"
-                reason = "Bullish trend with oversold RSI."
+
+                reason = (
+                    "Strong bullish trend "
+                    "with heavily oversold RSI."
+                )
+
+            elif ma50 > ma200 and current_rsi < 45:
+
+                decision = "BUY 🟢"
+
+                reason = (
+                    "Bullish trend with "
+                    "healthy RSI pullback."
+                )
+
+            elif ma50 < ma200 and current_rsi > 75:
+
+                decision = "STRONG SELL 🔴"
+
+                reason = (
+                    "Strong bearish trend "
+                    "with extremely overheated RSI."
+                )
+
             elif current_rsi > SELL_RSI:
+
                 decision = "SELL 🚨"
+
                 reason = "RSI is overheated."
+
             else:
+
                 decision = "HOLD ⏸️"
+
                 reason = "Trend is unclear."
+
+            # SIGNAL STRENGTH SCORE
 
             score = 0
 
@@ -105,9 +165,23 @@ while True:
             if current_rsi > 40:
                 score += 20
 
-            summary[decision].append(
-                f"{ticker} | {score}% | RSI {current_rsi:.2f}"
+            # SUMMARY CATEGORY
+
+            summary_label = "🟡 HOLD SIGNALS"
+
+            if "BUY" in decision:
+                summary_label = "🟢 BUY SIGNALS"
+
+            elif "SELL" in decision:
+                summary_label = "🔴 SELL SIGNALS"
+
+            summary[summary_label].append(
+                f"{ticker} | "
+                f"{score}% | "
+                f"RSI {current_rsi:.2f}"
             )
+
+            # PRINT INFO
 
             print("----------------------")
             print(f"Ticker: {ticker}")
@@ -118,26 +192,42 @@ while True:
             print(f"200 MA: {ma200:.2f}")
             print(f"Signal Strength: {score}%")
 
+            # ALERT CONTROL
+
             previous_signal = last_signals.get(ticker)
-            last_alert_time = last_alert_times.get(ticker, 0)
+
+            last_alert_time = (
+                last_alert_times.get(ticker, 0)
+            )
+
             current_time = time.time()
 
             can_send_alert = (
                 current_time - last_alert_time
             ) >= ALERT_COOLDOWN
 
+            # SEND INDIVIDUAL ALERTS
+
             if (
-                decision != "HOLD ⏸️"
+                (
+                    "BUY" in decision
+                    or "SELL" in decision
+                )
+                and "HOLD" not in decision
                 and previous_signal != decision
                 and can_send_alert
             ):
-                embed_color = 65280
 
-                if "SELL" in decision:
+                embed_color = 16776960
+
+                if "BUY" in decision:
+                    embed_color = 65280
+
+                elif "SELL" in decision:
                     embed_color = 16711680
 
                 send_discord_embed(
-                    title=f"🚨 {decision}",
+                    title=f"{decision}",
                     color=embed_color,
                     fields=[
                         {
@@ -147,32 +237,38 @@ while True:
                         },
                         {
                             "name": "Price",
-                            "value": f"${current_price:,.2f}",
+                            "value":
+                            f"${current_price:,.2f}",
                             "inline": True
                         },
                         {
                             "name": "24h Change",
-                            "value": f"{price_change_percent:.2f}%",
+                            "value":
+                            f"{price_change_percent:.2f}%",
                             "inline": True
                         },
                         {
                             "name": "RSI",
-                            "value": f"{current_rsi:.2f}",
+                            "value":
+                            f"{current_rsi:.2f}",
                             "inline": True
                         },
                         {
                             "name": "50 MA",
-                            "value": f"{ma50:.2f}",
+                            "value":
+                            f"{ma50:.2f}",
                             "inline": True
                         },
                         {
                             "name": "200 MA",
-                            "value": f"{ma200:.2f}",
+                            "value":
+                            f"{ma200:.2f}",
                             "inline": True
                         },
                         {
                             "name": "Signal Strength",
-                            "value": f"{score}%",
+                            "value":
+                            f"{score}%",
                             "inline": True
                         },
                         {
@@ -182,27 +278,44 @@ while True:
                         },
                         {
                             "name": "Time",
-                            "value": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "value":
+                            datetime.now().strftime(
+                                "%Y-%m-%d %H:%M"
+                            ),
                             "inline": False
                         }
                     ]
                 )
 
                 last_signals[ticker] = decision
+
                 last_alert_times[ticker] = current_time
 
             else:
-                print(f"No individual alert for {ticker}.")
+
+                print(
+                    f"No individual alert for "
+                    f"{ticker}."
+                )
 
         except Exception as e:
-            print(f"Error scanning {ticker}: {e}")
+
+            print(
+                f"Error scanning {ticker}: {e}"
+            )
+
+    # MARKET SUMMARY
 
     summary_fields = []
 
     for label, items in summary.items():
+
         if items:
+
             value = "\n".join(items)
+
         else:
+
             value = "None"
 
         summary_fields.append(
@@ -216,7 +329,10 @@ while True:
     summary_fields.append(
         {
             "name": "Time",
-            "value": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "value":
+            datetime.now().strftime(
+                "%Y-%m-%d %H:%M"
+            ),
             "inline": False
         }
     )
@@ -228,4 +344,5 @@ while True:
     )
 
     print("Scan complete. Waiting...")
+
     time.sleep(SCAN_INTERVAL)
