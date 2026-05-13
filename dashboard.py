@@ -1350,6 +1350,30 @@ with settings_tab:
     st.write("Old Trade Webhook Fallback:", "Connected" if TRADE_WEBHOOK_URL else "Not connected")
     st.write("Old News Webhook Fallback:", "Connected" if NEWS_WEBHOOK_URL else "Not connected")
 
+    st.subheader("Test News Webhooks")
+
+    if st.button("Test Crypto News Webhook"):
+        sent = send_discord_alert(
+            CRYPTO_NEWS_WEBHOOK_URL,
+            "📰 TEST CRYPTO NEWS ALERT"
+        )
+
+        if sent:
+            st.success("Crypto news test sent.")
+        else:
+            st.error("Crypto news test failed.")
+
+    if st.button("Test Stock News Webhook"):
+        sent = send_discord_alert(
+            STOCK_NEWS_WEBHOOK_URL,
+            "📰 TEST STOCK NEWS ALERT"
+        )
+
+        if sent:
+            st.success("Stock news test sent.")
+        else:
+            st.error("Stock news test failed.")
+
     st.info(
         "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
         "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
