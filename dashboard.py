@@ -1,13 +1,33 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
 import os
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
-from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
+
+import pandas as pd
 import plotly.graph_objects as go
 import requests
+import streamlit as st
+import yfinance as yf
+from streamlit_autorefresh import st_autorefresh
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# ======================================================
+# PAGE SETUP
+# ======================================================
+
+st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
+st.title("AI Trading Dashboard")
+
+st_autorefresh(interval=60000, key="market_refresh")
+
+# ======================================================
+# FILE PATHS
+# ======================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -16,12 +36,77 @@ TRADE_HISTORY_FILE = os.path.join(BASE_DIR, "trade_history.csv")
 BALANCE_FILE = os.path.join(BASE_DIR, "balance.txt")
 EQUITY_FILE = os.path.join(BASE_DIR, "equity_history.csv")
 
+# ======================================================
+# SETTINGS
+# ======================================================
+
+STARTING_BALANCE = 10000
+STOP_LOSS_PERCENT = 5
+TAKE_PROFIT_PERCENT = 10
+
+# Add or remove tickers here
+CRYPTO_TICKERS = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
+    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD"
+]
+
+STOCK_TICKERS = [
+    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD",
+    "PLTR", "SPY", "QQQ"
+]
+
+ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
+
+# Discord webhook URLs should be added to your environment variables.
+# Recommended Discord channels:
+# CRYPTO_TRADE_WEBHOOK_URL = crypto buy/sell and AI signal alerts
+# STOCK_TRADE_WEBHOOK_URL = stock buy/sell and AI signal alerts
+# CRYPTO_NEWS_WEBHOOK_URL = crypto news alerts
+# STOCK_NEWS_WEBHOOK_URL = stock news alerts
+# CRYPTO_SUMMARY_WEBHOOK_URL = crypto daily AI market summary
+# STOCK_SUMMARY_WEBHOOK_URL = stock daily AI market summary
+# SUMMARY_WEBHOOK_URL = optional fallback daily AI market summary
+CRYPTO_TRADE_WEBHOOK_URL = os.getenv(
+    "CRYPTO_TRADE_WEBHOOK_URL",
+    os.getenv("CRYPTO_WEBHOOK_URL", "")
+)
+STOCK_TRADE_WEBHOOK_URL = os.getenv(
+    "STOCK_TRADE_WEBHOOK_URL",
+    os.getenv("STOCK_WEBHOOK_URL", "")
+)
+CRYPTO_NEWS_WEBHOOK_URL = os.getenv("CRYPTO_NEWS_WEBHOOK_URL", "")
+STOCK_NEWS_WEBHOOK_URL = os.getenv("STOCK_NEWS_WEBHOOK_URL", "")
+CRYPTO_SUMMARY_WEBHOOK_URL = os.getenv("CRYPTO_SUMMARY_WEBHOOK_URL", "")
+STOCK_SUMMARY_WEBHOOK_URL = os.getenv("STOCK_SUMMARY_WEBHOOK_URL", "")
+SUMMARY_WEBHOOK_URL = os.getenv("SUMMARY_WEBHOOK_URL", "")
+
+# Optional fallback for older setups.
+# TRADE_WEBHOOK_URL keeps older trade alerts working.
+# NEWS_WEBHOOK_URL keeps older news alerts working.
+TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL", "")
+NEWS_WEBHOOK_URL = os.getenv("NEWS_WEBHOOK_URL", "")
+
+BULLISH_WORDS = [
+    "beat", "growth", "upgrade", "surge", "profit", "strong", "bullish",
+    "record", "rally", "partnership", "approval", "launch"
+]
+
+BEARISH_WORDS = [
+    "miss", "downgrade", "fall", "drop", "loss", "weak", "bearish",
+    "lawsuit", "investigation", "recall", "cut", "decline"
+]
+
+# ======================================================
+# DATA FUNCTIONS
+# ======================================================
 
 @st.cache_data(ttl=60)
 def get_price_data(ticker, period="6mo"):
     try:
         data = yf.Ticker(ticker).history(period=period)
-        return data
+        if data is None or data.empty:
+            return pd.DataFrame()
+        return data.dropna()
     except Exception:
         return pd.DataFrame()
 
@@ -29,1435 +114,1241 @@ def get_price_data(ticker, period="6mo"):
 @st.cache_data(ttl=300)
 def get_news(ticker):
     try:
-        return yf.Ticker(ticker).news
+        news = yf.Ticker(ticker).news
+        if news is None:
+            return []
+        return news
     except Exception:
         return []
 
 
-st.title("AI Trading Dashboard")
+def send_discord_alert(webhook_url, message):
+    if not webhook_url:
+        return False
 
-st_autorefresh(
-    interval=60000,
-    key="market_refresh"
-)
-
-current_time = datetime.now()
-market_hour = current_time.hour
-
-if 6 <= market_hour < 13:
-    market_status = "OPEN"
-else:
-    market_status = "CLOSED"
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Current Time", current_time.strftime("%Y-%m-%d %H:%M:%S"))
-col2.metric("Market Status", market_status)
-
-btc_data = get_price_data("BTC-USD", "2d")
-eth_data = get_price_data("ETH-USD", "2d")
-
-if not btc_data.empty and not eth_data.empty:
-    btc_price = btc_data["Close"].iloc[-1]
-    eth_price = eth_data["Close"].iloc[-1]
-    btc_dominance = (btc_price / (btc_price + eth_price)) * 100
-    col3.metric("BTC Dominance", f"{btc_dominance:.2f}%")
-else:
-    col3.metric("BTC Dominance", "N/A")
-
-starting_balance = 10000
-
-STOP_LOSS_PERCENT = 5
-TAKE_PROFIT_PERCENT = 10
-
-TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL")
-NEWS_WEBHOOK_URL = os.getenv("NEWS_WEBHOOK_URL")
-SUMMARY_WEBHOOK_URL = os.getenv("SUMMARY_WEBHOOK_URL")
-
-BULLISH_WORDS = ["beat", "growth", "upgrade", "surge", "profit", "strong", "bullish", "record"]
-BEARISH_WORDS = ["miss", "downgrade", "fall", "drop", "loss", "weak", "bearish", "lawsuit"]
-
-if os.path.exists(BALANCE_FILE):
-    with open(BALANCE_FILE, "r") as file:
-        st.session_state.balance = float(file.read())
-else:
-    st.session_state.balance = starting_balance
-
-try:
-    if os.path.exists(EQUITY_FILE) and os.path.getsize(EQUITY_FILE) > 0:
-        equity_load = pd.read_csv(EQUITY_FILE)
-        st.session_state.equity_history = equity_load["Equity"].tolist()
-    else:
-        st.session_state.equity_history = []
-except pd.errors.EmptyDataError:
-    st.session_state.equity_history = []
-
-try:
-    if os.path.exists(PORTFOLIO_FILE) and os.path.getsize(PORTFOLIO_FILE) > 0:
-        portfolio_df_load = pd.read_csv(PORTFOLIO_FILE)
-        st.session_state.portfolio = portfolio_df_load.to_dict("records")
-    else:
-        st.session_state.portfolio = []
-except pd.errors.EmptyDataError:
-    st.session_state.portfolio = []
-
-try:
-    if os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(TRADE_HISTORY_FILE) > 0:
-        trade_history_load = pd.read_csv(TRADE_HISTORY_FILE)
-        st.session_state.trade_history = trade_history_load.to_dict("records")
-    else:
-        st.session_state.trade_history = []
-except pd.errors.EmptyDataError:
-    st.session_state.trade_history = []
-
-st.subheader("Paper Trading Account")
-
-portfolio_value = 0
-
-for position in st.session_state.portfolio:
-    current_data = get_price_data(position["Ticker"], "1d")
-
-    if current_data.empty:
-        continue
-
-    current_price = current_data["Close"].iloc[-1]
-    portfolio_value += position["Shares"] * current_price
-
-total_equity = st.session_state.balance + portfolio_value
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Account Balance", f"${st.session_state.balance:.2f}")
-col2.metric("Open Positions", len(st.session_state.portfolio))
-col3.metric("Total Equity", f"${total_equity:.2f}")
-
-if st.button("Reset Paper Account"):
-    st.session_state.balance = starting_balance
-    st.session_state.portfolio = []
-    st.session_state.trade_history = []
-    st.session_state.equity_history = []
-
-    pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-    pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
-
-    with open(BALANCE_FILE, "w") as file:
-        file.write(str(st.session_state.balance))
-
-    st.success("Paper account reset!")
-    st.rerun()
-
-if (
-    len(st.session_state.equity_history) == 0
-    or st.session_state.equity_history[-1] != total_equity
-):
-    st.session_state.equity_history.append(total_equity)
-
-equity_df = pd.DataFrame({"Equity": st.session_state.equity_history})
-equity_df.to_csv(EQUITY_FILE, index=False)
-
-st.subheader("Portfolio Performance Over Time")
-st.line_chart(equity_df)
-
-if len(equity_df) > 1:
-    starting_equity = equity_df["Equity"].iloc[0]
-    current_equity = equity_df["Equity"].iloc[-1]
-
-    total_return = ((current_equity - starting_equity) / starting_equity) * 100
-
-    rolling_high = equity_df["Equity"].cummax()
-    drawdown = ((equity_df["Equity"] - rolling_high) / rolling_high) * 100
-    max_drawdown = drawdown.min()
-
-    col1, col2 = st.columns(2)
-
-    col1.metric("Total Return", f"{total_return:.2f}%")
-    col2.metric("Max Drawdown", f"{max_drawdown:.2f}%")
-
-if st.session_state.portfolio:
-    st.subheader("Portfolio Holdings")
-
-    portfolio_df = pd.DataFrame(st.session_state.portfolio)
-
-    current_values = []
-    profits = []
-    profit_percents = []
-
-    for index, row in portfolio_df.iterrows():
-        ticker = row["Ticker"]
-        shares = row["Shares"]
-        buy_price = row["Buy Price"]
-
-        current_data = get_price_data(ticker, "1d")
-
-        if current_data.empty:
-            current_values.append(0)
-            profits.append(0)
-            profit_percents.append(0)
-            continue
-
-        current_price = current_data["Close"].iloc[-1]
-
-        current_value = shares * current_price
-        cost_basis = shares * buy_price
-
-        profit = current_value - cost_basis
-        profit_percent = (profit / cost_basis) * 100
-
-        current_values.append(current_value)
-        profits.append(profit)
-        profit_percents.append(profit_percent)
-
-    portfolio_df["Current Value"] = current_values
-    portfolio_df["Profit/Loss $"] = profits
-    portfolio_df["Profit/Loss %"] = profit_percents
-
-    st.dataframe(portfolio_df, use_container_width=True)
-
-    total_unrealized = portfolio_df["Profit/Loss $"].sum()
-    st.metric("Unrealized Portfolio P/L", f"${total_unrealized:.2f}")
-
-    total_risk = 0
-
-    for index, row in portfolio_df.iterrows():
-        entry_price = row["Buy Price"]
-        stop_loss = row["Stop Loss"]
-        shares = row["Shares"]
-
-        risk_per_position = (entry_price - stop_loss) * shares
-        total_risk += risk_per_position
-
-    st.metric("Open Risk Exposure", f"${total_risk:.2f}")
-
-    allocation_df = portfolio_df.groupby("Ticker")["Current Value"].sum().reset_index()
-
-    allocation_df["Allocation %"] = (
-        allocation_df["Current Value"] / allocation_df["Current Value"].sum()
-    ) * 100
-
-    fig_allocation = go.Figure(
-        data=[
-            go.Pie(
-                labels=allocation_df["Ticker"],
-                values=allocation_df["Current Value"],
-                hole=0.4
-            )
-        ]
-    )
-
-    fig_allocation.update_layout(title="Portfolio Allocation")
-    st.plotly_chart(fig_allocation, use_container_width=True)
-
-    st.subheader("Portfolio Allocation Heatmap")
-
-    allocation_heatmap = go.Figure(
-        data=go.Heatmap(
-            z=[allocation_df["Current Value"]],
-            x=allocation_df["Ticker"],
-            y=["Allocation Value"],
-            text=[allocation_df["Current Value"].round(2)],
-            texttemplate="$%{text}",
-            colorscale="Blues"
-        )
-    )
-
-    allocation_heatmap.update_layout(
-        xaxis_title="Ticker",
-        yaxis_title="Portfolio"
-    )
-
-    st.plotly_chart(allocation_heatmap, use_container_width=True)
-
-    st.subheader("Portfolio Allocation Breakdown")
-
-    st.dataframe(
-        allocation_df[["Ticker", "Current Value", "Allocation %"]],
-        use_container_width=True
-    )
-
-    max_allocation = allocation_df["Allocation %"].max()
-    largest_position = allocation_df.loc[allocation_df["Allocation %"].idxmax()]
-
-    if max_allocation > 50:
-        st.warning(
-            f"⚠️ High concentration risk: "
-            f"{largest_position['Ticker']} is "
-            f"{max_allocation:.2f}% of your portfolio."
-        )
-
-    positions_to_sell = []
-
-    for index, row in portfolio_df.iterrows():
-        if row["Shares"] == 0:
-            continue
-
-        current_price = row["Current Value"] / row["Shares"]
-
-        stop_loss = row["Stop Loss"]
-        take_profit = row["Take Profit"]
-
-        if current_price <= stop_loss:
-            st.error(f"🚨 {row['Ticker']} hit STOP LOSS level")
-            positions_to_sell.append((index, row, current_price, "STOP LOSS"))
-
-        elif current_price >= take_profit:
-            st.success(f"🎯 {row['Ticker']} hit TAKE PROFIT level")
-            positions_to_sell.append((index, row, current_price, "TAKE PROFIT"))
-
-        else:
-            st.info(f"✅ {row['Ticker']} still within trade range")
-
-    for position_data in positions_to_sell:
-        index, row, sell_price, reason = position_data
-
-        proceeds = row["Shares"] * sell_price
-        st.session_state.balance += proceeds
-
-        with open(BALANCE_FILE, "w") as file:
-            file.write(str(st.session_state.balance))
-
-        buy_price = row["Buy Price"]
-        profit = proceeds - (row["Shares"] * buy_price)
-        profit_percent = (profit / (row["Shares"] * buy_price)) * 100
-
-        st.session_state.trade_history.append({
-            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Action": f"AUTO SELL ({reason})",
-            "Ticker": row["Ticker"],
-            "Shares": row["Shares"],
-            "Buy Price": buy_price,
-            "Sell Price": sell_price,
-            "Profit/Loss $": profit,
-            "Profit/Loss %": profit_percent
-        })
-
-        if TRADE_WEBHOOK_URL:
-            requests.post(
-                TRADE_WEBHOOK_URL,
-                json={
-                    "content":
-                    f"🚨 AUTO SELL EXECUTED\n"
-                    f"Ticker: {row['Ticker']}\n"
-                    f"Reason: {reason}\n"
-                    f"Sell Price: ${sell_price:.2f}\n"
-                    f"Profit/Loss: ${profit:.2f}"
-                }
-            )
-        else:
-            st.warning("Trade webhook not found. Skipping Discord alert.")
-
-    for position_data in reversed(positions_to_sell):
-        index = position_data[0]
-        st.session_state.portfolio.pop(index)
-
-    pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-    pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
-
-    for index, row in portfolio_df.iterrows():
-        if st.button(
-            f"Sell {row['Ticker']} #{index}",
-            key=f"sell_{row['Ticker']}_{index}_{row['Buy Price']}_{row['Shares']}"
-        ):
-            current_data = get_price_data(row["Ticker"], "1d")
-
-            if current_data.empty:
-                st.error("Could not get current price.")
-                st.stop()
-
-            sell_price = current_data["Close"].iloc[-1]
-            proceeds = row["Shares"] * sell_price
-
-            st.session_state.balance += proceeds
-
-            with open(BALANCE_FILE, "w") as file:
-                file.write(str(st.session_state.balance))
-
-            buy_price = row["Buy Price"]
-            profit = proceeds - (row["Shares"] * buy_price)
-            profit_percent = (profit / (row["Shares"] * buy_price)) * 100
-
-            st.session_state.trade_history.append({
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Action": "SELL",
-                "Ticker": row["Ticker"],
-                "Shares": row["Shares"],
-                "Buy Price": buy_price,
-                "Sell Price": sell_price,
-                "Profit/Loss $": profit,
-                "Profit/Loss %": profit_percent
-            })
-
-            st.session_state.portfolio.pop(index)
-
-            pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-            pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
-
-            st.success(f"Sold {row['Ticker']}")
-            st.rerun()
-
-    if st.button("Sell All Positions"):
-        portfolio_copy = portfolio_df.copy()
-
-        for index, row in portfolio_copy.iterrows():
-            current_data = get_price_data(row["Ticker"], "1d")
-
-            if current_data.empty:
-                continue
-
-            sell_price = current_data["Close"].iloc[-1]
-            proceeds = row["Shares"] * sell_price
-
-            st.session_state.balance += proceeds
-
-            buy_price = row["Buy Price"]
-            profit = proceeds - (row["Shares"] * buy_price)
-            profit_percent = (profit / (row["Shares"] * buy_price)) * 100
-
-            st.session_state.trade_history.append({
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Action": "BULK SELL",
-                "Ticker": row["Ticker"],
-                "Shares": row["Shares"],
-                "Buy Price": buy_price,
-                "Sell Price": sell_price,
-                "Profit/Loss $": profit,
-                "Profit/Loss %": profit_percent
-            })
-
-        st.session_state.portfolio = []
-
-        pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
-        pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-
-        with open(BALANCE_FILE, "w") as file:
-            file.write(str(st.session_state.balance))
-
-        st.success("All positions sold successfully.")
-        st.rerun()
-
-trade_history_df = pd.DataFrame(st.session_state.trade_history)
-
-if st.session_state.trade_history:
-    st.subheader("Trade History")
-    st.dataframe(trade_history_df, use_container_width=True)
-
-if "Action" in trade_history_df.columns:
-    sell_trades = trade_history_df[
-        trade_history_df["Action"].astype(str).str.contains("SELL")
-    ]
-else:
-    sell_trades = pd.DataFrame()
-
-if not sell_trades.empty:
-    total_sells = len(sell_trades)
-    winning_trades = sell_trades[sell_trades["Profit/Loss $"] > 0]
-    win_rate = (len(winning_trades) / total_sells) * 100
-    total_profit = sell_trades["Profit/Loss $"].sum()
-    average_profit = sell_trades["Profit/Loss $"].mean()
-
-    st.subheader("Performance Stats")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Closed Trades", total_sells)
-    col2.metric("Win Rate", f"{win_rate:.2f}%")
-    col3.metric("Total P/L", f"${total_profit:.2f}")
-    col4.metric("Average P/L", f"${average_profit:.2f}")
-
-    trade_chart_df = sell_trades.copy()
-    trade_chart_df["Trade #"] = range(1, len(trade_chart_df) + 1)
-
-    st.subheader("Trade Win/Loss Chart")
-
-    st.bar_chart(
-        trade_chart_df,
-        x="Trade #",
-        y="Profit/Loss $"
-    )
-
-    best_trade = sell_trades.loc[sell_trades["Profit/Loss $"].idxmax()]
-    worst_trade = sell_trades.loc[sell_trades["Profit/Loss $"].idxmin()]
-
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "Best Trade",
-        f"{best_trade['Ticker']} | ${best_trade['Profit/Loss $']:.2f}"
-    )
-
-    col2.metric(
-        "Worst Trade",
-        f"{worst_trade['Ticker']} | ${worst_trade['Profit/Loss $']:.2f}"
-    )
-
-crypto_tickers = [
-    "ETH-USD",
-    "BTC-USD",
-    "AVAX-USD",
-    "VET-USD",
-    "XRP-USD",
-    "ADA-USD",
-    "HBAR-USD",
-    "ICP-USD",
-    "ATOM-USD",
-    "ALGO-USD",
-    "XTZ-USD",
-    "ETC-USD",
-    "XLM-USD"
-]
-
-stock_tickers = [
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "TSLA",
-    "AMZN",
-    "GOOGL",
-    "META",
-    "AMD",
-    "PLTR",
-    "SPY",
-    "QQQ"
-]
-
-tickers = crypto_tickers + stock_tickers
-
-watchlist_results = []
-
-for ticker in tickers:
     try:
-        data = get_price_data(ticker, "6mo")
-
-        if data.empty:
-            continue
-
-        current_price = data["Close"].iloc[-1]
-        previous_price = data["Close"].iloc[-2]
-
-        price_change_percent = ((current_price - previous_price) / previous_price) * 100
-
-        rsi = RSIIndicator(close=data["Close"]).rsi().iloc[-1]
-
-        macd_indicator = MACD(close=data["Close"])
-        macd = macd_indicator.macd().iloc[-1]
-        macd_signal = macd_indicator.macd_signal().iloc[-1]
-
-        data["MA50"] = data["Close"].rolling(window=50).mean()
-        data["MA200"] = data["Close"].rolling(window=200).mean()
-
-        ma50 = data["MA50"].iloc[-1]
-        ma200 = data["MA200"].iloc[-1]
-
-        score = 0
-
-        if current_price > ma50:
-            score += 30
-
-        if ma50 > ma200:
-            score += 30
-
-        if rsi < 70:
-            score += 20
-
-        if rsi > 40:
-            score += 20
-
-        if macd > macd_signal:
-            score += 20
-
-        news_score = 0
-
-        try:
-            news_items = get_news(ticker)[:1]
-
-            for article in news_items:
-                content = article.get("content", {})
-                headline = content.get("title", "No Title")
-                article_link = content.get("canonicalUrl", {}).get("url", "")
-
-                news_key = f"{ticker}_{headline}"
-
-                if "sent_news" not in st.session_state:
-                    st.session_state.sent_news = []
-
-                if news_key not in st.session_state.sent_news:
-                    if NEWS_WEBHOOK_URL:
-                        requests.post(
-                            NEWS_WEBHOOK_URL,
-                            json={
-                                "content":
-                                f"📰 MARKET NEWS ALERT\n"
-                                f"Ticker: {ticker}\n"
-                                f"Headline: {headline}\n"
-                                f"Link: {article_link}"
-                            }
-                        )
-
-                        st.session_state.sent_news.append(news_key)
-
-                title = headline.lower()
-
-                for word in BULLISH_WORDS:
-                    if word in title:
-                        news_score += 5
-
-                for word in BEARISH_WORDS:
-                    if word in title:
-                        news_score -= 5
-
-        except Exception:
-            news_score = 0
-
-        final_score = score + news_score
-        confidence_percent = (final_score / 120) * 100
-        confidence_percent = max(0, min(confidence_percent, 100))
-
-        if confidence_percent >= 80:
-            confidence_label = "HIGH"
-        elif confidence_percent >= 60:
-            confidence_label = "MEDIUM"
-        else:
-            confidence_label = "LOW"
-
-        if final_score >= 90:
-            signal = "STRONG BUY"
-        elif final_score >= 75:
-            signal = "BUY"
-        elif final_score >= 50:
-            signal = "HOLD"
-        else:
-            signal = "SELL"
-
-        watchlist_results.append({
-            "Ticker": ticker,
-            "Market": "Crypto" if "-USD" in ticker else "Stock",
-            "Price": round(current_price, 2),
-            "RSI": round(rsi, 2),
-            "MACD": round(macd, 2),
-            "MACD Signal": round(macd_signal, 2),
-            "Technical Score": score,
-            "News Score": news_score,
-            "Final Score": final_score,
-            "AI Confidence %": round(confidence_percent, 2),
-            "Confidence Level": confidence_label,
-            "AI Signal": signal
-        })
-
+        response = requests.post(webhook_url, json={"content": message}, timeout=10)
+        return response.status_code in [200, 204]
     except Exception:
-        continue
+        return False
 
-watchlist_df = pd.DataFrame(watchlist_results)
 
-if not watchlist_df.empty:
-    watchlist_df = watchlist_df.sort_values(
-        by="AI Confidence %",
-        ascending=False
-    )
+def load_balance():
+    if os.path.exists(BALANCE_FILE):
+        try:
+            with open(BALANCE_FILE, "r") as file:
+                return float(file.read())
+        except Exception:
+            return STARTING_BALANCE
+    return STARTING_BALANCE
 
-    crypto_watchlist_df = watchlist_df[
-        watchlist_df["Market"] == "Crypto"
-    ]
 
-    stock_watchlist_df = watchlist_df[
-        watchlist_df["Market"] == "Stock"
-    ]
+def save_balance(balance):
+    with open(BALANCE_FILE, "w") as file:
+        file.write(str(balance))
 
-else:
-    crypto_watchlist_df = pd.DataFrame()
-    stock_watchlist_df = pd.DataFrame()
 
-if not watchlist_df.empty:
-    top_pick = watchlist_df.iloc[0]
+def load_csv_records(file_path):
+    try:
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            return pd.read_csv(file_path).to_dict("records")
+    except Exception:
+        pass
+    return []
 
-    st.subheader("Top AI Pick")
 
-    col1, col2, col3 = st.columns(3)
+def save_records(file_path, records):
+    pd.DataFrame(records).to_csv(file_path, index=False)
 
-    col1.metric("Ticker", top_pick["Ticker"])
-    col2.metric("AI Confidence", f"{top_pick['AI Confidence %']:.2f}%")
-    col3.metric("Signal", top_pick["AI Signal"])
 
-    average_confidence = watchlist_df["AI Confidence %"].mean()
+def load_equity_history():
+    try:
+        if os.path.exists(EQUITY_FILE) and os.path.getsize(EQUITY_FILE) > 0:
+            equity_df = pd.read_csv(EQUITY_FILE)
+            if "Equity" in equity_df.columns:
+                return equity_df["Equity"].dropna().tolist()
+    except Exception:
+        pass
+    return []
 
-    if average_confidence >= 75:
-        market_sentiment = "BULLISH"
-    elif average_confidence >= 55:
-        market_sentiment = "NEUTRAL"
-    else:
-        market_sentiment = "BEARISH"
 
-    st.subheader("AI Market Sentiment")
+def save_equity_history(equity_history):
+    pd.DataFrame({"Equity": equity_history}).to_csv(EQUITY_FILE, index=False)
 
-    st.metric("Market Mood", market_sentiment)
-    st.metric("Average AI Confidence", f"{average_confidence:.2f}%")
-    st.progress(average_confidence / 100)
 
-bulk_buy_amount = st.number_input(
-    "Dollar amount per AI pick",
-    min_value=1.00,
-    value=100.00,
-    step=10.00
-)
+def get_asset_type(ticker):
+    return "Crypto" if ticker.endswith("-USD") else "Stock"
 
-if not watchlist_df.empty:
-    top_bulk_picks = watchlist_df.head(3)
-else:
-    top_bulk_picks = pd.DataFrame()
 
-if st.button("Bulk Buy Top 3 AI Picks"):
-    if top_bulk_picks.empty:
-        st.error("No AI picks available.")
-    else:
-        for _, row in top_bulk_picks.iterrows():
-            ticker = row["Ticker"]
-            current_price = row["Price"]
+def get_trade_webhook(ticker):
+    if get_asset_type(ticker) == "Crypto":
+        return CRYPTO_TRADE_WEBHOOK_URL or TRADE_WEBHOOK_URL
+    return STOCK_TRADE_WEBHOOK_URL or TRADE_WEBHOOK_URL
 
-            shares = bulk_buy_amount / current_price
-            cost = shares * current_price
 
-            if st.session_state.balance >= cost:
-                st.session_state.balance -= cost
+def get_news_webhook(ticker):
+    if get_asset_type(ticker) == "Crypto":
+        return CRYPTO_NEWS_WEBHOOK_URL or NEWS_WEBHOOK_URL
+    return STOCK_NEWS_WEBHOOK_URL or NEWS_WEBHOOK_URL
 
-                st.session_state.portfolio.append({
-                    "Ticker": ticker,
-                    "Shares": shares,
-                    "Buy Price": current_price,
-                    "Stop Loss": current_price * (1 - STOP_LOSS_PERCENT / 100),
-                    "Take Profit": current_price * (1 + TAKE_PROFIT_PERCENT / 100)
-                })
 
-                st.session_state.trade_history.append({
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Action": "BULK BUY",
-                    "Ticker": ticker,
-                    "Shares": shares,
-                    "Buy Price": current_price,
-                    "Sell Price": None,
-                    "Profit/Loss $": None,
-                    "Profit/Loss %": None
-                })
+def get_summary_webhook(market):
+    if market == "Crypto":
+        return CRYPTO_SUMMARY_WEBHOOK_URL or SUMMARY_WEBHOOK_URL
+    if market == "Stock":
+        return STOCK_SUMMARY_WEBHOOK_URL or SUMMARY_WEBHOOK_URL
+    return SUMMARY_WEBHOOK_URL
 
-        pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-        pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
 
-        with open(BALANCE_FILE, "w") as file:
-            file.write(str(st.session_state.balance))
+def build_market_summary(watchlist_df, market):
+    market_df = watchlist_df[watchlist_df["Market"] == market].copy()
 
-        st.success("Bulk buy completed!")
-        st.rerun()
+    if market_df.empty:
+        return ""
 
-st.subheader("Crypto AI Watchlist")
+    top_bullish = market_df.head(3)
+    top_bearish = market_df.tail(3)
 
-st.dataframe(
-    crypto_watchlist_df,
-    use_container_width=True
-)
-
-st.subheader("Stock AI Watchlist")
-
-st.dataframe(
-    stock_watchlist_df,
-    use_container_width=True
-)
-
-signal_filter = st.selectbox(
-    "Filter AI Signals",
-    ["ALL", "STRONG BUY", "BUY", "HOLD", "SELL"]
-)
-
-filtered_watchlist = watchlist_df.copy()
-
-ticker_search = st.text_input("Search Ticker")
-
-if not filtered_watchlist.empty:
-    if ticker_search:
-        filtered_watchlist = filtered_watchlist[
-            filtered_watchlist["Ticker"].str.contains(ticker_search.upper())
-        ]
-
-    if signal_filter != "ALL":
-        filtered_watchlist = filtered_watchlist[
-            filtered_watchlist["AI Signal"] == signal_filter
-        ]
-
-filtered_buy_amount = st.number_input(
-    "Dollar amount per filtered ticker",
-    min_value=1.00,
-    value=50.00,
-    step=10.00
-)
-
-if st.button("Bulk Buy Filtered Watchlist"):
-    if filtered_watchlist.empty:
-        st.error("No filtered tickers available.")
-    else:
-        for _, row in filtered_watchlist.iterrows():
-            ticker = row["Ticker"]
-            current_price = row["Price"]
-
-            shares = filtered_buy_amount / current_price
-            cost = shares * current_price
-
-            if st.session_state.balance >= cost:
-                st.session_state.balance -= cost
-
-                st.session_state.portfolio.append({
-                    "Ticker": ticker,
-                    "Shares": shares,
-                    "Buy Price": current_price,
-                    "Stop Loss": current_price * (1 - STOP_LOSS_PERCENT / 100),
-                    "Take Profit": current_price * (1 + TAKE_PROFIT_PERCENT / 100)
-                })
-
-                st.session_state.trade_history.append({
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Action": "BULK BUY FILTERED",
-                    "Ticker": ticker,
-                    "Shares": shares,
-                    "Buy Price": current_price,
-                    "Sell Price": None,
-                    "Profit/Loss $": None,
-                    "Profit/Loss %": None
-                })
-
-        pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-        pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
-
-        with open(BALANCE_FILE, "w") as file:
-            file.write(str(st.session_state.balance))
-
-        st.success("Filtered bulk buy completed!")
-        st.rerun()
-
-st.dataframe(filtered_watchlist, use_container_width=True)
-
-if not watchlist_df.empty:
-    st.subheader("AI Watchlist Heatmap")
-
-    heatmap_fig = go.Figure(
-        data=go.Heatmap(
-            z=[watchlist_df["AI Confidence %"]],
-            x=watchlist_df["Ticker"],
-            y=["AI Confidence"],
-            text=[watchlist_df["AI Signal"]],
-            texttemplate="%{text}",
-            colorscale="RdYlGn"
-        )
-    )
-
-    heatmap_fig.update_layout(
-        xaxis_title="Ticker",
-        yaxis_title="Metric"
-    )
-
-    st.plotly_chart(heatmap_fig, use_container_width=True)
-
-watchlist_csv = filtered_watchlist.to_csv(index=False)
-
-st.download_button(
-    label="Download Watchlist CSV",
-    data=watchlist_csv,
-    file_name="ai_watchlist.csv",
-    mime="text/csv"
-)
-
-if not watchlist_df.empty:
-    top_bullish = watchlist_df.head(3)
-    top_bearish = watchlist_df.tail(3)
-
-    summary_message = "📊 AI DAILY MARKET SUMMARY\n\n"
-    summary_message += "🔥 TOP BULLISH\n"
+    summary_message = f"AI DAILY {market.upper()} MARKET SUMMARY\n\n"
+    summary_message += "TOP BULLISH\n"
 
     for _, row in top_bullish.iterrows():
         summary_message += (
-            f"{row['Ticker']} | "
-            f"Score: {row['Final Score']} | "
-            f"Signal: {row['AI Signal']}\n"
+            f"{row['Ticker']} | Score: {row['Final Score']} | "
+            f"Signal: {row['AI Signal']} | Confidence: {row['AI Confidence %']}%\n"
         )
 
-    summary_message += "\n📉 TOP BEARISH\n"
+    summary_message += "\nTOP BEARISH\n"
 
     for _, row in top_bearish.iterrows():
         summary_message += (
-            f"{row['Ticker']} | "
-            f"Score: {row['Final Score']} | "
-            f"Signal: {row['AI Signal']}\n"
+            f"{row['Ticker']} | Score: {row['Final Score']} | "
+            f"Signal: {row['AI Signal']} | Confidence: {row['AI Confidence %']}%\n"
         )
 
-    if st.button("Send Daily Market Summary"):
-        if SUMMARY_WEBHOOK_URL:
-            requests.post(
-                SUMMARY_WEBHOOK_URL,
-                json={"content": summary_message}
-            )
+    return summary_message
 
-            st.success("Daily market summary sent to Discord!")
-        else:
-            st.warning("Summary webhook not found. Skipping Discord summary.")
 
-selected_tickers = st.multiselect(
-    "Choose tickers",
-    tickers,
-    default=[
-        "BTC-USD",
-        "ETH-USD",
-        "AAPL",
-        "NVDA",
-        "SPY"
-    ]
-)
+def get_article_url(article):
+    content = article.get("content", {})
+    canonical_url = content.get("canonicalUrl", {})
 
-for selected_ticker in selected_tickers:
-    data = get_price_data(selected_ticker, "6mo")
+    if isinstance(canonical_url, dict):
+        return canonical_url.get("url", "")
 
-    if data.empty:
-        continue
+    if isinstance(article.get("link"), str):
+        return article.get("link", "")
 
-    current_price = data["Close"].iloc[-1]
+    return ""
 
-    rsi = RSIIndicator(close=data["Close"]).rsi().iloc[-1]
 
-    macd_indicator = MACD(close=data["Close"])
-    macd = macd_indicator.macd().iloc[-1]
-    macd_signal = macd_indicator.macd_signal().iloc[-1]
+def calculate_indicators(data):
+    data = data.copy()
 
-    data["MA50"] = data["Close"].rolling(window=50).mean()
-    data["MA200"] = data["Close"].rolling(window=200).mean()
+    if len(data) < 50:
+        return data
 
-    ma50 = data["MA50"].iloc[-1]
-    ma200 = data["MA200"].iloc[-1]
+    close = data["Close"]
 
-    score = 0
+    data["RSI"] = RSIIndicator(close=close, window=14).rsi()
 
-    if current_price > ma50:
-        score += 30
+    macd_indicator = MACD(close=close)
+    data["MACD"] = macd_indicator.macd()
+    data["MACD Signal"] = macd_indicator.macd_signal()
 
-    if ma50 > ma200:
-        score += 30
+    data["MA50"] = close.rolling(window=50).mean()
+    data["MA200"] = close.rolling(window=200).mean()
 
-    if rsi < 70:
-        score += 20
+    return data
 
-    if rsi > 40:
-        score += 20
 
-    if macd > macd_signal:
-        score += 20
+def score_ticker(ticker):
+    data = get_price_data(ticker, "6mo")
 
-    st.divider()
-    st.subheader(selected_ticker)
+    if data.empty or len(data) < 50:
+        return None
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    data = calculate_indicators(data)
+    latest = data.iloc[-1]
 
-    col1.metric("Price", f"${current_price:.2f}")
-    col2.metric("RSI", f"{rsi:.2f}")
-    col3.metric("MACD", f"{macd:.2f}")
-    col4.metric("Signal", f"{macd_signal:.2f}")
-    col5.metric("Score", f"{score}/120")
+    current_price = float(latest["Close"])
+    previous_price = float(data["Close"].iloc[-2])
+    price_change_percent = ((current_price - previous_price) / previous_price) * 100
 
-    st.progress(score / 120)
+    rsi = float(latest.get("RSI", 0))
+    macd = float(latest.get("MACD", 0))
+    macd_signal = float(latest.get("MACD Signal", 0))
+    ma50 = latest.get("MA50", 0)
+    ma200 = latest.get("MA200", 0)
 
-    if score >= 90:
-        st.success("AI Decision: STRONG BUY")
-    elif score >= 70:
-        st.info("AI Decision: WATCH / DECENT SETUP")
-    elif rsi > 70:
-        st.error("AI Decision: SELL / OVERBOUGHT")
+    technical_score = 0
+
+    if pd.notna(ma50) and current_price > ma50:
+        technical_score += 30
+
+    if pd.notna(ma50) and pd.notna(ma200) and ma50 > ma200:
+        technical_score += 30
+
+    if pd.notna(rsi) and rsi < 70:
+        technical_score += 20
+
+    if pd.notna(rsi) and rsi > 40:
+        technical_score += 20
+
+    if pd.notna(macd) and pd.notna(macd_signal) and macd > macd_signal:
+        technical_score += 20
+
+    news_score = get_news_score(ticker)
+    final_score = technical_score + news_score
+
+    confidence_percent = (final_score / 120) * 100
+    confidence_percent = max(0, min(confidence_percent, 100))
+
+    if confidence_percent >= 80:
+        confidence_level = "HIGH"
+    elif confidence_percent >= 60:
+        confidence_level = "MEDIUM"
     else:
-        st.warning("AI Decision: WAIT")
+        confidence_level = "LOW"
 
-    if st.button(f"Buy {selected_ticker}", key=f"buy_{selected_ticker}"):
-        shares = 0.01
-        cost = current_price * shares
+    if final_score >= 90:
+        ai_signal = "STRONG BUY"
+    elif final_score >= 75:
+        ai_signal = "BUY"
+    elif final_score >= 50:
+        ai_signal = "HOLD"
+    else:
+        ai_signal = "SELL"
 
-        if st.session_state.balance >= cost:
-            st.session_state.balance -= cost
+    return {
+        "Ticker": ticker,
+        "Market": get_asset_type(ticker),
+        "Price": round(current_price, 2),
+        "Daily Change %": round(price_change_percent, 2),
+        "RSI": round(rsi, 2),
+        "MACD": round(macd, 2),
+        "MACD Signal": round(macd_signal, 2),
+        "Technical Score": technical_score,
+        "News Score": news_score,
+        "Final Score": final_score,
+        "AI Confidence %": round(confidence_percent, 2),
+        "Confidence Level": confidence_level,
+        "AI Signal": ai_signal
+    }
 
-            with open(BALANCE_FILE, "w") as file:
-                file.write(str(st.session_state.balance))
 
-            st.session_state.portfolio.append({
-                "Ticker": selected_ticker,
-                "Shares": shares,
-                "Buy Price": current_price,
-                "Stop Loss": current_price * (1 - STOP_LOSS_PERCENT / 100),
-                "Take Profit": current_price * (1 + TAKE_PROFIT_PERCENT / 100)
-            })
+def get_news_score(ticker):
+    news_score = 0
 
-            st.session_state.trade_history.append({
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Action": "BUY",
-                "Ticker": selected_ticker,
-                "Shares": shares,
-                "Buy Price": current_price,
-                "Sell Price": None,
-                "Profit/Loss $": None,
-                "Profit/Loss %": None
-            })
+    try:
+        news_items = get_news(ticker)[:3]
 
-            pd.DataFrame(st.session_state.portfolio).to_csv(PORTFOLIO_FILE, index=False)
-            pd.DataFrame(st.session_state.trade_history).to_csv(TRADE_HISTORY_FILE, index=False)
+        for article in news_items:
+            content = article.get("content", {})
+            headline = content.get("title", "") or article.get("title", "")
+            title = headline.lower()
+            article_url = get_article_url(article)
 
-            st.success(f"Bought {shares} shares of {selected_ticker}")
-            st.rerun()
-        else:
-            st.error("Not enough balance")
+            for word in BULLISH_WORDS:
+                if word in title:
+                    news_score += 5
+
+            for word in BEARISH_WORDS:
+                if word in title:
+                    news_score -= 5
+
+            if headline:
+                news_key = f"{ticker}_{headline}_{datetime.now().strftime('%Y-%m-%d')}"
+
+                if (
+                    "sent_news" in st.session_state
+                    and news_key not in st.session_state.sent_news
+                ):
+                    webhook_url = get_news_webhook(ticker)
+
+                    if webhook_url:
+                        market = get_asset_type(ticker)
+                        message = (
+                            f"NEWS ALERT\n"
+                            f"Market: {market}\n"
+                            f"Ticker: {ticker}\n"
+                            f"Headline: {headline}"
+                        )
+
+                        if article_url:
+                            message += f"\nLink: {article_url}"
+
+                        sent = send_discord_alert(webhook_url, message)
+
+                        if sent:
+                            st.session_state.sent_news.append(news_key)
+
+    except Exception:
+        news_score = 0
+
+    return news_score
+
+
+def build_watchlist(tickers):
+    results = []
+
+    for ticker in tickers:
+        result = score_ticker(ticker)
+        if result is not None:
+            results.append(result)
+
+    if not results:
+        return pd.DataFrame()
+
+    watchlist_df = pd.DataFrame(results)
+    return watchlist_df.sort_values(by="AI Confidence %", ascending=False)
+
+
+def create_ai_summary(row):
+    return (
+        f"{row['Ticker']} is a {row['Market']} currently priced around ${row['Price']}. "
+        f"The AI signal is {row['AI Signal']} with {row['AI Confidence %']}% confidence. "
+        f"RSI is {row['RSI']}, MACD is {row['MACD']}, and the final score is {row['Final Score']}."
+    )
+
+
+def create_price_chart(ticker, data):
+    chart_data = calculate_indicators(data)
 
     fig = go.Figure()
 
     fig.add_trace(
         go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
+            x=chart_data.index,
+            open=chart_data["Open"],
+            high=chart_data["High"],
+            low=chart_data["Low"],
+            close=chart_data["Close"],
             name="Candles"
         )
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["MA50"],
-            line=dict(width=2),
-            name="50 MA"
+    if "MA50" in chart_data.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=chart_data.index,
+                y=chart_data["MA50"],
+                line=dict(width=2),
+                name="50 MA"
+            )
         )
-    )
 
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["MA200"],
-            line=dict(width=2),
-            name="200 MA"
+    if "MA200" in chart_data.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=chart_data.index,
+                y=chart_data["MA200"],
+                line=dict(width=2),
+                name="200 MA"
+            )
         )
-    )
 
     fig.update_layout(
-        title=f"{selected_ticker} Chart",
+        title=f"{ticker} Price Chart",
         xaxis_title="Date",
         yaxis_title="Price",
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        height=500
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
-st.subheader("Strategy Backtesting")
 
-backtest_ticker = st.selectbox(
-    "Choose ticker for backtest",
-    tickers
-)
+def buy_position(ticker, dollar_amount, action="BUY"):
+    data = get_price_data(ticker, "1d")
 
-backtest_strategy = st.selectbox(
-    "Choose backtest strategy",
-    [
-        "RSI Strategy",
-        "MACD Strategy",
-        "Moving Average Strategy"
-    ]
-)
+    if data.empty:
+        st.error("Could not get current price.")
+        return
 
-if st.button("Run Backtest"):
-    backtest_data = get_price_data(backtest_ticker, "1y")
+    current_price = float(data["Close"].iloc[-1])
+    shares = dollar_amount / current_price
+    cost = shares * current_price
 
-    if backtest_data.empty:
-        st.error("No backtest data available.")
-        st.stop()
+    if st.session_state.balance < cost:
+        st.error("Not enough balance.")
+        return
 
-    backtest_data["RSI"] = RSIIndicator(
-        close=backtest_data["Close"]
-    ).rsi()
+    st.session_state.balance -= cost
+    save_balance(st.session_state.balance)
 
-    macd_indicator = MACD(
-        close=backtest_data["Close"]
+    st.session_state.portfolio.append({
+        "Ticker": ticker,
+        "Shares": shares,
+        "Buy Price": current_price,
+        "Stop Loss": current_price * (1 - STOP_LOSS_PERCENT / 100),
+        "Take Profit": current_price * (1 + TAKE_PROFIT_PERCENT / 100)
+    })
+
+    st.session_state.trade_history.append({
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Action": action,
+        "Ticker": ticker,
+        "Shares": shares,
+        "Buy Price": current_price,
+        "Sell Price": None,
+        "Profit/Loss $": None,
+        "Profit/Loss %": None
+    })
+
+    save_records(PORTFOLIO_FILE, st.session_state.portfolio)
+    save_records(TRADE_HISTORY_FILE, st.session_state.trade_history)
+
+    send_discord_alert(
+        get_trade_webhook(ticker),
+        f"🟢 PAPER BUY\nTicker: {ticker}\nAmount: ${cost:.2f}\nPrice: ${current_price:.2f}\nShares: {shares:.6f}"
     )
 
-    backtest_data["MACD"] = macd_indicator.macd()
-    backtest_data["MACD Signal"] = macd_indicator.macd_signal()
+    st.success(f"Bought ${cost:.2f} of {ticker}.")
+    st.rerun()
 
-    backtest_data["MA50"] = backtest_data["Close"].rolling(window=50).mean()
-    backtest_data["MA200"] = backtest_data["Close"].rolling(window=200).mean()
 
-    balance = 10000
-    shares = 0
-    trade_log = []
+def sell_position(index, row, reason="SELL"):
+    data = get_price_data(row["Ticker"], "1d")
 
-    for index, row in backtest_data.iterrows():
-        current_price = row["Close"]
+    if data.empty:
+        st.error("Could not get current price.")
+        return
 
-        rsi_value = row["RSI"]
-        macd = row["MACD"]
-        macd_signal = row["MACD Signal"]
-        ma50 = row["MA50"]
-        ma200 = row["MA200"]
+    sell_price = float(data["Close"].iloc[-1])
+    shares = float(row["Shares"])
+    buy_price = float(row["Buy Price"])
+    proceeds = shares * sell_price
 
-        if (
-            backtest_strategy == "RSI Strategy"
-            and rsi_value < 35
-            and balance > 0
-        ):
-            shares = balance / current_price
-            balance = 0
+    st.session_state.balance += proceeds
+    save_balance(st.session_state.balance)
 
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "BUY",
-                "Price": current_price,
-                "Portfolio Value": balance + (shares * current_price)
-            })
+    profit = proceeds - (shares * buy_price)
+    profit_percent = (profit / (shares * buy_price)) * 100
 
-        elif (
-            backtest_strategy == "RSI Strategy"
-            and rsi_value > 70
-            and shares > 0
-        ):
-            balance = shares * current_price
-            shares = 0
+    st.session_state.trade_history.append({
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Action": reason,
+        "Ticker": row["Ticker"],
+        "Shares": shares,
+        "Buy Price": buy_price,
+        "Sell Price": sell_price,
+        "Profit/Loss $": profit,
+        "Profit/Loss %": profit_percent
+    })
 
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "SELL",
-                "Price": current_price,
-                "Portfolio Value": balance
-            })
+    st.session_state.portfolio.pop(index)
 
-        elif (
-            backtest_strategy == "MACD Strategy"
-            and macd > macd_signal
-            and balance > 0
-        ):
-            shares = balance / current_price
-            balance = 0
+    save_records(PORTFOLIO_FILE, st.session_state.portfolio)
+    save_records(TRADE_HISTORY_FILE, st.session_state.trade_history)
 
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "BUY",
-                "Price": current_price,
-                "Portfolio Value": balance + (shares * current_price)
-            })
-
-        elif (
-            backtest_strategy == "MACD Strategy"
-            and macd < macd_signal
-            and shares > 0
-        ):
-            balance = shares * current_price
-            shares = 0
-
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "SELL",
-                "Price": current_price,
-                "Portfolio Value": balance
-            })
-
-        if (
-            backtest_strategy == "Moving Average Strategy"
-            and ma50 > ma200
-            and balance > 0
-        ):
-            shares = balance / current_price
-            balance = 0
-
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "BUY",
-                "Price": current_price,
-                "Portfolio Value": balance + (shares * current_price)
-            })
-
-        elif (
-            backtest_strategy == "Moving Average Strategy"
-            and ma50 < ma200
-            and shares > 0
-        ):
-            balance = shares * current_price
-            shares = 0
-
-            trade_log.append({
-                "Date": index.strftime("%Y-%m-%d"),
-                "Action": "SELL",
-                "Price": current_price,
-                "Portfolio Value": balance
-            })
-
-    final_value = balance
-
-    if shares > 0:
-        final_value += shares * backtest_data["Close"].iloc[-1]
-
-    sell_prices = []
-    buy_prices = []
-
-    for trade in trade_log:
-        if trade["Action"] == "BUY":
-            buy_prices.append(trade["Price"])
-        elif trade["Action"] == "SELL":
-            sell_prices.append(trade["Price"])
-
-    completed_trades = min(len(buy_prices), len(sell_prices))
-
-    wins = 0
-    losses = 0
-
-    for i in range(completed_trades):
-        if sell_prices[i] > buy_prices[i]:
-            wins += 1
-        else:
-            losses += 1
-
-    if completed_trades > 0:
-        backtest_win_rate = (wins / completed_trades) * 100
-    else:
-        backtest_win_rate = 0
-
-    trade_results = []
-
-    for i in range(completed_trades):
-        trade_result = ((sell_prices[i] - buy_prices[i]) / buy_prices[i]) * 100
-        trade_results.append(trade_result)
-
-    winning_results = [
-        result for result in trade_results
-        if result > 0
-    ]
-
-    losing_results = [
-        result for result in trade_results
-        if result <= 0
-    ]
-
-    if winning_results:
-        average_win = sum(winning_results) / len(winning_results)
-    else:
-        average_win = 0
-
-    if losing_results:
-        average_loss = sum(losing_results) / len(losing_results)
-    else:
-        average_loss = 0
-
-    total_return = ((final_value - 10000) / 10000) * 100
-
-    st.success(
-        f"Backtest Complete | Final Portfolio Value: "
-        f"${final_value:.2f}"
+    send_discord_alert(
+        get_trade_webhook(row["Ticker"]),
+        f"🔴 PAPER SELL\nTicker: {row['Ticker']}\nReason: {reason}\nSell Price: ${sell_price:.2f}\nProfit/Loss: ${profit:.2f}"
     )
 
-    st.metric("Backtest Return", f"{total_return:.2f}%")
+    st.success(f"Sold {row['Ticker']}.")
+    st.rerun()
 
-    st.subheader("Backtest Stats")
+# ======================================================
+# SESSION STATE
+# ======================================================
 
-    col1, col2, col3, col4 = st.columns(4)
+if "balance" not in st.session_state:
+    st.session_state.balance = load_balance()
 
-    col1.metric("Completed Trades", completed_trades)
-    col2.metric("Wins", wins)
-    col3.metric("Losses", losses)
-    col4.metric("Win Rate", f"{backtest_win_rate:.2f}%")
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_csv_records(PORTFOLIO_FILE)
 
-    col5, col6 = st.columns(2)
+if "trade_history" not in st.session_state:
+    st.session_state.trade_history = load_csv_records(TRADE_HISTORY_FILE)
 
-    col5.metric("Average Win", f"{average_win:.2f}%")
-    col6.metric("Average Loss", f"{average_loss:.2f}%")
+if "equity_history" not in st.session_state:
+    st.session_state.equity_history = load_equity_history()
 
-    trade_log_df = pd.DataFrame(trade_log)
+if "sent_news" not in st.session_state:
+    st.session_state.sent_news = []
 
-    if not trade_log_df.empty:
-        buy_trades = trade_log_df[trade_log_df["Action"] == "BUY"]
-        sell_trades_chart = trade_log_df[trade_log_df["Action"] == "SELL"]
+if "sent_signal_alerts" not in st.session_state:
+    st.session_state.sent_signal_alerts = []
 
-        st.dataframe(trade_log_df, use_container_width=True)
+# ======================================================
+# TOP METRICS
+# ======================================================
 
-        st.subheader("Backtest Equity Curve")
+current_time = datetime.now()
+market_hour = current_time.hour
+market_status = "OPEN" if 6 <= market_hour < 13 else "CLOSED"
 
-        st.line_chart(
-            trade_log_df,
-            x="Date",
-            y="Portfolio Value"
-        )
+btc_data = get_price_data("BTC-USD", "2d")
+eth_data = get_price_data("ETH-USD", "2d")
 
-        st.subheader("Backtest Trade Signals")
+if not btc_data.empty and not eth_data.empty:
+    btc_price = float(btc_data["Close"].iloc[-1])
+    eth_price = float(eth_data["Close"].iloc[-1])
+    btc_dominance = (btc_price / (btc_price + eth_price)) * 100
+    btc_dominance_text = f"{btc_dominance:.2f}%"
+else:
+    btc_dominance_text = "N/A"
 
-        signal_fig = go.Figure()
+portfolio_value = 0
 
-        signal_fig.add_trace(
-            go.Scatter(
-                x=backtest_data.index,
-                y=backtest_data["Close"],
-                mode="lines",
-                name="Price"
-            )
-        )
+for position in st.session_state.portfolio:
+    current_data = get_price_data(position["Ticker"], "1d")
+    if current_data.empty:
+        continue
+    current_price = float(current_data["Close"].iloc[-1])
+    portfolio_value += float(position["Shares"]) * current_price
 
-        signal_fig.add_trace(
-            go.Scatter(
-                x=buy_trades["Date"],
-                y=buy_trades["Price"],
-                mode="markers",
-                name="BUY",
-                marker=dict(
-                    size=10,
-                    symbol="triangle-up"
+total_equity = st.session_state.balance + portfolio_value
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Current Time", current_time.strftime("%Y-%m-%d %H:%M:%S"))
+col2.metric("Stock Market", market_status)
+col3.metric("BTC/ETH Dominance", btc_dominance_text)
+col4.metric("Total Equity", f"${total_equity:.2f}")
+
+# Save equity history
+if not st.session_state.equity_history or st.session_state.equity_history[-1] != total_equity:
+    st.session_state.equity_history.append(total_equity)
+    save_equity_history(st.session_state.equity_history)
+
+# ======================================================
+# TABS
+# ======================================================
+
+account_tab, crypto_tab, stock_tab, scanner_tab, backtest_tab, settings_tab = st.tabs([
+    "Paper Account",
+    "Crypto",
+    "Stocks",
+    "AI Scanner",
+    "Backtesting",
+    "Settings"
+])
+
+# ======================================================
+# PAPER ACCOUNT TAB
+# ======================================================
+
+with account_tab:
+    st.header("Paper Trading Account")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Account Balance", f"${st.session_state.balance:.2f}")
+    col2.metric("Open Positions", len(st.session_state.portfolio))
+    col3.metric("Portfolio Value", f"${portfolio_value:.2f}")
+
+    if st.button("Reset Paper Account"):
+        st.session_state.balance = STARTING_BALANCE
+        st.session_state.portfolio = []
+        st.session_state.trade_history = []
+        st.session_state.equity_history = []
+
+        save_balance(st.session_state.balance)
+        save_records(PORTFOLIO_FILE, st.session_state.portfolio)
+        save_records(TRADE_HISTORY_FILE, st.session_state.trade_history)
+        save_equity_history(st.session_state.equity_history)
+
+        st.success("Paper account reset.")
+        st.rerun()
+
+    st.subheader("Portfolio Performance Over Time")
+    equity_df = pd.DataFrame({"Equity": st.session_state.equity_history})
+
+    if not equity_df.empty:
+        st.line_chart(equity_df)
+
+        if len(equity_df) > 1:
+            starting_equity = equity_df["Equity"].iloc[0]
+            current_equity = equity_df["Equity"].iloc[-1]
+            total_return = ((current_equity - starting_equity) / starting_equity) * 100
+            rolling_high = equity_df["Equity"].cummax()
+            drawdown = ((equity_df["Equity"] - rolling_high) / rolling_high) * 100
+            max_drawdown = drawdown.min()
+
+            col1, col2 = st.columns(2)
+            col1.metric("Total Return", f"{total_return:.2f}%")
+            col2.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+
+    if st.session_state.portfolio:
+        st.subheader("Portfolio Holdings")
+
+        portfolio_df = pd.DataFrame(st.session_state.portfolio)
+        current_values = []
+        profits = []
+        profit_percents = []
+
+        for _, row in portfolio_df.iterrows():
+            ticker = row["Ticker"]
+            shares = float(row["Shares"])
+            buy_price = float(row["Buy Price"])
+            current_data = get_price_data(ticker, "1d")
+
+            if current_data.empty:
+                current_values.append(0)
+                profits.append(0)
+                profit_percents.append(0)
+                continue
+
+            current_price = float(current_data["Close"].iloc[-1])
+            current_value = shares * current_price
+            cost_basis = shares * buy_price
+            profit = current_value - cost_basis
+            profit_percent = (profit / cost_basis) * 100
+
+            current_values.append(current_value)
+            profits.append(profit)
+            profit_percents.append(profit_percent)
+
+        portfolio_df["Current Value"] = current_values
+        portfolio_df["Profit/Loss $"] = profits
+        portfolio_df["Profit/Loss %"] = profit_percents
+
+        st.dataframe(portfolio_df, use_container_width=True)
+
+        total_unrealized = portfolio_df["Profit/Loss $"].sum()
+        st.metric("Unrealized Portfolio P/L", f"${total_unrealized:.2f}")
+
+        allocation_df = portfolio_df.groupby("Ticker")["Current Value"].sum().reset_index()
+        allocation_df["Allocation %"] = (
+            allocation_df["Current Value"] / allocation_df["Current Value"].sum()
+        ) * 100
+
+        fig_allocation = go.Figure(
+            data=[
+                go.Pie(
+                    labels=allocation_df["Ticker"],
+                    values=allocation_df["Current Value"],
+                    hole=0.4
                 )
+            ]
+        )
+        fig_allocation.update_layout(title="Portfolio Allocation")
+        st.plotly_chart(fig_allocation, use_container_width=True)
+
+        largest_position = allocation_df.loc[allocation_df["Allocation %"].idxmax()]
+        if largest_position["Allocation %"] > 50:
+            st.warning(
+                f"High concentration risk: {largest_position['Ticker']} is "
+                f"{largest_position['Allocation %']:.2f}% of your portfolio."
             )
-        )
 
-        signal_fig.add_trace(
-            go.Scatter(
-                x=sell_trades_chart["Date"],
-                y=sell_trades_chart["Price"],
-                mode="markers",
-                name="SELL",
-                marker=dict(
-                    size=10,
-                    symbol="triangle-down"
-                )
-            )
-        )
+        st.subheader("Sell Positions")
 
-        st.plotly_chart(signal_fig, use_container_width=True)
+        for index, row in portfolio_df.iterrows():
+            current_price = row["Current Value"] / row["Shares"] if row["Shares"] else 0
+            stop_loss = row["Stop Loss"]
+            take_profit = row["Take Profit"]
 
-    st.subheader("Strategy Comparison")
+            if current_price <= stop_loss:
+                st.error(f"{row['Ticker']} hit STOP LOSS level.")
+            elif current_price >= take_profit:
+                st.success(f"{row['Ticker']} hit TAKE PROFIT level.")
+            else:
+                st.info(f"{row['Ticker']} is still within trade range.")
 
-    comparison_results = []
-
-    strategies = [
-        "RSI Strategy",
-        "MACD Strategy",
-        "Moving Average Strategy"
-    ]
-
-    for strategy in strategies:
-        test_data = get_price_data(backtest_ticker, "1y")
-
-        if test_data.empty:
-            continue
-
-        test_data["RSI"] = RSIIndicator(
-            close=test_data["Close"]
-        ).rsi()
-
-        macd_test = MACD(
-            close=test_data["Close"]
-        )
-
-        test_data["MACD"] = macd_test.macd()
-        test_data["MACD Signal"] = macd_test.macd_signal()
-
-        test_data["MA50"] = test_data["Close"].rolling(window=50).mean()
-        test_data["MA200"] = test_data["Close"].rolling(window=200).mean()
-
-        test_balance = 10000
-        test_shares = 0
-        test_buys = []
-        test_sells = []
-
-        for i, row in test_data.iterrows():
-            price = row["Close"]
-            rsi_test = row["RSI"]
-            macd_value = row["MACD"]
-            macd_signal_value = row["MACD Signal"]
-            ma50_value = row["MA50"]
-            ma200_value = row["MA200"]
-
-            if (
-                strategy == "RSI Strategy"
-                and rsi_test < 35
-                and test_balance > 0
+            if st.button(
+                f"Sell {row['Ticker']} #{index}",
+                key=f"sell_{row['Ticker']}_{index}_{row['Buy Price']}_{row['Shares']}"
             ):
-                test_shares = test_balance / price
-                test_balance = 0
-                test_buys.append(price)
+                sell_position(index, row, "SELL")
 
-            elif (
-                strategy == "RSI Strategy"
-                and rsi_test > 70
-                and test_shares > 0
-            ):
-                test_balance = test_shares * price
-                test_shares = 0
-                test_sells.append(price)
+        if st.button("Sell All Positions"):
+            portfolio_copy = portfolio_df.copy()
+            sold_count = 0
+            unsold_positions = []
 
-            elif (
-                strategy == "MACD Strategy"
-                and macd_value > macd_signal_value
-                and test_balance > 0
-            ):
-                test_shares = test_balance / price
-                test_balance = 0
-                test_buys.append(price)
+            for index, row in reversed(list(portfolio_copy.iterrows())):
+                data = get_price_data(row["Ticker"], "1d")
 
-            elif (
-                strategy == "MACD Strategy"
-                and macd_value < macd_signal_value
-                and test_shares > 0
-            ):
-                test_balance = test_shares * price
-                test_shares = 0
-                test_sells.append(price)
+                if data.empty:
+                    unsold_positions.append({
+                        "Ticker": row["Ticker"],
+                        "Shares": float(row["Shares"]),
+                        "Buy Price": float(row["Buy Price"]),
+                        "Stop Loss": float(row["Stop Loss"]),
+                        "Take Profit": float(row["Take Profit"])
+                    })
+                    continue
 
-            if (
-                strategy == "Moving Average Strategy"
-                and ma50_value > ma200_value
-                and test_balance > 0
-            ):
-                test_shares = test_balance / price
-                test_balance = 0
-                test_buys.append(price)
+                sell_price = float(data["Close"].iloc[-1])
+                shares = float(row["Shares"])
+                buy_price = float(row["Buy Price"])
+                proceeds = shares * sell_price
+                profit = proceeds - (shares * buy_price)
+                profit_percent = (profit / (shares * buy_price)) * 100
 
-            elif (
-                strategy == "Moving Average Strategy"
-                and ma50_value < ma200_value
-                and test_shares > 0
-            ):
-                test_balance = test_shares * price
-                test_shares = 0
-                test_sells.append(price)
+                st.session_state.balance += proceeds
+                sold_count += 1
 
-        test_final_value = test_balance
+                st.session_state.trade_history.append({
+                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Action": "BULK SELL",
+                    "Ticker": row["Ticker"],
+                    "Shares": shares,
+                    "Buy Price": buy_price,
+                    "Sell Price": sell_price,
+                    "Profit/Loss $": profit,
+                    "Profit/Loss %": profit_percent
+                })
 
-        if test_shares > 0:
-            test_final_value += test_shares * test_data["Close"].iloc[-1]
+            if sold_count > 0:
+                st.session_state.portfolio = unsold_positions
+                save_balance(st.session_state.balance)
+                save_records(PORTFOLIO_FILE, st.session_state.portfolio)
+                save_records(TRADE_HISTORY_FILE, st.session_state.trade_history)
 
-        test_return = ((test_final_value - 10000) / 10000) * 100
+                if unsold_positions:
+                    st.warning(
+                        f"Sold {sold_count} position(s), but kept "
+                        f"{len(unsold_positions)} position(s) because price data could not be loaded."
+                    )
+                else:
+                    st.success(f"Sold {sold_count} position(s).")
 
-        completed = min(len(test_buys), len(test_sells))
+                st.rerun()
+            else:
+                st.error("Could not sell any positions because prices could not be loaded.")
 
-        wins = 0
+    trade_history_df = pd.DataFrame(st.session_state.trade_history)
 
-        for x in range(completed):
-            if test_sells[x] > test_buys[x]:
-                wins += 1
+    if not trade_history_df.empty:
+        st.subheader("Trade History")
+        st.dataframe(trade_history_df, use_container_width=True)
 
-        if completed > 0:
-            win_rate = (wins / completed) * 100
+        if "Action" in trade_history_df.columns:
+            sell_trades = trade_history_df[
+                trade_history_df["Action"].astype(str).str.contains("SELL", na=False)
+            ]
         else:
-            win_rate = 0
+            sell_trades = pd.DataFrame()
 
-        comparison_results.append({
-            "Strategy": strategy,
-            "Final Value": round(test_final_value, 2),
-            "Return %": round(test_return, 2),
-            "Completed Trades": completed,
-            "Win Rate %": round(win_rate, 2)
-        })
+        if not sell_trades.empty and "Profit/Loss $" in sell_trades.columns:
+            sell_trades = sell_trades.dropna(subset=["Profit/Loss $"])
 
-    comparison_df = pd.DataFrame(comparison_results)
+            if not sell_trades.empty:
+                total_sells = len(sell_trades)
+                winning_trades = sell_trades[sell_trades["Profit/Loss $"] > 0]
+                win_rate = (len(winning_trades) / total_sells) * 100
+                total_profit = sell_trades["Profit/Loss $"].sum()
+                average_profit = sell_trades["Profit/Loss $"].mean()
 
-    if not comparison_df.empty:
-        comparison_df = comparison_df.sort_values(
-            by="Return %",
-            ascending=False
+                st.subheader("Performance Stats")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Closed Trades", total_sells)
+                col2.metric("Win Rate", f"{win_rate:.2f}%")
+                col3.metric("Total P/L", f"${total_profit:.2f}")
+                col4.metric("Average P/L", f"${average_profit:.2f}")
+
+# ======================================================
+# CRYPTO TAB
+# ======================================================
+
+with crypto_tab:
+    st.header("Crypto Dashboard")
+
+    crypto_watchlist_df = build_watchlist(CRYPTO_TICKERS)
+
+    if crypto_watchlist_df.empty:
+        st.warning("No crypto data available.")
+    else:
+        top_crypto = crypto_watchlist_df.iloc[0]
+        st.subheader("Top Crypto AI Pick")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Ticker", top_crypto["Ticker"])
+        col2.metric("AI Confidence", f"{top_crypto['AI Confidence %']:.2f}%")
+        col3.metric("Signal", top_crypto["AI Signal"])
+
+        st.write(create_ai_summary(top_crypto))
+        st.dataframe(crypto_watchlist_df, use_container_width=True)
+
+        selected_crypto = st.selectbox("Choose crypto", CRYPTO_TICKERS, key="selected_crypto")
+        crypto_data = get_price_data(selected_crypto, "6mo")
+
+        if not crypto_data.empty:
+            st.plotly_chart(create_price_chart(selected_crypto, crypto_data), use_container_width=True)
+
+            dollar_amount = st.number_input(
+                "Dollar amount to buy",
+                min_value=1.00,
+                value=50.00,
+                step=10.00,
+                key="crypto_buy_amount"
+            )
+
+            if st.button(f"Buy {selected_crypto}", key="buy_crypto"):
+                buy_position(selected_crypto, dollar_amount, "BUY")
+
+# ======================================================
+# STOCK TAB
+# ======================================================
+
+with stock_tab:
+    st.header("Stock Dashboard")
+
+    stock_watchlist_df = build_watchlist(STOCK_TICKERS)
+
+    if stock_watchlist_df.empty:
+        st.warning("No stock data available.")
+    else:
+        top_stock = stock_watchlist_df.iloc[0]
+        st.subheader("Top Stock AI Pick")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Ticker", top_stock["Ticker"])
+        col2.metric("AI Confidence", f"{top_stock['AI Confidence %']:.2f}%")
+        col3.metric("Signal", top_stock["AI Signal"])
+
+        st.write(create_ai_summary(top_stock))
+        st.dataframe(stock_watchlist_df, use_container_width=True)
+
+        selected_stock = st.selectbox("Choose stock", STOCK_TICKERS, key="selected_stock")
+        stock_data = get_price_data(selected_stock, "6mo")
+
+        if not stock_data.empty:
+            st.plotly_chart(create_price_chart(selected_stock, stock_data), use_container_width=True)
+
+            dollar_amount = st.number_input(
+                "Dollar amount to buy",
+                min_value=1.00,
+                value=100.00,
+                step=10.00,
+                key="stock_buy_amount"
+            )
+
+            if st.button(f"Buy {selected_stock}", key="buy_stock"):
+                buy_position(selected_stock, dollar_amount, "BUY")
+
+# ======================================================
+# AI SCANNER TAB
+# ======================================================
+
+with scanner_tab:
+    st.header("AI Scanner")
+
+    watchlist_df = build_watchlist(ALL_TICKERS)
+
+    if watchlist_df.empty:
+        st.warning("No scanner data available.")
+    else:
+        top_pick = watchlist_df.iloc[0]
+        average_confidence = watchlist_df["AI Confidence %"].mean()
+
+        if average_confidence >= 75:
+            market_sentiment = "BULLISH"
+        elif average_confidence >= 55:
+            market_sentiment = "NEUTRAL"
+        else:
+            market_sentiment = "BEARISH"
+
+        st.subheader("Top AI Pick")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Ticker", top_pick["Ticker"])
+        col2.metric("AI Confidence", f"{top_pick['AI Confidence %']:.2f}%")
+        col3.metric("Signal", top_pick["AI Signal"])
+
+        st.subheader("AI Market Sentiment")
+        col1, col2 = st.columns(2)
+        col1.metric("Market Mood", market_sentiment)
+        col2.metric("Average AI Confidence", f"{average_confidence:.2f}%")
+        st.progress(average_confidence / 100)
+
+        scanner_tab1, scanner_tab2, scanner_tab3 = st.tabs([
+            "Crypto Scanner",
+            "Stock Scanner",
+            "Filtered Scanner"
+        ])
+
+        with scanner_tab1:
+            st.dataframe(
+                watchlist_df[watchlist_df["Market"] == "Crypto"],
+                use_container_width=True
+            )
+
+        with scanner_tab2:
+            st.dataframe(
+                watchlist_df[watchlist_df["Market"] == "Stock"],
+                use_container_width=True
+            )
+
+        with scanner_tab3:
+            signal_filter = st.selectbox(
+                "Filter AI Signals",
+                ["ALL", "STRONG BUY", "BUY", "HOLD", "SELL"]
+            )
+
+            market_filter = st.selectbox(
+                "Filter Market",
+                ["ALL", "Crypto", "Stock"]
+            )
+
+            ticker_search = st.text_input("Search Ticker")
+
+            filtered_watchlist = watchlist_df.copy()
+
+            if signal_filter != "ALL":
+                filtered_watchlist = filtered_watchlist[
+                    filtered_watchlist["AI Signal"] == signal_filter
+                ]
+
+            if market_filter != "ALL":
+                filtered_watchlist = filtered_watchlist[
+                    filtered_watchlist["Market"] == market_filter
+                ]
+
+            if ticker_search:
+                filtered_watchlist = filtered_watchlist[
+                    filtered_watchlist["Ticker"].str.contains(ticker_search.upper(), na=False)
+                ]
+
+            st.dataframe(filtered_watchlist, use_container_width=True)
+
+            filtered_buy_amount = st.number_input(
+                "Dollar amount per filtered ticker",
+                min_value=1.00,
+                value=50.00,
+                step=10.00,
+                key="filtered_buy_amount"
+            )
+
+            if st.button("Bulk Buy Filtered Watchlist"):
+                if filtered_watchlist.empty:
+                    st.error("No filtered tickers available.")
+                else:
+                    bought_count = 0
+
+                    for _, row in filtered_watchlist.iterrows():
+                        ticker = row["Ticker"]
+                        current_price = float(row["Price"])
+                        shares = filtered_buy_amount / current_price
+                        cost = shares * current_price
+
+                        if st.session_state.balance >= cost:
+                            st.session_state.balance -= cost
+                            bought_count += 1
+
+                            st.session_state.portfolio.append({
+                                "Ticker": ticker,
+                                "Shares": shares,
+                                "Buy Price": current_price,
+                                "Stop Loss": current_price * (1 - STOP_LOSS_PERCENT / 100),
+                                "Take Profit": current_price * (1 + TAKE_PROFIT_PERCENT / 100)
+                            })
+
+                            st.session_state.trade_history.append({
+                                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "Action": "BULK BUY FILTERED",
+                                "Ticker": ticker,
+                                "Shares": shares,
+                                "Buy Price": current_price,
+                                "Sell Price": None,
+                                "Profit/Loss $": None,
+                                "Profit/Loss %": None
+                            })
+
+                            send_discord_alert(
+                                get_trade_webhook(ticker),
+                                f"🟢 BULK PAPER BUY\nTicker: {ticker}\nAmount: ${cost:.2f}\nPrice: ${current_price:.2f}\nShares: {shares:.6f}"
+                            )
+
+                    save_balance(st.session_state.balance)
+                    save_records(PORTFOLIO_FILE, st.session_state.portfolio)
+                    save_records(TRADE_HISTORY_FILE, st.session_state.trade_history)
+
+                    if bought_count > 0:
+                        st.success(f"Bulk buy completed for {bought_count} ticker(s).")
+                        st.rerun()
+                    else:
+                        st.error("Not enough balance to buy any filtered tickers.")
+
+        st.subheader("AI Watchlist Heatmap")
+        heatmap_fig = go.Figure(
+            data=go.Heatmap(
+                z=[watchlist_df["AI Confidence %"]],
+                x=watchlist_df["Ticker"],
+                y=["AI Confidence"],
+                text=[watchlist_df["AI Signal"]],
+                texttemplate="%{text}",
+                colorscale="RdYlGn"
+            )
         )
+        heatmap_fig.update_layout(xaxis_title="Ticker", yaxis_title="Metric")
+        st.plotly_chart(heatmap_fig, use_container_width=True)
 
-        st.dataframe(comparison_df, use_container_width=True)
-
-        csv = comparison_df.to_csv(index=False)
-
+        csv = watchlist_df.to_csv(index=False)
         st.download_button(
-            label="Download Strategy Comparison CSV",
+            label="Download Watchlist CSV",
             data=csv,
-            file_name="strategy_comparison.csv",
+            file_name="ai_watchlist.csv",
             mime="text/csv"
         )
+
+        crypto_summary_message = build_market_summary(watchlist_df, "Crypto")
+        stock_summary_message = build_market_summary(watchlist_df, "Stock")
+
+        if st.button("Send Crypto Daily Summary"):
+            if not crypto_summary_message:
+                st.warning("No crypto summary available.")
+            else:
+                sent = send_discord_alert(
+                    get_summary_webhook("Crypto"),
+                    crypto_summary_message
+                )
+                if sent:
+                    st.success("Crypto daily summary sent to Discord.")
+                else:
+                    st.warning("Crypto summary webhook not found or failed.")
+
+        if st.button("Send Stock Daily Summary"):
+            if not stock_summary_message:
+                st.warning("No stock summary available.")
+            else:
+                sent = send_discord_alert(
+                    get_summary_webhook("Stock"),
+                    stock_summary_message
+                )
+                if sent:
+                    st.success("Stock daily summary sent to Discord.")
+                else:
+                    st.warning("Stock summary webhook not found or failed.")
+
+        if st.button("Send Both Daily Summaries"):
+            crypto_sent = False
+            stock_sent = False
+
+            if crypto_summary_message:
+                crypto_sent = send_discord_alert(
+                    get_summary_webhook("Crypto"),
+                    crypto_summary_message
+                )
+
+            if stock_summary_message:
+                stock_sent = send_discord_alert(
+                    get_summary_webhook("Stock"),
+                    stock_summary_message
+                )
+
+            if crypto_sent and stock_sent:
+                st.success("Crypto and stock summaries sent to Discord.")
+            elif crypto_sent:
+                st.warning("Crypto summary sent, but stock summary failed or webhook is missing.")
+            elif stock_sent:
+                st.warning("Stock summary sent, but crypto summary failed or webhook is missing.")
+            else:
+                st.error("No summaries were sent. Check your summary webhooks.")
+
+        if st.button("Send Strong Buy Alerts"):
+            strong_buys = watchlist_df[watchlist_df["AI Signal"].isin(["STRONG BUY", "BUY"])]
+
+            if strong_buys.empty:
+                st.info("No strong buy or buy alerts right now.")
+            else:
+                for _, row in strong_buys.iterrows():
+                    alert_key = f"{row['Ticker']}_{row['AI Signal']}_{datetime.now().strftime('%Y-%m-%d')}"
+
+                    if alert_key not in st.session_state.sent_signal_alerts:
+                        send_discord_alert(
+                            get_trade_webhook(row["Ticker"]),
+                            f"AI SIGNAL ALERT\nTicker: {row['Ticker']}\nMarket: {row['Market']}\nSignal: {row['AI Signal']}\nConfidence: {row['AI Confidence %']}%\nPrice: ${row['Price']}"
+                        )
+                        st.session_state.sent_signal_alerts.append(alert_key)
+
+                st.success("Signal alerts sent.")
+
+# ======================================================
+# BACKTESTING TAB
+# ======================================================
+
+with backtest_tab:
+    st.header("Strategy Backtesting")
+
+    backtest_ticker = st.selectbox("Choose ticker for backtest", ALL_TICKERS)
+
+    backtest_strategy = st.selectbox(
+        "Choose backtest strategy",
+        ["RSI Strategy", "MACD Strategy", "Moving Average Strategy"]
+    )
+
+    if st.button("Run Backtest"):
+        backtest_data = get_price_data(backtest_ticker, "1y")
+
+        if backtest_data.empty:
+            st.error("No backtest data available.")
+        else:
+            backtest_data = calculate_indicators(backtest_data)
+
+            balance = 10000
+            shares = 0
+            trade_log = []
+
+            for index, row in backtest_data.iterrows():
+                price = row["Close"]
+                rsi_value = row.get("RSI", None)
+                macd_value = row.get("MACD", None)
+                macd_signal_value = row.get("MACD Signal", None)
+                ma50_value = row.get("MA50", None)
+                ma200_value = row.get("MA200", None)
+
+                if pd.isna(price):
+                    continue
+
+                buy_signal = False
+                sell_signal = False
+
+                if backtest_strategy == "RSI Strategy":
+                    buy_signal = pd.notna(rsi_value) and rsi_value < 35
+                    sell_signal = pd.notna(rsi_value) and rsi_value > 70
+
+                elif backtest_strategy == "MACD Strategy":
+                    buy_signal = pd.notna(macd_value) and pd.notna(macd_signal_value) and macd_value > macd_signal_value
+                    sell_signal = pd.notna(macd_value) and pd.notna(macd_signal_value) and macd_value < macd_signal_value
+
+                elif backtest_strategy == "Moving Average Strategy":
+                    buy_signal = pd.notna(ma50_value) and pd.notna(ma200_value) and ma50_value > ma200_value
+                    sell_signal = pd.notna(ma50_value) and pd.notna(ma200_value) and ma50_value < ma200_value
+
+                if buy_signal and balance > 0:
+                    shares = balance / price
+                    balance = 0
+                    trade_log.append({
+                        "Date": index.strftime("%Y-%m-%d"),
+                        "Action": "BUY",
+                        "Price": price,
+                        "Portfolio Value": balance + (shares * price)
+                    })
+
+                elif sell_signal and shares > 0:
+                    balance = shares * price
+                    shares = 0
+                    trade_log.append({
+                        "Date": index.strftime("%Y-%m-%d"),
+                        "Action": "SELL",
+                        "Price": price,
+                        "Portfolio Value": balance
+                    })
+
+            final_value = balance
+            if shares > 0:
+                final_value += shares * backtest_data["Close"].iloc[-1]
+
+            total_return = ((final_value - 10000) / 10000) * 100
+
+            st.success(f"Backtest Complete | Final Portfolio Value: ${final_value:.2f}")
+            st.metric("Backtest Return", f"{total_return:.2f}%")
+
+            trade_log_df = pd.DataFrame(trade_log)
+
+            if trade_log_df.empty:
+                st.info("No trades were triggered by this strategy.")
+            else:
+                buy_prices = trade_log_df[trade_log_df["Action"] == "BUY"]["Price"].tolist()
+                sell_prices = trade_log_df[trade_log_df["Action"] == "SELL"]["Price"].tolist()
+
+                completed_trades = min(len(buy_prices), len(sell_prices))
+                wins = 0
+                losses = 0
+                trade_results = []
+
+                for i in range(completed_trades):
+                    result = ((sell_prices[i] - buy_prices[i]) / buy_prices[i]) * 100
+                    trade_results.append(result)
+
+                    if result > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+
+                win_rate = (wins / completed_trades) * 100 if completed_trades > 0 else 0
+                average_win = sum([x for x in trade_results if x > 0]) / wins if wins > 0 else 0
+                average_loss = sum([x for x in trade_results if x <= 0]) / losses if losses > 0 else 0
+
+                st.subheader("Backtest Stats")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Completed Trades", completed_trades)
+                col2.metric("Wins", wins)
+                col3.metric("Losses", losses)
+                col4.metric("Win Rate", f"{win_rate:.2f}%")
+
+                col5, col6 = st.columns(2)
+                col5.metric("Average Win", f"{average_win:.2f}%")
+                col6.metric("Average Loss", f"{average_loss:.2f}%")
+
+                st.dataframe(trade_log_df, use_container_width=True)
+
+                st.subheader("Backtest Equity Curve")
+                st.line_chart(trade_log_df, x="Date", y="Portfolio Value")
+
+                buy_trades = trade_log_df[trade_log_df["Action"] == "BUY"]
+                sell_trades = trade_log_df[trade_log_df["Action"] == "SELL"]
+
+                signal_fig = go.Figure()
+                signal_fig.add_trace(
+                    go.Scatter(
+                        x=backtest_data.index,
+                        y=backtest_data["Close"],
+                        mode="lines",
+                        name="Price"
+                    )
+                )
+                signal_fig.add_trace(
+                    go.Scatter(
+                        x=buy_trades["Date"],
+                        y=buy_trades["Price"],
+                        mode="markers",
+                        name="BUY",
+                        marker=dict(size=10, symbol="triangle-up")
+                    )
+                )
+                signal_fig.add_trace(
+                    go.Scatter(
+                        x=sell_trades["Date"],
+                        y=sell_trades["Price"],
+                        mode="markers",
+                        name="SELL",
+                        marker=dict(size=10, symbol="triangle-down")
+                    )
+                )
+                st.plotly_chart(signal_fig, use_container_width=True)
+
+# ======================================================
+# SETTINGS TAB
+# ======================================================
+
+with settings_tab:
+    st.header("Settings")
+
+    st.subheader("Active Watchlists")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("Crypto Tickers")
+        st.write(CRYPTO_TICKERS)
+
+    with col2:
+        st.write("Stock Tickers")
+        st.write(STOCK_TICKERS)
+
+    st.subheader("Discord Webhook Status")
+    st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
+    st.write("Stock Trade Webhook:", "Connected" if STOCK_TRADE_WEBHOOK_URL else "Not connected")
+    st.write("Crypto News Webhook:", "Connected" if CRYPTO_NEWS_WEBHOOK_URL else "Not connected")
+    st.write("Stock News Webhook:", "Connected" if STOCK_NEWS_WEBHOOK_URL else "Not connected")
+    st.write("Crypto Summary Webhook:", "Connected" if CRYPTO_SUMMARY_WEBHOOK_URL else "Not connected")
+    st.write("Stock Summary Webhook:", "Connected" if STOCK_SUMMARY_WEBHOOK_URL else "Not connected")
+    st.write("Old Summary Webhook Fallback:", "Connected" if SUMMARY_WEBHOOK_URL else "Not connected")
+    st.write("Old Trade Webhook Fallback:", "Connected" if TRADE_WEBHOOK_URL else "Not connected")
+    st.write("Old News Webhook Fallback:", "Connected" if NEWS_WEBHOOK_URL else "Not connected")
+
+    st.info(
+        "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
+        "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
+        "STOCK_NEWS_WEBHOOK_URL, CRYPTO_SUMMARY_WEBHOOK_URL, "
+        "STOCK_SUMMARY_WEBHOOK_URL. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
+        "CRYPTO_WEBHOOK_URL, STOCK_WEBHOOK_URL, TRADE_WEBHOOK_URL, and "
+        "NEWS_WEBHOOK_URL still work as fallbacks."
+    )
+
+st.divider()
+st.caption("AI Trading Dashboard | Stocks and Crypto Only | For education and paper trading, not financial advice.")
