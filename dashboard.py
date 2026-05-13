@@ -36,6 +36,7 @@ TRADE_HISTORY_FILE = os.path.join(BASE_DIR, "trade_history.csv")
 BALANCE_FILE = os.path.join(BASE_DIR, "balance.txt")
 EQUITY_FILE = os.path.join(BASE_DIR, "equity_history.csv")
 NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
+SUMMARY_LOG_FILE = os.path.join(BASE_DIR, "sent_summary_log.txt")
 
 # ======================================================
 # SETTINGS
@@ -44,6 +45,11 @@ NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
 TAKE_PROFIT_PERCENT = 10
+
+# Daily summaries auto-send once per day after this server-local time.
+# Railway usually runs in UTC unless you set a timezone.
+AUTO_DAILY_SUMMARY_HOUR = int(os.getenv("AUTO_DAILY_SUMMARY_HOUR", "7"))
+AUTO_DAILY_SUMMARY_MINUTE = int(os.getenv("AUTO_DAILY_SUMMARY_MINUTE", "0"))
 
 # Add or remove tickers here
 CRYPTO_TICKERS = [
@@ -64,7 +70,7 @@ ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 # STOCK_TRADE_WEBHOOK_URL = stock buy/sell and AI signal alerts
 # CRYPTO_NEWS_WEBHOOK_URL = crypto news alerts
 # STOCK_NEWS_WEBHOOK_URL = stock news alerts
-# CRYPTO_SUMMARY_WEBHOOK_URL = crypto daily AI market summaryP
+# CRYPTO_SUMMARY_WEBHOOK_URL = crypto daily AI market summary
 # STOCK_SUMMARY_WEBHOOK_URL = stock daily AI market summary
 # SUMMARY_WEBHOOK_URL = optional fallback daily AI market summary
 CRYPTO_TRADE_WEBHOOK_URL = os.getenv(
@@ -125,12 +131,15 @@ def get_news(ticker):
 
 def send_discord_alert(webhook_url, message):
     if not webhook_url:
+        print("Discord webhook missing.")
         return False
 
     try:
         response = requests.post(webhook_url, json={"content": message}, timeout=10)
+        print("Discord status:", response.status_code, response.text[:200])
         return response.status_code in [200, 204]
-    except Exception:
+    except Exception as error:
+        print("Discord send error:", error)
         return False
 
 
@@ -175,16 +184,99 @@ def load_equity_history():
 
 def save_equity_history(equity_history):
     pd.DataFrame({"Equity": equity_history}).to_csv(EQUITY_FILE, index=False)
+
+
 def load_sent_news():
-    if os.path.exists(NEWS_LOG_FILE):
-        with open(NEWS_LOG_FILE, "r") as file:
-            return set(file.read().splitlines())
+    try:
+        if os.path.exists(NEWS_LOG_FILE) and os.path.getsize(NEWS_LOG_FILE) > 0:
+            with open(NEWS_LOG_FILE, "r", encoding="utf-8") as file:
+                return set(line.strip() for line in file if line.strip())
+    except Exception as error:
+        print("News log load error:", error)
+
     return set()
 
 
 def save_sent_news(news_set):
-    with open(NEWS_LOG_FILE, "w") as file:
-        file.write("\n".join(news_set))
+    try:
+        with open(NEWS_LOG_FILE, "w", encoding="utf-8") as file:
+            file.write("\n".join(sorted(news_set)))
+    except Exception as error:
+        print("News log save error:", error)
+
+
+def clear_sent_news_log():
+    try:
+        if os.path.exists(NEWS_LOG_FILE):
+            os.remove(NEWS_LOG_FILE)
+    except Exception as error:
+        print("News log clear error:", error)
+
+
+def load_sent_summaries():
+    try:
+        if os.path.exists(SUMMARY_LOG_FILE) and os.path.getsize(SUMMARY_LOG_FILE) > 0:
+            with open(SUMMARY_LOG_FILE, "r", encoding="utf-8") as file:
+                return set(line.strip() for line in file if line.strip())
+    except Exception as error:
+        print("Summary log load error:", error)
+
+    return set()
+
+
+def save_sent_summaries(summary_set):
+    try:
+        with open(SUMMARY_LOG_FILE, "w", encoding="utf-8") as file:
+            file.write("\n".join(sorted(summary_set)))
+    except Exception as error:
+        print("Summary log save error:", error)
+
+
+def clear_sent_summary_log():
+    try:
+        if os.path.exists(SUMMARY_LOG_FILE):
+            os.remove(SUMMARY_LOG_FILE)
+    except Exception as error:
+        print("Summary log clear error:", error)
+
+
+def should_send_daily_summary(market):
+    now = datetime.now()
+    scheduled_time_reached = (
+        now.hour > AUTO_DAILY_SUMMARY_HOUR
+        or (now.hour == AUTO_DAILY_SUMMARY_HOUR and now.minute >= AUTO_DAILY_SUMMARY_MINUTE)
+    )
+
+    if not scheduled_time_reached:
+        return False
+
+    summary_key = f"{market}_{now.strftime('%Y-%m-%d')}"
+    return summary_key not in st.session_state.sent_summaries
+
+
+def mark_daily_summary_sent(market):
+    summary_key = f"{market}_{datetime.now().strftime('%Y-%m-%d')}"
+    st.session_state.sent_summaries.add(summary_key)
+    save_sent_summaries(st.session_state.sent_summaries)
+
+
+def send_scheduled_daily_summary(watchlist_df, market):
+    summary_message = build_market_summary(watchlist_df, market)
+
+    if not summary_message:
+        print(f"No {market} summary available.")
+        return False
+
+    sent = send_discord_alert(get_summary_webhook(market), summary_message)
+
+    if sent:
+        mark_daily_summary_sent(market)
+        print(f"Scheduled {market} summary sent.")
+        return True
+
+    print(f"Scheduled {market} summary failed or webhook missing.")
+    return False
+
 
 def get_asset_type(ticker):
     return "Crypto" if ticker.endswith("-USD") else "Stock"
@@ -250,6 +342,37 @@ def get_article_url(article):
         return article.get("link", "")
 
     return ""
+
+
+def get_article_title(article):
+    content = article.get("content", {})
+
+    if isinstance(content, dict):
+        title = content.get("title", "")
+        if title:
+            return title
+
+    title = article.get("title", "")
+    if title:
+        return title
+
+    return ""
+
+
+def get_article_publisher(article):
+    content = article.get("content", {})
+    provider = content.get("provider", {}) if isinstance(content, dict) else {}
+
+    if isinstance(provider, dict):
+        display_name = provider.get("displayName", "")
+        if display_name:
+            return display_name
+
+    publisher = article.get("publisher", "")
+    if publisher:
+        return publisher
+
+    return "Yahoo Finance"
 
 
 def calculate_indicators(data):
@@ -354,10 +477,10 @@ def get_news_score(ticker):
         news_items = get_news(ticker)[:3]
 
         for article in news_items:
-            content = article.get("content", {})
-            headline = content.get("title", "") or article.get("title", "")
+            headline = get_article_title(article)
             title = headline.lower()
             article_url = get_article_url(article)
+            publisher = get_article_publisher(article)
 
             for word in BULLISH_WORDS:
                 if word in title:
@@ -375,11 +498,11 @@ def get_news_score(ticker):
 
                     if webhook_url:
                         market = get_asset_type(ticker)
-
                         message = (
-                            f"📰 NEWS ALERT\n"
+                            f"NEWS ALERT\n"
                             f"Market: {market}\n"
                             f"Ticker: {ticker}\n"
+                            f"Source: {publisher}\n"
                             f"Headline: {headline}"
                         )
 
@@ -396,6 +519,59 @@ def get_news_score(ticker):
         news_score = 0
 
     return news_score
+
+
+
+
+def send_latest_news_for_tickers(tickers, market_name, max_articles_per_ticker=2, force_send=False):
+    webhook_url = CRYPTO_NEWS_WEBHOOK_URL if market_name == "Crypto" else STOCK_NEWS_WEBHOOK_URL
+
+    if not webhook_url:
+        return 0, 0, "Missing news webhook."
+
+    sent_count = 0
+    checked_count = 0
+
+    for ticker in tickers:
+        news_items = get_news(ticker)
+
+        if not news_items:
+            print(f"No news returned for {ticker}.")
+            continue
+
+        for article in news_items[:max_articles_per_ticker]:
+            headline = get_article_title(article)
+            article_url = get_article_url(article)
+            publisher = get_article_publisher(article)
+
+            if not headline:
+                continue
+
+            checked_count += 1
+            news_key = f"{ticker}_{headline}_{datetime.now().strftime('%Y-%m-%d')}"
+
+            if not force_send and news_key in st.session_state.sent_news:
+                continue
+
+            message = (
+                f"📰 NEWS ALERT\n"
+                f"Market: {market_name}\n"
+                f"Ticker: {ticker}\n"
+                f"Source: {publisher}\n"
+                f"Headline: {headline}"
+            )
+
+            if article_url:
+                message += f"\nLink: {article_url}"
+
+            sent = send_discord_alert(webhook_url, message)
+
+            if sent:
+                sent_count += 1
+                st.session_state.sent_news.add(news_key)
+                save_sent_news(st.session_state.sent_news)
+
+    return sent_count, checked_count, "Completed news scan."
 
 
 def build_watchlist(tickers):
@@ -577,6 +753,9 @@ if "equity_history" not in st.session_state:
 
 if "sent_news" not in st.session_state:
     st.session_state.sent_news = load_sent_news()
+
+if "sent_summaries" not in st.session_state:
+    st.session_state.sent_summaries = load_sent_summaries()
 
 if "sent_signal_alerts" not in st.session_state:
     st.session_state.sent_signal_alerts = []
@@ -1096,6 +1275,13 @@ with scanner_tab:
         crypto_summary_message = build_market_summary(watchlist_df, "Crypto")
         stock_summary_message = build_market_summary(watchlist_df, "Stock")
 
+        # Auto-send daily summaries once per day after scheduled server-local time.
+        if should_send_daily_summary("Crypto"):
+            send_scheduled_daily_summary(watchlist_df, "Crypto")
+
+        if should_send_daily_summary("Stock"):
+            send_scheduled_daily_summary(watchlist_df, "Stock")
+
         if st.button("Send Crypto Daily Summary"):
             if not crypto_summary_message:
                 st.warning("No crypto summary available.")
@@ -1105,6 +1291,7 @@ with scanner_tab:
                     crypto_summary_message
                 )
                 if sent:
+                    mark_daily_summary_sent("Crypto")
                     st.success("Crypto daily summary sent to Discord.")
                 else:
                     st.warning("Crypto summary webhook not found or failed.")
@@ -1118,6 +1305,7 @@ with scanner_tab:
                     stock_summary_message
                 )
                 if sent:
+                    mark_daily_summary_sent("Stock")
                     st.success("Stock daily summary sent to Discord.")
                 else:
                     st.warning("Stock summary webhook not found or failed.")
@@ -1137,6 +1325,12 @@ with scanner_tab:
                     get_summary_webhook("Stock"),
                     stock_summary_message
                 )
+
+            if crypto_sent:
+                mark_daily_summary_sent("Crypto")
+
+            if stock_sent:
+                mark_daily_summary_sent("Stock")
 
             if crypto_sent and stock_sent:
                 st.success("Crypto and stock summaries sent to Discord.")
@@ -1350,35 +1544,107 @@ with settings_tab:
     st.write("Old Trade Webhook Fallback:", "Connected" if TRADE_WEBHOOK_URL else "Not connected")
     st.write("Old News Webhook Fallback:", "Connected" if NEWS_WEBHOOK_URL else "Not connected")
 
-    st.subheader("Test News Webhooks")
+    st.subheader("Discord Alert Tests")
 
-    if st.button("Test Crypto News Webhook"):
-        sent = send_discord_alert(
-            CRYPTO_NEWS_WEBHOOK_URL,
-            "📰 TEST CRYPTO NEWS ALERT"
-        )
+    col_test1, col_test2 = st.columns(2)
 
-        if sent:
-            st.success("Crypto news test sent.")
-        else:
-            st.error("Crypto news test failed.")
+    with col_test1:
+        if st.button("Test Crypto Trade Webhook"):
+            sent = send_discord_alert(
+                get_trade_webhook("BTC-USD"),
+                "TEST CRYPTO TRADE ALERT"
+            )
+            st.success("Crypto trade test sent.") if sent else st.error("Crypto trade test failed.")
 
-    if st.button("Test Stock News Webhook"):
-        sent = send_discord_alert(
-            STOCK_NEWS_WEBHOOK_URL,
-            "📰 TEST STOCK NEWS ALERT"
-        )
+        if st.button("Test Crypto News Webhook"):
+            sent = send_discord_alert(
+                CRYPTO_NEWS_WEBHOOK_URL or NEWS_WEBHOOK_URL,
+                "TEST CRYPTO NEWS ALERT"
+            )
+            st.success("Crypto news test sent.") if sent else st.error("Crypto news test failed.")
 
-        if sent:
-            st.success("Stock news test sent.")
-        else:
-            st.error("Stock news test failed.")
+        if st.button("Test Crypto Summary Webhook"):
+            sent = send_discord_alert(
+                get_summary_webhook("Crypto"),
+                "TEST CRYPTO SUMMARY ALERT"
+            )
+            st.success("Crypto summary test sent.") if sent else st.error("Crypto summary test failed.")
+
+    with col_test2:
+        if st.button("Test Stock Trade Webhook"):
+            sent = send_discord_alert(
+                get_trade_webhook("AAPL"),
+                "TEST STOCK TRADE ALERT"
+            )
+            st.success("Stock trade test sent.") if sent else st.error("Stock trade test failed.")
+
+        if st.button("Test Stock News Webhook"):
+            sent = send_discord_alert(
+                STOCK_NEWS_WEBHOOK_URL or NEWS_WEBHOOK_URL,
+                "TEST STOCK NEWS ALERT"
+            )
+            st.success("Stock news test sent.") if sent else st.error("Stock news test failed.")
+
+        if st.button("Test Stock Summary Webhook"):
+            sent = send_discord_alert(
+                get_summary_webhook("Stock"),
+                "TEST STOCK SUMMARY ALERT"
+            )
+            st.success("Stock summary test sent.") if sent else st.error("Stock summary test failed.")
+
+    st.subheader("Manual News Scan")
+
+    col_news1, col_news2, col_news3 = st.columns(3)
+
+    with col_news1:
+        if st.button("Send Latest Crypto News Now"):
+            sent_count, checked_count, status_message = send_latest_news_for_tickers(
+                CRYPTO_TICKERS,
+                "Crypto",
+                max_articles_per_ticker=2,
+                force_send=True
+            )
+            if sent_count > 0:
+                st.success(f"Sent {sent_count} crypto news alert(s). Checked {checked_count} article(s).")
+            else:
+                st.warning(f"No crypto news alerts sent. Checked {checked_count} article(s). {status_message}")
+
+    with col_news2:
+        if st.button("Send Latest Stock News Now"):
+            sent_count, checked_count, status_message = send_latest_news_for_tickers(
+                STOCK_TICKERS,
+                "Stock",
+                max_articles_per_ticker=2,
+                force_send=True
+            )
+            if sent_count > 0:
+                st.success(f"Sent {sent_count} stock news alert(s). Checked {checked_count} article(s).")
+            else:
+                st.warning(f"No stock news alerts sent. Checked {checked_count} article(s). {status_message}")
+
+    with col_news3:
+        if st.button("Clear Sent News Log"):
+            st.session_state.sent_news = set()
+            clear_sent_news_log()
+            st.success("Sent news log cleared.")
+
+    st.subheader("Scheduled Daily Summaries")
+    st.write(
+        "Auto daily summaries send once per day after "
+        f"{AUTO_DAILY_SUMMARY_HOUR:02d}:{AUTO_DAILY_SUMMARY_MINUTE:02d} server time."
+    )
+    st.write("Sent summary records today:", sorted(st.session_state.sent_summaries))
+
+    if st.button("Clear Sent Summary Log"):
+        st.session_state.sent_summaries = set()
+        clear_sent_summary_log()
+        st.success("Sent summary log cleared.")
 
     st.info(
         "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
         "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
         "STOCK_NEWS_WEBHOOK_URL, CRYPTO_SUMMARY_WEBHOOK_URL, "
-        "STOCK_SUMMARY_WEBHOOK_URL. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
+        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR and AUTO_DAILY_SUMMARY_MINUTE. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
         "CRYPTO_WEBHOOK_URL, STOCK_WEBHOOK_URL, TRADE_WEBHOOK_URL, and "
         "NEWS_WEBHOOK_URL still work as fallbacks."
     )
