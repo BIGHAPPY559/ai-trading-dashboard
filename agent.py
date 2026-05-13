@@ -5,10 +5,10 @@ import time
 import os
 from datetime import datetime
 
-CRYPTO_ALERT_WEBHOOK_URL = os.getenv("CRYPTO_ALERT_WEBHOOK_URL")
+CRYPTO_TRADE_WEBHOOK_URL = os.getenv("CRYPTO_TRADE_WEBHOOK_URL")
 CRYPTO_SUMMARY_WEBHOOK_URL = os.getenv("CRYPTO_SUMMARY_WEBHOOK_URL")
 
-STOCK_ALERT_WEBHOOK_URL = os.getenv("STOCK_ALERT_WEBHOOK_URL")
+STOCK_TRADE_WEBHOOK_URL = os.getenv("STOCK_TRADE_WEBHOOK_URL")
 STOCK_SUMMARY_WEBHOOK_URL = os.getenv("STOCK_SUMMARY_WEBHOOK_URL")
 
 SCAN_INTERVAL = 900
@@ -297,7 +297,7 @@ while True:
         scan_market(
             "Crypto Market",
             crypto_tickers,
-            CRYPTO_ALERT_WEBHOOK_URL,
+            CRYPTO_TRADE_WEBHOOK_URL,
             CRYPTO_SUMMARY_WEBHOOK_URL
         )
 
@@ -308,7 +308,7 @@ while True:
         scan_market(
             "Crypto Market",
             crypto_tickers,
-            CRYPTO_ALERT_WEBHOOK_URL,
+            CRYPTO_TRADE_WEBHOOK_URL,
             None
         )
 
@@ -323,7 +323,7 @@ while True:
         scan_market(
             "Stock Market",
             stock_tickers,
-            STOCK_ALERT_WEBHOOK_URL,
+            STOCK_TRADE_WEBHOOK_URL,
             STOCK_SUMMARY_WEBHOOK_URL
         )
 
@@ -334,7 +334,7 @@ while True:
         scan_market(
             "Stock Market",
             stock_tickers,
-            STOCK_ALERT_WEBHOOK_URL,
+            STOCK_TRADE_WEBHOOK_URL,
             None
         )
 

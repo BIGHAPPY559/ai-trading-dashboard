@@ -35,6 +35,7 @@ PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.csv")
 TRADE_HISTORY_FILE = os.path.join(BASE_DIR, "trade_history.csv")
 BALANCE_FILE = os.path.join(BASE_DIR, "balance.txt")
 EQUITY_FILE = os.path.join(BASE_DIR, "equity_history.csv")
+NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
 
 # ======================================================
 # SETTINGS
@@ -63,7 +64,7 @@ ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 # STOCK_TRADE_WEBHOOK_URL = stock buy/sell and AI signal alerts
 # CRYPTO_NEWS_WEBHOOK_URL = crypto news alerts
 # STOCK_NEWS_WEBHOOK_URL = stock news alerts
-# CRYPTO_SUMMARY_WEBHOOK_URL = crypto daily AI market summary
+# CRYPTO_SUMMARY_WEBHOOK_URL = crypto daily AI market summaryP
 # STOCK_SUMMARY_WEBHOOK_URL = stock daily AI market summary
 # SUMMARY_WEBHOOK_URL = optional fallback daily AI market summary
 CRYPTO_TRADE_WEBHOOK_URL = os.getenv(
@@ -174,7 +175,16 @@ def load_equity_history():
 
 def save_equity_history(equity_history):
     pd.DataFrame({"Equity": equity_history}).to_csv(EQUITY_FILE, index=False)
+def load_sent_news():
+    if os.path.exists(NEWS_LOG_FILE):
+        with open(NEWS_LOG_FILE, "r") as file:
+            return set(file.read().splitlines())
+    return set()
 
+
+def save_sent_news(news_set):
+    with open(NEWS_LOG_FILE, "w") as file:
+        file.write("\n".join(news_set))
 
 def get_asset_type(ticker):
     return "Crypto" if ticker.endswith("-USD") else "Stock"
@@ -360,16 +370,14 @@ def get_news_score(ticker):
             if headline:
                 news_key = f"{ticker}_{headline}_{datetime.now().strftime('%Y-%m-%d')}"
 
-                if (
-                    "sent_news" in st.session_state
-                    and news_key not in st.session_state.sent_news
-                ):
+                if news_key not in st.session_state.sent_news:
                     webhook_url = get_news_webhook(ticker)
 
                     if webhook_url:
                         market = get_asset_type(ticker)
+
                         message = (
-                            f"NEWS ALERT\n"
+                            f"📰 NEWS ALERT\n"
                             f"Market: {market}\n"
                             f"Ticker: {ticker}\n"
                             f"Headline: {headline}"
@@ -381,7 +389,8 @@ def get_news_score(ticker):
                         sent = send_discord_alert(webhook_url, message)
 
                         if sent:
-                            st.session_state.sent_news.append(news_key)
+                            st.session_state.sent_news.add(news_key)
+                            save_sent_news(st.session_state.sent_news)
 
     except Exception:
         news_score = 0
@@ -567,7 +576,7 @@ if "equity_history" not in st.session_state:
     st.session_state.equity_history = load_equity_history()
 
 if "sent_news" not in st.session_state:
-    st.session_state.sent_news = []
+    st.session_state.sent_news = load_sent_news()
 
 if "sent_signal_alerts" not in st.session_state:
     st.session_state.sent_signal_alerts = []
