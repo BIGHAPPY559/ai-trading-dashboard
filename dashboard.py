@@ -1,7 +1,7 @@
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -46,6 +46,8 @@ SIGNAL_SCHEDULE_FILE = os.path.join(BASE_DIR, "signal_schedule_log.txt")
 # ======================================================
 # SETTINGS
 # ======================================================
+
+APP_VERSION = "v17_old_style_summary_embed_only"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -196,7 +198,7 @@ def send_discord_embed(webhook_url, title, color, fields, max_retries=2):
                 "title": title,
                 "color": color,
                 "fields": fields,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         ]
     }
@@ -705,21 +707,20 @@ def send_market_summary_embed(watchlist_df, market):
 
 
 def build_market_summary(watchlist_df, market):
+    # Fallback text version only. Discord daily summaries use send_market_summary_embed()
+    # so they keep the old card-style format.
     market_df = watchlist_df[watchlist_df["Market"] == market].copy()
 
     if market_df.empty:
         return ""
 
-    summary_message = f"📊 {market.upper()} MARKET SUMMARY\n\n"
-    summary_message += "🟢 BUY SIGNALS\n"
-    summary_message += format_summary_section(market_df, ["STRONG BUY", "BUY"])
-    summary_message += "\n\n🟡 HOLD SIGNALS\n"
-    summary_message += format_summary_section(market_df, ["HOLD"])
-    summary_message += "\n\n🔴 SELL SIGNALS\n"
-    summary_message += format_summary_section(market_df, ["SELL", "STRONG SELL"])
-    summary_message += f"\n\nTime\n{datetime.now().strftime('%Y-%m-%d %H:%M')}"
-
-    return summary_message
+    return (
+        f"📊 {market} Market Summary\n\n"
+        f"🟢 BUY SIGNALS\n{format_summary_section(market_df, ['STRONG BUY', 'BUY'])}\n\n"
+        f"🟡 HOLD SIGNALS\n{format_summary_section(market_df, ['HOLD'])}\n\n"
+        f"🔴 SELL SIGNALS\n{format_summary_section(market_df, ['SELL', 'STRONG SELL'])}\n\n"
+        f"Time\n{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
 
 def get_article_url(article):
     content = article.get("content", {})
@@ -1897,6 +1898,7 @@ with backtest_tab:
 
 with settings_tab:
     st.header("Settings")
+    st.caption(f"Running {APP_VERSION}")
 
     st.subheader("Active Watchlists")
 
