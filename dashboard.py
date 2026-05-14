@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -37,6 +38,7 @@ BALANCE_FILE = os.path.join(BASE_DIR, "balance.txt")
 EQUITY_FILE = os.path.join(BASE_DIR, "equity_history.csv")
 NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
 SUMMARY_LOG_FILE = os.path.join(BASE_DIR, "sent_summary_log.txt")
+SIGNAL_LOG_FILE = os.path.join(BASE_DIR, "sent_signal_log.txt")
 
 # ======================================================
 # SETTINGS
@@ -50,6 +52,11 @@ TAKE_PROFIT_PERCENT = 10
 # Railway usually runs in UTC unless you set a timezone.
 AUTO_DAILY_SUMMARY_HOUR = int(os.getenv("AUTO_DAILY_SUMMARY_HOUR", "7"))
 AUTO_DAILY_SUMMARY_MINUTE = int(os.getenv("AUTO_DAILY_SUMMARY_MINUTE", "0"))
+
+# Automatic scanner signal alerts.
+# Sends one alert per ticker/signal per day to avoid spam.
+AUTO_SIGNAL_ALERTS_ENABLED = os.getenv("AUTO_SIGNAL_ALERTS_ENABLED", "true").lower() == "true"
+AUTO_SIGNAL_MIN_CONFIDENCE = float(os.getenv("AUTO_SIGNAL_MIN_CONFIDENCE", "75"))
 
 # Add or remove tickers here
 CRYPTO_TICKERS = [
@@ -129,18 +136,38 @@ def get_news(ticker):
         return []
 
 
-def send_discord_alert(webhook_url, message):
+def send_discord_alert(webhook_url, message, max_retries=2):
     if not webhook_url:
         print("Discord webhook missing.")
         return False
 
-    try:
-        response = requests.post(webhook_url, json={"content": message}, timeout=10)
-        print("Discord status:", response.status_code, response.text[:200])
-        return response.status_code in [200, 204]
-    except Exception as error:
-        print("Discord send error:", error)
-        return False
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(webhook_url, json={"content": message}, timeout=10)
+            print("Discord status:", response.status_code, response.text[:200])
+
+            if response.status_code in [200, 204]:
+                return True
+
+            if response.status_code == 429 and attempt < max_retries:
+                try:
+                    retry_after = response.json().get("retry_after", 1)
+                except Exception:
+                    retry_after = 1
+
+                time.sleep(float(retry_after) + 0.5)
+                continue
+
+            return False
+
+        except Exception as error:
+            print("Discord send error:", error)
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            return False
+
+    return False
 
 
 def load_balance():
@@ -240,6 +267,33 @@ def clear_sent_summary_log():
         print("Summary log clear error:", error)
 
 
+def load_sent_signals():
+    try:
+        if os.path.exists(SIGNAL_LOG_FILE) and os.path.getsize(SIGNAL_LOG_FILE) > 0:
+            with open(SIGNAL_LOG_FILE, "r", encoding="utf-8") as file:
+                return set(line.strip() for line in file if line.strip())
+    except Exception as error:
+        print("Signal log load error:", error)
+
+    return set()
+
+
+def save_sent_signals(signal_set):
+    try:
+        with open(SIGNAL_LOG_FILE, "w", encoding="utf-8") as file:
+            file.write("\n".join(sorted(signal_set)))
+    except Exception as error:
+        print("Signal log save error:", error)
+
+
+def clear_sent_signal_log():
+    try:
+        if os.path.exists(SIGNAL_LOG_FILE):
+            os.remove(SIGNAL_LOG_FILE)
+    except Exception as error:
+        print("Signal log clear error:", error)
+
+
 def should_send_daily_summary(market):
     now = datetime.now()
     scheduled_time_reached = (
@@ -276,6 +330,53 @@ def send_scheduled_daily_summary(watchlist_df, market):
 
     print(f"Scheduled {market} summary failed or webhook missing.")
     return False
+
+
+def send_auto_signal_alerts(watchlist_df):
+    if not AUTO_SIGNAL_ALERTS_ENABLED or watchlist_df.empty:
+        return 0
+
+    alert_signals = ["STRONG BUY", "BUY", "SELL"]
+    candidates = watchlist_df[
+        watchlist_df["AI Signal"].isin(alert_signals)
+        & (watchlist_df["AI Confidence %"] >= AUTO_SIGNAL_MIN_CONFIDENCE)
+    ].copy()
+
+    if candidates.empty:
+        return 0
+
+    sent_count = 0
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for _, row in candidates.iterrows():
+        ticker = row["Ticker"]
+        signal = row["AI Signal"]
+        alert_key = f"{ticker}_{signal}_{today}"
+
+        if alert_key in st.session_state.sent_signal_alerts:
+            continue
+
+        message = (
+            f"AI SIGNAL ALERT\n"
+            f"Market: {row['Market']}\n"
+            f"Ticker: {ticker}\n"
+            f"Signal: {signal}\n"
+            f"Confidence: {row['AI Confidence %']}%\n"
+            f"Price: ${row['Price']}\n"
+            f"RSI: {row['RSI']}\n"
+            f"MACD: {row['MACD']}\n"
+            f"Final Score: {row['Final Score']}"
+        )
+
+        sent = send_discord_alert(get_trade_webhook(ticker), message)
+
+        if sent:
+            sent_count += 1
+            st.session_state.sent_signal_alerts.add(alert_key)
+            save_sent_signals(st.session_state.sent_signal_alerts)
+            time.sleep(0.5)
+
+    return sent_count
 
 
 def get_asset_type(ticker):
@@ -514,6 +615,7 @@ def get_news_score(ticker):
                         if sent:
                             st.session_state.sent_news.add(news_key)
                             save_sent_news(st.session_state.sent_news)
+                            time.sleep(0.5)
 
     except Exception:
         news_score = 0
@@ -570,6 +672,7 @@ def send_latest_news_for_tickers(tickers, market_name, max_articles_per_ticker=2
                 sent_count += 1
                 st.session_state.sent_news.add(news_key)
                 save_sent_news(st.session_state.sent_news)
+                time.sleep(0.5)
 
     return sent_count, checked_count, "Completed news scan."
 
@@ -758,7 +861,7 @@ if "sent_summaries" not in st.session_state:
     st.session_state.sent_summaries = load_sent_summaries()
 
 if "sent_signal_alerts" not in st.session_state:
-    st.session_state.sent_signal_alerts = []
+    st.session_state.sent_signal_alerts = load_sent_signals()
 
 # ======================================================
 # TOP METRICS
@@ -892,7 +995,7 @@ with account_tab:
         portfolio_df["Profit/Loss $"] = profits
         portfolio_df["Profit/Loss %"] = profit_percents
 
-        st.dataframe(portfolio_df, use_container_width=True)
+        st.dataframe(portfolio_df, width="stretch")
 
         total_unrealized = portfolio_df["Profit/Loss $"].sum()
         st.metric("Unrealized Portfolio P/L", f"${total_unrealized:.2f}")
@@ -912,7 +1015,7 @@ with account_tab:
             ]
         )
         fig_allocation.update_layout(title="Portfolio Allocation")
-        st.plotly_chart(fig_allocation, use_container_width=True)
+        st.plotly_chart(fig_allocation, width="stretch")
 
         largest_position = allocation_df.loc[allocation_df["Allocation %"].idxmax()]
         if largest_position["Allocation %"] > 50:
@@ -1002,7 +1105,7 @@ with account_tab:
 
     if not trade_history_df.empty:
         st.subheader("Trade History")
-        st.dataframe(trade_history_df, use_container_width=True)
+        st.dataframe(trade_history_df, width="stretch")
 
         if "Action" in trade_history_df.columns:
             sell_trades = trade_history_df[
@@ -1049,13 +1152,13 @@ with crypto_tab:
         col3.metric("Signal", top_crypto["AI Signal"])
 
         st.write(create_ai_summary(top_crypto))
-        st.dataframe(crypto_watchlist_df, use_container_width=True)
+        st.dataframe(crypto_watchlist_df, width="stretch")
 
         selected_crypto = st.selectbox("Choose crypto", CRYPTO_TICKERS, key="selected_crypto")
         crypto_data = get_price_data(selected_crypto, "6mo")
 
         if not crypto_data.empty:
-            st.plotly_chart(create_price_chart(selected_crypto, crypto_data), use_container_width=True)
+            st.plotly_chart(create_price_chart(selected_crypto, crypto_data), width="stretch")
 
             dollar_amount = st.number_input(
                 "Dollar amount to buy",
@@ -1089,13 +1192,13 @@ with stock_tab:
         col3.metric("Signal", top_stock["AI Signal"])
 
         st.write(create_ai_summary(top_stock))
-        st.dataframe(stock_watchlist_df, use_container_width=True)
+        st.dataframe(stock_watchlist_df, width="stretch")
 
         selected_stock = st.selectbox("Choose stock", STOCK_TICKERS, key="selected_stock")
         stock_data = get_price_data(selected_stock, "6mo")
 
         if not stock_data.empty:
-            st.plotly_chart(create_price_chart(selected_stock, stock_data), use_container_width=True)
+            st.plotly_chart(create_price_chart(selected_stock, stock_data), width="stretch")
 
             dollar_amount = st.number_input(
                 "Dollar amount to buy",
@@ -1151,13 +1254,13 @@ with scanner_tab:
         with scanner_tab1:
             st.dataframe(
                 watchlist_df[watchlist_df["Market"] == "Crypto"],
-                use_container_width=True
+                width="stretch"
             )
 
         with scanner_tab2:
             st.dataframe(
                 watchlist_df[watchlist_df["Market"] == "Stock"],
-                use_container_width=True
+                width="stretch"
             )
 
         with scanner_tab3:
@@ -1190,7 +1293,7 @@ with scanner_tab:
                     filtered_watchlist["Ticker"].str.contains(ticker_search.upper(), na=False)
                 ]
 
-            st.dataframe(filtered_watchlist, use_container_width=True)
+            st.dataframe(filtered_watchlist, width="stretch")
 
             filtered_buy_amount = st.number_input(
                 "Dollar amount per filtered ticker",
@@ -1262,7 +1365,7 @@ with scanner_tab:
             )
         )
         heatmap_fig.update_layout(xaxis_title="Ticker", yaxis_title="Metric")
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.plotly_chart(heatmap_fig, width="stretch")
 
         csv = watchlist_df.to_csv(index=False)
         st.download_button(
@@ -1281,6 +1384,8 @@ with scanner_tab:
 
         if should_send_daily_summary("Stock"):
             send_scheduled_daily_summary(watchlist_df, "Stock")
+
+        send_auto_signal_alerts(watchlist_df)
 
         if st.button("Send Crypto Daily Summary"):
             if not crypto_summary_message:
@@ -1355,7 +1460,8 @@ with scanner_tab:
                             get_trade_webhook(row["Ticker"]),
                             f"AI SIGNAL ALERT\nTicker: {row['Ticker']}\nMarket: {row['Market']}\nSignal: {row['AI Signal']}\nConfidence: {row['AI Confidence %']}%\nPrice: ${row['Price']}"
                         )
-                        st.session_state.sent_signal_alerts.append(alert_key)
+                        st.session_state.sent_signal_alerts.add(alert_key)
+                        save_sent_signals(st.session_state.sent_signal_alerts)
 
                 st.success("Signal alerts sent.")
 
@@ -1477,7 +1583,7 @@ with backtest_tab:
                 col5.metric("Average Win", f"{average_win:.2f}%")
                 col6.metric("Average Loss", f"{average_loss:.2f}%")
 
-                st.dataframe(trade_log_df, use_container_width=True)
+                st.dataframe(trade_log_df, width="stretch")
 
                 st.subheader("Backtest Equity Curve")
                 st.line_chart(trade_log_df, x="Date", y="Portfolio Value")
@@ -1512,7 +1618,7 @@ with backtest_tab:
                         marker=dict(size=10, symbol="triangle-down")
                     )
                 )
-                st.plotly_chart(signal_fig, use_container_width=True)
+                st.plotly_chart(signal_fig, width="stretch")
 
 # ======================================================
 # SETTINGS TAB
@@ -1640,11 +1746,21 @@ with settings_tab:
         clear_sent_summary_log()
         st.success("Sent summary log cleared.")
 
+    st.subheader("Automatic Signal Alerts")
+    st.write("Auto signal alerts enabled:", AUTO_SIGNAL_ALERTS_ENABLED)
+    st.write("Minimum confidence for auto signal alerts:", AUTO_SIGNAL_MIN_CONFIDENCE)
+    st.write("Sent signal records today:", sorted(st.session_state.sent_signal_alerts))
+
+    if st.button("Clear Sent Signal Log"):
+        st.session_state.sent_signal_alerts = set()
+        clear_sent_signal_log()
+        st.success("Sent signal log cleared.")
+
     st.info(
         "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
         "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
         "STOCK_NEWS_WEBHOOK_URL, CRYPTO_SUMMARY_WEBHOOK_URL, "
-        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR and AUTO_DAILY_SUMMARY_MINUTE. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
+        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR, AUTO_DAILY_SUMMARY_MINUTE, AUTO_SIGNAL_ALERTS_ENABLED, and AUTO_SIGNAL_MIN_CONFIDENCE. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
         "CRYPTO_WEBHOOK_URL, STOCK_WEBHOOK_URL, TRADE_WEBHOOK_URL, and "
         "NEWS_WEBHOOK_URL still work as fallbacks."
     )
