@@ -1,7 +1,7 @@
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -196,7 +196,7 @@ def send_discord_embed(webhook_url, title, color, fields, max_retries=2):
                 "title": title,
                 "color": color,
                 "fields": fields,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         ]
     }
