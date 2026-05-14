@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from datetime import datetime
 
@@ -39,6 +40,7 @@ EQUITY_FILE = os.path.join(BASE_DIR, "equity_history.csv")
 NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
 SUMMARY_LOG_FILE = os.path.join(BASE_DIR, "sent_summary_log.txt")
 SIGNAL_LOG_FILE = os.path.join(BASE_DIR, "sent_signal_log.txt")
+NEWS_SCHEDULE_FILE = os.path.join(BASE_DIR, "news_schedule_log.txt")
 
 # ======================================================
 # SETTINGS
@@ -57,6 +59,15 @@ AUTO_DAILY_SUMMARY_MINUTE = int(os.getenv("AUTO_DAILY_SUMMARY_MINUTE", "0"))
 # Sends one alert per ticker/signal per day to avoid spam.
 AUTO_SIGNAL_ALERTS_ENABLED = os.getenv("AUTO_SIGNAL_ALERTS_ENABLED", "true").lower() == "true"
 AUTO_SIGNAL_MIN_CONFIDENCE = float(os.getenv("AUTO_SIGNAL_MIN_CONFIDENCE", "75"))
+
+# Automatic market news newsletter.
+# This does not send on app open. It schedules the next run in the future,
+# then sends a small digest only when the app is running and the time is reached.
+AUTO_NEWS_ALERTS_ENABLED = os.getenv("AUTO_NEWS_ALERTS_ENABLED", "true").lower() == "true"
+AUTO_NEWS_MIN_INTERVAL_MINUTES = int(os.getenv("AUTO_NEWS_MIN_INTERVAL_MINUTES", "180"))
+AUTO_NEWS_MAX_INTERVAL_MINUTES = int(os.getenv("AUTO_NEWS_MAX_INTERVAL_MINUTES", "360"))
+AUTO_NEWS_MAX_ARTICLES_PER_MARKET = int(os.getenv("AUTO_NEWS_MAX_ARTICLES_PER_MARKET", "5"))
+
 
 # Add or remove tickers here
 CRYPTO_TICKERS = [
@@ -169,6 +180,84 @@ def send_discord_alert(webhook_url, message, max_retries=2):
 
     return False
 
+
+
+
+def send_discord_embed(webhook_url, title, color, fields, max_retries=2):
+    if not webhook_url:
+        print("Discord webhook missing.")
+        return False
+
+    payload = {
+        "embeds": [
+            {
+                "title": title,
+                "color": color,
+                "fields": fields,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        ]
+    }
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            print("Discord embed status:", response.status_code, response.text[:200])
+
+            if response.status_code in [200, 204]:
+                return True
+
+            if response.status_code == 429 and attempt < max_retries:
+                try:
+                    retry_after = response.json().get("retry_after", 1)
+                except Exception:
+                    retry_after = 1
+
+                time.sleep(float(retry_after) + 0.5)
+                continue
+
+            return False
+
+        except Exception as error:
+            print("Discord embed send error:", error)
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            return False
+
+    return False
+
+
+def signal_embed_color(signal):
+    if "BUY" in signal:
+        return 65280
+    if "SELL" in signal:
+        return 16711680
+    return 16776960
+
+
+def send_signal_embed(row):
+    ticker = row["Ticker"]
+    market = row["Market"]
+    signal = row["AI Signal"]
+
+    fields = [
+        {"name": "Ticker", "value": str(ticker), "inline": True},
+        {"name": "Price", "value": f"${row['Price']}", "inline": True},
+        {"name": "Signal", "value": str(signal), "inline": True},
+        {"name": "Confidence", "value": f"{row['AI Confidence %']}%", "inline": True},
+        {"name": "RSI", "value": str(row["RSI"]), "inline": True},
+        {"name": "MACD", "value": str(row["MACD"]), "inline": True},
+        {"name": "Final Score", "value": str(row["Final Score"]), "inline": True},
+        {"name": "Time", "value": datetime.now().strftime("%Y-%m-%d %H:%M"), "inline": False},
+    ]
+
+    return send_discord_embed(
+        get_trade_webhook(ticker),
+        f"{market} Market | {signal}",
+        signal_embed_color(signal),
+        fields
+    )
 
 def load_balance():
     if os.path.exists(BALANCE_FILE):
@@ -294,6 +383,142 @@ def clear_sent_signal_log():
         print("Signal log clear error:", error)
 
 
+def load_next_news_time():
+    try:
+        if os.path.exists(NEWS_SCHEDULE_FILE) and os.path.getsize(NEWS_SCHEDULE_FILE) > 0:
+            with open(NEWS_SCHEDULE_FILE, "r", encoding="utf-8") as file:
+                return float(file.read().strip())
+    except Exception as error:
+        print("News schedule load error:", error)
+
+    return 0
+
+
+def save_next_news_time(next_time):
+    try:
+        with open(NEWS_SCHEDULE_FILE, "w", encoding="utf-8") as file:
+            file.write(str(next_time))
+    except Exception as error:
+        print("News schedule save error:", error)
+
+
+def schedule_next_news_time():
+    min_minutes = max(1, AUTO_NEWS_MIN_INTERVAL_MINUTES)
+    max_minutes = max(min_minutes, AUTO_NEWS_MAX_INTERVAL_MINUTES)
+    delay_minutes = random.randint(min_minutes, max_minutes)
+    next_time = time.time() + (delay_minutes * 60)
+    save_next_news_time(next_time)
+    return next_time
+
+
+def build_news_digest(tickers, market_name, max_articles):
+    digest_items = []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for ticker in tickers:
+        news_items = get_news(ticker)
+
+        if not news_items:
+            continue
+
+        for article in news_items[:3]:
+            headline = get_article_title(article)
+            article_url = get_article_url(article)
+            publisher = get_article_publisher(article)
+
+            if not headline:
+                continue
+
+            news_key = f"{ticker}_{headline}_{today}"
+
+            if news_key in st.session_state.sent_news:
+                continue
+
+            digest_items.append({
+                "key": news_key,
+                "ticker": ticker,
+                "headline": headline,
+                "url": article_url,
+                "publisher": publisher
+            })
+
+            if len(digest_items) >= max_articles:
+                return digest_items
+
+    return digest_items
+
+
+def send_news_digest(tickers, market_name, max_articles=5):
+    webhook_url = CRYPTO_NEWS_WEBHOOK_URL if market_name == "Crypto" else STOCK_NEWS_WEBHOOK_URL
+
+    if not webhook_url:
+        print(f"Missing {market_name} news webhook.")
+        return 0
+
+    digest_items = build_news_digest(tickers, market_name, max_articles)
+
+    if not digest_items:
+        print(f"No new {market_name} news articles to send.")
+        return 0
+
+    message = f"📰 {market_name.upper()} MARKET NEWS DIGEST\n"
+    message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+
+    for number, item in enumerate(digest_items, start=1):
+        line = (
+            f"{number}. {item['ticker']} | {item['headline']}\n"
+            f"Source: {item['publisher']}"
+        )
+
+        if item["url"]:
+            line += f"\n{item['url']}"
+
+        line += "\n\n"
+
+        if len(message) + len(line) > 1900:
+            break
+
+        message += line
+
+    sent = send_discord_alert(webhook_url, message)
+
+    if sent:
+        for item in digest_items:
+            st.session_state.sent_news.add(item["key"])
+        save_sent_news(st.session_state.sent_news)
+        return len(digest_items)
+
+    return 0
+
+
+def send_auto_newsletter_if_due():
+    if not AUTO_NEWS_ALERTS_ENABLED:
+        return 0
+
+    current_time = time.time()
+
+    if current_time < st.session_state.next_auto_news_time:
+        return 0
+
+    total_sent = 0
+    total_sent += send_news_digest(
+        CRYPTO_TICKERS,
+        "Crypto",
+        max_articles=AUTO_NEWS_MAX_ARTICLES_PER_MARKET
+    )
+
+    time.sleep(1)
+
+    total_sent += send_news_digest(
+        STOCK_TICKERS,
+        "Stock",
+        max_articles=AUTO_NEWS_MAX_ARTICLES_PER_MARKET
+    )
+
+    st.session_state.next_auto_news_time = schedule_next_news_time()
+    return total_sent
+
+
 def should_send_daily_summary(market):
     now = datetime.now()
     scheduled_time_reached = (
@@ -356,19 +581,7 @@ def send_auto_signal_alerts(watchlist_df):
         if alert_key in st.session_state.sent_signal_alerts:
             continue
 
-        message = (
-            f"AI SIGNAL ALERT\n"
-            f"Market: {row['Market']}\n"
-            f"Ticker: {ticker}\n"
-            f"Signal: {signal}\n"
-            f"Confidence: {row['AI Confidence %']}%\n"
-            f"Price: ${row['Price']}\n"
-            f"RSI: {row['RSI']}\n"
-            f"MACD: {row['MACD']}\n"
-            f"Final Score: {row['Final Score']}"
-        )
-
-        sent = send_discord_alert(get_trade_webhook(ticker), message)
+        sent = send_signal_embed(row)
 
         if sent:
             sent_count += 1
@@ -591,31 +804,12 @@ def get_news_score(ticker):
                 if word in title:
                     news_score -= 5
 
-            if headline:
-                news_key = f"{ticker}_{headline}_{datetime.now().strftime('%Y-%m-%d')}"
-
-                if news_key not in st.session_state.sent_news:
-                    webhook_url = get_news_webhook(ticker)
-
-                    if webhook_url:
-                        market = get_asset_type(ticker)
-                        message = (
-                            f"NEWS ALERT\n"
-                            f"Market: {market}\n"
-                            f"Ticker: {ticker}\n"
-                            f"Source: {publisher}\n"
-                            f"Headline: {headline}"
-                        )
-
-                        if article_url:
-                            message += f"\nLink: {article_url}"
-
-                        sent = send_discord_alert(webhook_url, message)
-
-                        if sent:
-                            st.session_state.sent_news.add(news_key)
-                            save_sent_news(st.session_state.sent_news)
-                            time.sleep(0.5)
+            # IMPORTANT:
+            # Do not send Discord news alerts from get_news_score().
+            # This function runs every time the dashboard/watchlist refreshes,
+            # which can spam Discord when the dashboard is opened.
+            # News alerts should be sent only through the Manual News Scan buttons
+            # or through a separate scheduled news job later.
 
     except Exception:
         news_score = 0
@@ -862,6 +1056,16 @@ if "sent_summaries" not in st.session_state:
 
 if "sent_signal_alerts" not in st.session_state:
     st.session_state.sent_signal_alerts = load_sent_signals()
+
+if "next_auto_news_time" not in st.session_state:
+    saved_news_time = load_next_news_time()
+
+    # Avoid sending news immediately just because the dashboard was opened.
+    # If the saved time is already expired on startup, schedule a new future time.
+    if saved_news_time > time.time():
+        st.session_state.next_auto_news_time = saved_news_time
+    else:
+        st.session_state.next_auto_news_time = schedule_next_news_time()
 
 # ======================================================
 # TOP METRICS
@@ -1386,6 +1590,7 @@ with scanner_tab:
             send_scheduled_daily_summary(watchlist_df, "Stock")
 
         send_auto_signal_alerts(watchlist_df)
+        send_auto_newsletter_if_due()
 
         if st.button("Send Crypto Daily Summary"):
             if not crypto_summary_message:
@@ -1456,11 +1661,9 @@ with scanner_tab:
                     alert_key = f"{row['Ticker']}_{row['AI Signal']}_{datetime.now().strftime('%Y-%m-%d')}"
 
                     if alert_key not in st.session_state.sent_signal_alerts:
-                        send_discord_alert(
-                            get_trade_webhook(row["Ticker"]),
-                            f"AI SIGNAL ALERT\nTicker: {row['Ticker']}\nMarket: {row['Market']}\nSignal: {row['AI Signal']}\nConfidence: {row['AI Confidence %']}%\nPrice: ${row['Price']}"
-                        )
-                        st.session_state.sent_signal_alerts.add(alert_key)
+                        sent = send_signal_embed(row)
+                        if sent:
+                            st.session_state.sent_signal_alerts.add(alert_key)
                         save_sent_signals(st.session_state.sent_signal_alerts)
 
                 st.success("Signal alerts sent.")
@@ -1700,6 +1903,11 @@ with settings_tab:
 
     st.subheader("Manual News Scan")
 
+    st.write("Automatic news newsletter enabled:", AUTO_NEWS_ALERTS_ENABLED)
+    st.write("News interval minutes:", f"{AUTO_NEWS_MIN_INTERVAL_MINUTES} to {AUTO_NEWS_MAX_INTERVAL_MINUTES}")
+    st.write("Max articles per market digest:", AUTO_NEWS_MAX_ARTICLES_PER_MARKET)
+    st.write("Next automatic news digest:", datetime.fromtimestamp(st.session_state.next_auto_news_time).strftime("%Y-%m-%d %H:%M:%S"))
+
     col_news1, col_news2, col_news3 = st.columns(3)
 
     with col_news1:
@@ -1751,6 +1959,13 @@ with settings_tab:
     st.write("Minimum confidence for auto signal alerts:", AUTO_SIGNAL_MIN_CONFIDENCE)
     st.write("Sent signal records today:", sorted(st.session_state.sent_signal_alerts))
 
+    st.subheader("Automatic News Newsletter")
+    st.write("Automatic news newsletter enabled:", AUTO_NEWS_ALERTS_ENABLED)
+    st.write("News interval minutes:", f"{AUTO_NEWS_MIN_INTERVAL_MINUTES} to {AUTO_NEWS_MAX_INTERVAL_MINUTES}")
+    st.write("Max articles per market digest:", AUTO_NEWS_MAX_ARTICLES_PER_MARKET)
+    st.write("Next automatic news digest:", datetime.fromtimestamp(st.session_state.next_auto_news_time).strftime("%Y-%m-%d %H:%M:%S"))
+    st.info("News does not send just because you open the dashboard. It waits until the next scheduled random interval, then sends one small crypto digest and one small stock digest while the app is running.")
+
     if st.button("Clear Sent Signal Log"):
         st.session_state.sent_signal_alerts = set()
         clear_sent_signal_log()
@@ -1760,7 +1975,7 @@ with settings_tab:
         "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
         "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
         "STOCK_NEWS_WEBHOOK_URL, CRYPTO_SUMMARY_WEBHOOK_URL, "
-        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR, AUTO_DAILY_SUMMARY_MINUTE, AUTO_SIGNAL_ALERTS_ENABLED, and AUTO_SIGNAL_MIN_CONFIDENCE. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
+        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR, AUTO_DAILY_SUMMARY_MINUTE, AUTO_SIGNAL_ALERTS_ENABLED, AUTO_SIGNAL_MIN_CONFIDENCE, AUTO_NEWS_ALERTS_ENABLED, AUTO_NEWS_MIN_INTERVAL_MINUTES, AUTO_NEWS_MAX_INTERVAL_MINUTES, and AUTO_NEWS_MAX_ARTICLES_PER_MARKET. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
         "CRYPTO_WEBHOOK_URL, STOCK_WEBHOOK_URL, TRADE_WEBHOOK_URL, and "
         "NEWS_WEBHOOK_URL still work as fallbacks."
     )
