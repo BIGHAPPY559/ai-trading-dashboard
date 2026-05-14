@@ -42,6 +42,7 @@ SUMMARY_LOG_FILE = os.path.join(BASE_DIR, "sent_summary_log.txt")
 SIGNAL_LOG_FILE = os.path.join(BASE_DIR, "sent_signal_log.txt")
 NEWS_SCHEDULE_FILE = os.path.join(BASE_DIR, "news_schedule_log.txt")
 SIGNAL_SCHEDULE_FILE = os.path.join(BASE_DIR, "signal_schedule_log.txt")
+ALERT_HISTORY_FILE = os.path.join(BASE_DIR, "alert_history.csv")
 
 # ======================================================
 # SETTINGS
@@ -256,12 +257,25 @@ def send_signal_embed(row):
         {"name": "Time", "value": datetime.now().strftime("%Y-%m-%d %H:%M"), "inline": False},
     ]
 
-    return send_discord_embed(
+    sent = send_discord_embed(
         get_trade_webhook(ticker),
         f"{market} Market | {signal}",
         signal_embed_color(signal),
         fields
     )
+
+    if sent:
+        log_trade_notification(
+            ticker=ticker,
+            market=market,
+            signal=signal,
+            confidence=row["AI Confidence %"],
+            rsi=row["RSI"],
+            price=row["Price"],
+            source="AI Signal Alert"
+        )
+
+    return sent
 
 def load_balance():
     if os.path.exists(BALANCE_FILE):
@@ -290,6 +304,38 @@ def load_csv_records(file_path):
 def save_records(file_path, records):
     pd.DataFrame(records).to_csv(file_path, index=False)
 
+def load_alert_history():
+    try:
+        if os.path.exists(ALERT_HISTORY_FILE) and os.path.getsize(ALERT_HISTORY_FILE) > 0:
+            return pd.read_csv(ALERT_HISTORY_FILE).to_dict("records")
+    except Exception as error:
+        print("Alert history load error:", error)
+
+    return []
+
+
+def save_alert_history(alert_history):
+    try:
+        pd.DataFrame(alert_history).to_csv(ALERT_HISTORY_FILE, index=False)
+    except Exception as error:
+        print("Alert history save error:", error)
+
+
+def log_trade_notification(ticker, market, signal, confidence, rsi, price, source):
+    alert = {
+        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Ticker": ticker,
+        "Market": market,
+        "Signal": signal,
+        "Confidence %": confidence,
+        "RSI": rsi,
+        "Price": price,
+        "Source": source
+    }
+
+    st.session_state.alert_history.insert(0, alert)
+    st.session_state.alert_history = st.session_state.alert_history[:100]
+    save_alert_history(st.session_state.alert_history)
 
 def load_equity_history():
     try:
@@ -1131,6 +1177,9 @@ if "portfolio" not in st.session_state:
 if "trade_history" not in st.session_state:
     st.session_state.trade_history = load_csv_records(TRADE_HISTORY_FILE)
 
+if "alert_history" not in st.session_state:
+    st.session_state.alert_history = load_alert_history()
+
 if "equity_history" not in st.session_state:
     st.session_state.equity_history = load_equity_history()
 
@@ -1213,11 +1262,12 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, crypto_tab, stock_tab, scanner_tab, backtest_tab, settings_tab = st.tabs([
+account_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, settings_tab = st.tabs([
     "Paper Account",
     "Crypto",
     "Stocks",
     "AI Scanner",
+    "Trade Notifications",
     "Backtesting",
     "Settings"
 ])
@@ -1745,6 +1795,67 @@ with scanner_tab:
                         save_sent_signals(st.session_state.sent_signal_alerts)
 
                 st.success("Signal alerts sent.")
+
+# ======================================================
+# TRADE NOTIFICATIONS TAB
+# ======================================================
+
+with alerts_tab:
+    st.header("Trade Notifications Panel")
+
+    alert_df = pd.DataFrame(st.session_state.alert_history)
+
+    if alert_df.empty:
+        st.info("No trade notifications logged yet.")
+    else:
+        col1, col2, col3 = st.columns(3)
+
+        total_alerts = len(alert_df)
+        buy_alerts = len(alert_df[alert_df["Signal"].astype(str).str.contains("BUY", na=False)])
+        sell_alerts = len(alert_df[alert_df["Signal"].astype(str).str.contains("SELL", na=False)])
+
+        col1.metric("Total Alerts", total_alerts)
+        col2.metric("Buy Alerts", buy_alerts)
+        col3.metric("Sell Alerts", sell_alerts)
+
+        st.subheader("Recent Alerts")
+
+        market_filter = st.selectbox(
+            "Filter Market",
+            ["ALL", "Crypto", "Stock"],
+            key="alert_market_filter"
+        )
+
+        signal_filter = st.selectbox(
+            "Filter Signal",
+            ["ALL", "STRONG BUY", "BUY", "HOLD", "SELL"],
+            key="alert_signal_filter"
+        )
+
+        filtered_alerts = alert_df.copy()
+
+        if market_filter != "ALL":
+            filtered_alerts = filtered_alerts[filtered_alerts["Market"] == market_filter]
+
+        if signal_filter != "ALL":
+            filtered_alerts = filtered_alerts[filtered_alerts["Signal"] == signal_filter]
+
+        st.dataframe(filtered_alerts, width="stretch")
+
+        csv_alerts = filtered_alerts.to_csv(index=False)
+
+        st.download_button(
+            label="Download Alert History CSV",
+            data=csv_alerts,
+            file_name="trade_notifications.csv",
+            mime="text/csv"
+        )
+
+        if st.button("Clear Trade Notifications"):
+            st.session_state.alert_history = []
+            save_alert_history(st.session_state.alert_history)
+            st.success("Trade notifications cleared.")
+            st.rerun()
 
 # ======================================================
 # BACKTESTING TAB
