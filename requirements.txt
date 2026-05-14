@@ -2,6 +2,7 @@ streamlit
 yfinance
 pandas
 plotly
-ta
 requests
+ta
 streamlit-autorefresh
+python-dotenv
