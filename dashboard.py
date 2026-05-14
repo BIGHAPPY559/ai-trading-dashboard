@@ -41,6 +41,7 @@ NEWS_LOG_FILE = os.path.join(BASE_DIR, "sent_news_log.txt")
 SUMMARY_LOG_FILE = os.path.join(BASE_DIR, "sent_summary_log.txt")
 SIGNAL_LOG_FILE = os.path.join(BASE_DIR, "sent_signal_log.txt")
 NEWS_SCHEDULE_FILE = os.path.join(BASE_DIR, "news_schedule_log.txt")
+SIGNAL_SCHEDULE_FILE = os.path.join(BASE_DIR, "signal_schedule_log.txt")
 
 # ======================================================
 # SETTINGS
@@ -59,6 +60,7 @@ AUTO_DAILY_SUMMARY_MINUTE = int(os.getenv("AUTO_DAILY_SUMMARY_MINUTE", "0"))
 # Sends one alert per ticker/signal per day to avoid spam.
 AUTO_SIGNAL_ALERTS_ENABLED = os.getenv("AUTO_SIGNAL_ALERTS_ENABLED", "true").lower() == "true"
 AUTO_SIGNAL_MIN_CONFIDENCE = float(os.getenv("AUTO_SIGNAL_MIN_CONFIDENCE", "75"))
+AUTO_SIGNAL_CHECK_INTERVAL_MINUTES = int(os.getenv("AUTO_SIGNAL_CHECK_INTERVAL_MINUTES", "15"))
 
 # Automatic market news newsletter.
 # This does not send on app open. It schedules the next run in the future,
@@ -369,8 +371,12 @@ def load_sent_signals():
 
 def save_sent_signals(signal_set):
     try:
+        cleaned_signals = sorted(list(signal_set))
+
         with open(SIGNAL_LOG_FILE, "w", encoding="utf-8") as file:
-            file.write("\n".join(sorted(signal_set)))
+            for signal in cleaned_signals:
+                file.write(f"{signal}\n")
+
     except Exception as error:
         print("Signal log save error:", error)
 
@@ -381,6 +387,32 @@ def clear_sent_signal_log():
             os.remove(SIGNAL_LOG_FILE)
     except Exception as error:
         print("Signal log clear error:", error)
+
+
+def load_next_signal_time():
+    try:
+        if os.path.exists(SIGNAL_SCHEDULE_FILE) and os.path.getsize(SIGNAL_SCHEDULE_FILE) > 0:
+            with open(SIGNAL_SCHEDULE_FILE, "r", encoding="utf-8") as file:
+                return float(file.read().strip())
+    except Exception as error:
+        print("Signal schedule load error:", error)
+
+    return 0
+
+
+def save_next_signal_time(next_time):
+    try:
+        with open(SIGNAL_SCHEDULE_FILE, "w", encoding="utf-8") as file:
+            file.write(str(next_time))
+    except Exception as error:
+        print("Signal schedule save error:", error)
+
+
+def schedule_next_signal_time():
+    interval_minutes = max(1, AUTO_SIGNAL_CHECK_INTERVAL_MINUTES)
+    next_time = time.time() + (interval_minutes * 60)
+    save_next_signal_time(next_time)
+    return next_time
 
 
 def load_next_news_time():
@@ -561,6 +593,11 @@ def send_auto_signal_alerts(watchlist_df):
     if not AUTO_SIGNAL_ALERTS_ENABLED or watchlist_df.empty:
         return 0
 
+    current_time = time.time()
+
+    if current_time < st.session_state.next_auto_signal_time:
+        return 0
+
     alert_signals = ["STRONG BUY", "BUY", "SELL"]
     candidates = watchlist_df[
         watchlist_df["AI Signal"].isin(alert_signals)
@@ -568,6 +605,7 @@ def send_auto_signal_alerts(watchlist_df):
     ].copy()
 
     if candidates.empty:
+        st.session_state.next_auto_signal_time = schedule_next_signal_time()
         return 0
 
     sent_count = 0
@@ -579,6 +617,7 @@ def send_auto_signal_alerts(watchlist_df):
         alert_key = f"{ticker}_{signal}_{today}"
 
         if alert_key in st.session_state.sent_signal_alerts:
+            print("Skipping duplicate signal:", alert_key)
             continue
 
         sent = send_signal_embed(row)
@@ -589,6 +628,7 @@ def send_auto_signal_alerts(watchlist_df):
             save_sent_signals(st.session_state.sent_signal_alerts)
             time.sleep(0.5)
 
+    st.session_state.next_auto_signal_time = schedule_next_signal_time()
     return sent_count
 
 
@@ -1055,7 +1095,22 @@ if "sent_summaries" not in st.session_state:
     st.session_state.sent_summaries = load_sent_summaries()
 
 if "sent_signal_alerts" not in st.session_state:
-    st.session_state.sent_signal_alerts = load_sent_signals()
+    loaded_signals = load_sent_signals()
+
+    if isinstance(loaded_signals, set):
+        st.session_state.sent_signal_alerts = loaded_signals
+    else:
+        st.session_state.sent_signal_alerts = set()
+
+if "next_auto_signal_time" not in st.session_state:
+    saved_signal_time = load_next_signal_time()
+
+    # Avoid sending scanner alerts immediately just because the dashboard was opened.
+    # If the saved time is already expired on startup, schedule a new future check.
+    if saved_signal_time > time.time():
+        st.session_state.next_auto_signal_time = saved_signal_time
+    else:
+        st.session_state.next_auto_signal_time = schedule_next_signal_time()
 
 if "next_auto_news_time" not in st.session_state:
     saved_news_time = load_next_news_time()
@@ -1957,6 +2012,8 @@ with settings_tab:
     st.subheader("Automatic Signal Alerts")
     st.write("Auto signal alerts enabled:", AUTO_SIGNAL_ALERTS_ENABLED)
     st.write("Minimum confidence for auto signal alerts:", AUTO_SIGNAL_MIN_CONFIDENCE)
+    st.write("Signal check interval minutes:", AUTO_SIGNAL_CHECK_INTERVAL_MINUTES)
+    st.write("Next automatic signal check:", datetime.fromtimestamp(st.session_state.next_auto_signal_time).strftime("%Y-%m-%d %H:%M:%S"))
     st.write("Sent signal records today:", sorted(st.session_state.sent_signal_alerts))
 
     st.subheader("Automatic News Newsletter")
@@ -1975,7 +2032,7 @@ with settings_tab:
         "Recommended environment variables: CRYPTO_TRADE_WEBHOOK_URL, "
         "STOCK_TRADE_WEBHOOK_URL, CRYPTO_NEWS_WEBHOOK_URL, "
         "STOCK_NEWS_WEBHOOK_URL, CRYPTO_SUMMARY_WEBHOOK_URL, "
-        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR, AUTO_DAILY_SUMMARY_MINUTE, AUTO_SIGNAL_ALERTS_ENABLED, AUTO_SIGNAL_MIN_CONFIDENCE, AUTO_NEWS_ALERTS_ENABLED, AUTO_NEWS_MIN_INTERVAL_MINUTES, AUTO_NEWS_MAX_INTERVAL_MINUTES, and AUTO_NEWS_MAX_ARTICLES_PER_MARKET. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
+        "STOCK_SUMMARY_WEBHOOK_URL. Optional schedule variables: AUTO_DAILY_SUMMARY_HOUR, AUTO_DAILY_SUMMARY_MINUTE, AUTO_SIGNAL_ALERTS_ENABLED, AUTO_SIGNAL_MIN_CONFIDENCE, AUTO_SIGNAL_CHECK_INTERVAL_MINUTES, AUTO_NEWS_ALERTS_ENABLED, AUTO_NEWS_MIN_INTERVAL_MINUTES, AUTO_NEWS_MAX_INTERVAL_MINUTES, and AUTO_NEWS_MAX_ARTICLES_PER_MARKET. SUMMARY_WEBHOOK_URL still works as a fallback. Older variables like "
         "CRYPTO_WEBHOOK_URL, STOCK_WEBHOOK_URL, TRADE_WEBHOOK_URL, and "
         "NEWS_WEBHOOK_URL still work as fallbacks."
     )
