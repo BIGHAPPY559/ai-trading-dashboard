@@ -47,7 +47,7 @@ SIGNAL_SCHEDULE_FILE = os.path.join(BASE_DIR, "signal_schedule_log.txt")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v18_old_style_summary_exact_embed"
+APP_VERSION = "v19_summary_embed_only_no_plain_text"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -679,15 +679,23 @@ def build_market_summary_fields(watchlist_df, market):
     if market_df.empty:
         return []
 
-    buy_section = format_summary_section(market_df, ["STRONG BUY", "BUY"])
-    hold_section = format_summary_section(market_df, ["HOLD"])
-    sell_section = format_summary_section(market_df, ["SELL", "STRONG SELL"])
+    summary_text = (
+        f"🟢 BUY SIGNALS\n"
+        f"{format_summary_section(market_df, ['STRONG BUY', 'BUY'])}\n\n"
+        f"🟡 HOLD SIGNALS\n"
+        f"{format_summary_section(market_df, ['HOLD'])}\n\n"
+        f"🔴 SELL SIGNALS\n"
+        f"{format_summary_section(market_df, ['SELL', 'STRONG SELL'])}\n\n"
+        f"Time\n"
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
 
     return [
-        {"name": "🟢 BUY SIGNALS", "value": buy_section, "inline": False},
-        {"name": "🟡 HOLD SIGNALS", "value": hold_section, "inline": False},
-        {"name": "🔴 SELL SIGNALS", "value": sell_section, "inline": False},
-        {"name": "Time", "value": datetime.now().strftime("%Y-%m-%d %H:%M"), "inline": False},
+        {
+            "name": " ",
+            "value": summary_text,
+            "inline": False
+        }
     ]
 
 
@@ -698,6 +706,7 @@ def send_market_summary_embed(watchlist_df, market):
         print(f"No {market} summary available.")
         return False
 
+    print(f"Sending {market} summary as Discord embed/card format.")
     return send_discord_embed(
         get_summary_webhook(market),
         f"📊 {market} Market Summary",
@@ -707,8 +716,8 @@ def send_market_summary_embed(watchlist_df, market):
 
 
 def build_market_summary(watchlist_df, market):
-    # Fallback text version only. Discord daily summaries use send_market_summary_embed()
-    # so they keep the old card-style format.
+    # Text preview only. Discord sends summaries through send_market_summary_embed().
+    # Do not put old AI DAILY summary formatting here.
     market_df = watchlist_df[watchlist_df["Market"] == market].copy()
 
     if market_df.empty:
@@ -1943,7 +1952,8 @@ with settings_tab:
             st.success("Crypto news test sent.") if sent else st.error("Crypto news test failed.")
 
         if st.button("Test Crypto Summary Webhook"):
-            sent = send_market_summary_embed(watchlist_df, "Crypto")
+            latest_watchlist_df = build_watchlist(ALL_TICKERS)
+            sent = send_market_summary_embed(latest_watchlist_df, "Crypto")
             st.success("Crypto summary embed test sent.") if sent else st.error("Crypto summary embed test failed.")
 
     with col_test2:
@@ -1962,7 +1972,8 @@ with settings_tab:
             st.success("Stock news test sent.") if sent else st.error("Stock news test failed.")
 
         if st.button("Test Stock Summary Webhook"):
-            sent = send_market_summary_embed(watchlist_df, "Stock")
+            latest_watchlist_df = build_watchlist(ALL_TICKERS)
+            sent = send_market_summary_embed(latest_watchlist_df, "Stock")
             st.success("Stock summary embed test sent.") if sent else st.error("Stock summary embed test failed.")
 
     st.subheader("Manual News Scan")
