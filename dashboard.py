@@ -47,7 +47,7 @@ SIGNAL_SCHEDULE_FILE = os.path.join(BASE_DIR, "signal_schedule_log.txt")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v17_old_style_summary_embed_only"
+APP_VERSION = "v18_old_style_summary_exact_embed"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -1943,11 +1943,8 @@ with settings_tab:
             st.success("Crypto news test sent.") if sent else st.error("Crypto news test failed.")
 
         if st.button("Test Crypto Summary Webhook"):
-            sent = send_discord_alert(
-                get_summary_webhook("Crypto"),
-                "TEST CRYPTO SUMMARY ALERT"
-            )
-            st.success("Crypto summary test sent.") if sent else st.error("Crypto summary test failed.")
+            sent = send_market_summary_embed(watchlist_df, "Crypto")
+            st.success("Crypto summary embed test sent.") if sent else st.error("Crypto summary embed test failed.")
 
     with col_test2:
         if st.button("Test Stock Trade Webhook"):
@@ -1965,11 +1962,8 @@ with settings_tab:
             st.success("Stock news test sent.") if sent else st.error("Stock news test failed.")
 
         if st.button("Test Stock Summary Webhook"):
-            sent = send_discord_alert(
-                get_summary_webhook("Stock"),
-                "TEST STOCK SUMMARY ALERT"
-            )
-            st.success("Stock summary test sent.") if sent else st.error("Stock summary test failed.")
+            sent = send_market_summary_embed(watchlist_df, "Stock")
+            st.success("Stock summary embed test sent.") if sent else st.error("Stock summary embed test failed.")
 
     st.subheader("Manual News Scan")
 
