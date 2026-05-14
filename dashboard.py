@@ -1,7 +1,7 @@
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -196,7 +196,7 @@ def send_discord_embed(webhook_url, title, color, fields, max_retries=2):
                 "title": title,
                 "color": color,
                 "fields": fields,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.utcnow().isoformat()
             }
         ]
     }
@@ -572,13 +572,7 @@ def mark_daily_summary_sent(market):
 
 
 def send_scheduled_daily_summary(watchlist_df, market):
-    summary_message = build_market_summary(watchlist_df, market)
-
-    if not summary_message:
-        print(f"No {market} summary available.")
-        return False
-
-    sent = send_discord_alert(get_summary_webhook(market), summary_message)
+    sent = send_market_summary_embed(watchlist_df, market)
 
     if sent:
         mark_daily_summary_sent(market)
@@ -656,34 +650,76 @@ def get_summary_webhook(market):
     return SUMMARY_WEBHOOK_URL
 
 
+def format_summary_section(market_df, signals):
+    section_df = market_df[market_df["AI Signal"].isin(signals)].copy()
+
+    if section_df.empty:
+        return "None"
+
+    lines = []
+
+    for _, row in section_df.iterrows():
+        confidence = int(round(float(row["AI Confidence %"])))
+        rsi = row.get("RSI", "N/A")
+        lines.append(f"{row['Ticker']} | {confidence}% | RSI {rsi}")
+
+    section_text = "\n".join(lines)
+
+    if len(section_text) > 1000:
+        section_text = section_text[:997] + "..."
+
+    return section_text
+
+
+def build_market_summary_fields(watchlist_df, market):
+    market_df = watchlist_df[watchlist_df["Market"] == market].copy()
+
+    if market_df.empty:
+        return []
+
+    buy_section = format_summary_section(market_df, ["STRONG BUY", "BUY"])
+    hold_section = format_summary_section(market_df, ["HOLD"])
+    sell_section = format_summary_section(market_df, ["SELL", "STRONG SELL"])
+
+    return [
+        {"name": "🟢 BUY SIGNALS", "value": buy_section, "inline": False},
+        {"name": "🟡 HOLD SIGNALS", "value": hold_section, "inline": False},
+        {"name": "🔴 SELL SIGNALS", "value": sell_section, "inline": False},
+        {"name": "Time", "value": datetime.now().strftime("%Y-%m-%d %H:%M"), "inline": False},
+    ]
+
+
+def send_market_summary_embed(watchlist_df, market):
+    fields = build_market_summary_fields(watchlist_df, market)
+
+    if not fields:
+        print(f"No {market} summary available.")
+        return False
+
+    return send_discord_embed(
+        get_summary_webhook(market),
+        f"📊 {market} Market Summary",
+        3447003,
+        fields
+    )
+
+
 def build_market_summary(watchlist_df, market):
     market_df = watchlist_df[watchlist_df["Market"] == market].copy()
 
     if market_df.empty:
         return ""
 
-    top_bullish = market_df.head(3)
-    top_bearish = market_df.tail(3)
-
-    summary_message = f"AI DAILY {market.upper()} MARKET SUMMARY\n\n"
-    summary_message += "TOP BULLISH\n"
-
-    for _, row in top_bullish.iterrows():
-        summary_message += (
-            f"{row['Ticker']} | Score: {row['Final Score']} | "
-            f"Signal: {row['AI Signal']} | Confidence: {row['AI Confidence %']}%\n"
-        )
-
-    summary_message += "\nTOP BEARISH\n"
-
-    for _, row in top_bearish.iterrows():
-        summary_message += (
-            f"{row['Ticker']} | Score: {row['Final Score']} | "
-            f"Signal: {row['AI Signal']} | Confidence: {row['AI Confidence %']}%\n"
-        )
+    summary_message = f"📊 {market.upper()} MARKET SUMMARY\n\n"
+    summary_message += "🟢 BUY SIGNALS\n"
+    summary_message += format_summary_section(market_df, ["STRONG BUY", "BUY"])
+    summary_message += "\n\n🟡 HOLD SIGNALS\n"
+    summary_message += format_summary_section(market_df, ["HOLD"])
+    summary_message += "\n\n🔴 SELL SIGNALS\n"
+    summary_message += format_summary_section(market_df, ["SELL", "STRONG SELL"])
+    summary_message += f"\n\nTime\n{datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
     return summary_message
-
 
 def get_article_url(article):
     content = article.get("content", {})
@@ -1648,48 +1684,25 @@ with scanner_tab:
         send_auto_newsletter_if_due()
 
         if st.button("Send Crypto Daily Summary"):
-            if not crypto_summary_message:
-                st.warning("No crypto summary available.")
+            sent = send_market_summary_embed(watchlist_df, "Crypto")
+            if sent:
+                mark_daily_summary_sent("Crypto")
+                st.success("Crypto daily summary sent to Discord.")
             else:
-                sent = send_discord_alert(
-                    get_summary_webhook("Crypto"),
-                    crypto_summary_message
-                )
-                if sent:
-                    mark_daily_summary_sent("Crypto")
-                    st.success("Crypto daily summary sent to Discord.")
-                else:
-                    st.warning("Crypto summary webhook not found or failed.")
+                st.warning("Crypto summary webhook not found, failed, or no crypto data was available.")
 
         if st.button("Send Stock Daily Summary"):
-            if not stock_summary_message:
-                st.warning("No stock summary available.")
+            sent = send_market_summary_embed(watchlist_df, "Stock")
+            if sent:
+                mark_daily_summary_sent("Stock")
+                st.success("Stock daily summary sent to Discord.")
             else:
-                sent = send_discord_alert(
-                    get_summary_webhook("Stock"),
-                    stock_summary_message
-                )
-                if sent:
-                    mark_daily_summary_sent("Stock")
-                    st.success("Stock daily summary sent to Discord.")
-                else:
-                    st.warning("Stock summary webhook not found or failed.")
+                st.warning("Stock summary webhook not found, failed, or no stock data was available.")
 
         if st.button("Send Both Daily Summaries"):
-            crypto_sent = False
-            stock_sent = False
-
-            if crypto_summary_message:
-                crypto_sent = send_discord_alert(
-                    get_summary_webhook("Crypto"),
-                    crypto_summary_message
-                )
-
-            if stock_summary_message:
-                stock_sent = send_discord_alert(
-                    get_summary_webhook("Stock"),
-                    stock_summary_message
-                )
+            crypto_sent = send_market_summary_embed(watchlist_df, "Crypto")
+            time.sleep(1)
+            stock_sent = send_market_summary_embed(watchlist_df, "Stock")
 
             if crypto_sent:
                 mark_daily_summary_sent("Crypto")
