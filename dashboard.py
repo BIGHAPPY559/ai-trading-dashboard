@@ -58,17 +58,22 @@ TAKE_PROFIT_PERCENT = 10
 # Railway usually runs in UTC unless you set a timezone.
 AUTO_DAILY_SUMMARY_HOUR = int(os.getenv("AUTO_DAILY_SUMMARY_HOUR", "7"))
 AUTO_DAILY_SUMMARY_MINUTE = int(os.getenv("AUTO_DAILY_SUMMARY_MINUTE", "0"))
+DASHBOARD_AUTO_SUMMARIES_ENABLED = os.getenv("DASHBOARD_AUTO_SUMMARIES_ENABLED", "false").lower() == "true"
 
 # Automatic scanner signal alerts.
 # Sends one alert per ticker/signal per day to avoid spam.
-AUTO_SIGNAL_ALERTS_ENABLED = os.getenv("AUTO_SIGNAL_ALERTS_ENABLED", "true").lower() == "true"
+# Keep dashboard auto-alerts OFF by default because bot.py handles background alerts.
+# You can still use the dashboard's manual test/send buttons.
+AUTO_SIGNAL_ALERTS_ENABLED = os.getenv("DASHBOARD_AUTO_SIGNAL_ALERTS_ENABLED", "false").lower() == "true"
 AUTO_SIGNAL_MIN_CONFIDENCE = float(os.getenv("AUTO_SIGNAL_MIN_CONFIDENCE", "75"))
 AUTO_SIGNAL_CHECK_INTERVAL_MINUTES = int(os.getenv("AUTO_SIGNAL_CHECK_INTERVAL_MINUTES", "15"))
 
 # Automatic market news newsletter.
 # This does not send on app open. It schedules the next run in the future,
 # then sends a small digest only when the app is running and the time is reached.
-AUTO_NEWS_ALERTS_ENABLED = os.getenv("AUTO_NEWS_ALERTS_ENABLED", "true").lower() == "true"
+# Keep dashboard auto-news OFF by default because bot.py handles background news.
+# You can still use the dashboard's manual news buttons.
+AUTO_NEWS_ALERTS_ENABLED = os.getenv("DASHBOARD_AUTO_NEWS_ALERTS_ENABLED", "false").lower() == "true"
 AUTO_NEWS_MIN_INTERVAL_MINUTES = int(os.getenv("AUTO_NEWS_MIN_INTERVAL_MINUTES", "180"))
 AUTO_NEWS_MAX_INTERVAL_MINUTES = int(os.getenv("AUTO_NEWS_MAX_INTERVAL_MINUTES", "360"))
 AUTO_NEWS_MAX_ARTICLES_PER_MARKET = int(os.getenv("AUTO_NEWS_MAX_ARTICLES_PER_MARKET", "5"))
@@ -1734,11 +1739,12 @@ with scanner_tab:
         stock_summary_message = build_market_summary(watchlist_df, "Stock")
 
         # Auto-send daily summaries once per day after scheduled server-local time.
-        if should_send_daily_summary("Crypto"):
-            send_scheduled_daily_summary(watchlist_df, "Crypto")
+        if DASHBOARD_AUTO_SUMMARIES_ENABLED:
+            if should_send_daily_summary("Crypto"):
+                send_scheduled_daily_summary(watchlist_df, "Crypto")
 
-        if should_send_daily_summary("Stock"):
-            send_scheduled_daily_summary(watchlist_df, "Stock")
+            if should_send_daily_summary("Stock"):
+                send_scheduled_daily_summary(watchlist_df, "Stock")
 
         send_auto_signal_alerts(watchlist_df)
         send_auto_newsletter_if_due()
@@ -2129,6 +2135,8 @@ with settings_tab:
             st.success("Sent news log cleared.")
 
     st.subheader("Scheduled Daily Summaries")
+    st.info("Background daily summaries should run from bot.py. Dashboard auto summaries are off by default to prevent duplicate Discord messages.")
+    st.write("Dashboard auto summaries enabled:", DASHBOARD_AUTO_SUMMARIES_ENABLED)
     st.write(
         "Auto daily summaries send once per day after "
         f"{AUTO_DAILY_SUMMARY_HOUR:02d}:{AUTO_DAILY_SUMMARY_MINUTE:02d} server time."
@@ -2141,14 +2149,16 @@ with settings_tab:
         st.success("Sent summary log cleared.")
 
     st.subheader("Automatic Signal Alerts")
-    st.write("Auto signal alerts enabled:", AUTO_SIGNAL_ALERTS_ENABLED)
+    st.info("Background alerts should run from bot.py. Dashboard auto signal alerts are off by default to prevent duplicate Discord messages.")
+    st.write("Dashboard auto signal alerts enabled:", AUTO_SIGNAL_ALERTS_ENABLED)
     st.write("Minimum confidence for auto signal alerts:", AUTO_SIGNAL_MIN_CONFIDENCE)
     st.write("Signal check interval minutes:", AUTO_SIGNAL_CHECK_INTERVAL_MINUTES)
     st.write("Next automatic signal check:", datetime.fromtimestamp(st.session_state.next_auto_signal_time).strftime("%Y-%m-%d %H:%M:%S"))
     st.write("Sent signal records today:", sorted(st.session_state.sent_signal_alerts))
 
     st.subheader("Automatic News Newsletter")
-    st.write("Automatic news newsletter enabled:", AUTO_NEWS_ALERTS_ENABLED)
+    st.info("Background news should run from bot.py. Dashboard auto news is off by default to prevent duplicate Discord messages.")
+    st.write("Dashboard automatic news newsletter enabled:", AUTO_NEWS_ALERTS_ENABLED)
     st.write("News interval minutes:", f"{AUTO_NEWS_MIN_INTERVAL_MINUTES} to {AUTO_NEWS_MAX_INTERVAL_MINUTES}")
     st.write("Max articles per market digest:", AUTO_NEWS_MAX_ARTICLES_PER_MARKET)
     st.write("Next automatic news digest:", datetime.fromtimestamp(st.session_state.next_auto_news_time).strftime("%Y-%m-%d %H:%M:%S"))
