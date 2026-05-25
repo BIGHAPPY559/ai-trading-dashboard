@@ -1,7 +1,0 @@
-pandas
-yfinance
-requests
-ta
-gspread
-google-auth
-python-dotenv
