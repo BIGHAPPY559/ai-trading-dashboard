@@ -1,8 +1,6 @@
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from xml.etree import ElementTree
-
 import pandas as pd
 import requests
 import yfinance as yf
@@ -118,10 +116,18 @@ STOCK_NEWS_WEBHOOK_URL = os.getenv(
 
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
-CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
 
 SCAN_INTERVAL_MINUTES = max(1, get_env_int("BOT_SCAN_INTERVAL_MINUTES", 15))
-MIN_CONFIDENCE = max(0, min(get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75), 100))
+MIN_CONFIDENCE = max(
+    0,
+    min(
+        get_env_float(
+            "BOT_SIGNAL_MIN_CONFIDENCE",
+            get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75)
+        ),
+        100
+    )
+)
 
 SEND_STARTUP_MESSAGE = get_env_bool("BOT_SEND_STARTUP_MESSAGE", True)
 
@@ -160,9 +166,6 @@ def log(message):
 def get_asset_type(ticker):
     return "Crypto" if ticker.endswith("-USD") else "Stock"
 
-
-def clean_crypto_symbol(ticker):
-    return ticker.replace("-USD", "").upper()
 
 
 def get_trade_webhook(ticker):
@@ -216,21 +219,6 @@ def safe_get_json(url, params=None, headers=None, timeout=10):
     except Exception as error:
         log(f"GET JSON error for {url}: {error}")
         return None
-
-
-def safe_get_text(url, params=None, headers=None, timeout=10):
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=timeout)
-
-        if response.status_code != 200:
-            log(f"GET text failed {response.status_code}: {url} {response.text[:200]}")
-            return ""
-
-        return response.text
-
-    except Exception as error:
-        log(f"GET text error for {url}: {error}")
-        return ""
 
 
 def send_discord_embed(webhook_url, title, color, fields, max_retries=2):
@@ -614,62 +602,6 @@ def fetch_yfinance_news(tickers, market):
 
 
 # ======================================================
-# YAHOO FINANCE RSS NEWS
-# ======================================================
-
-def fetch_yahoo_rss_for_ticker(ticker, market):
-    rss_url = "https://feeds.finance.yahoo.com/rss/2.0/headline"
-    rss_text = safe_get_text(
-        rss_url,
-        params={
-            "s": ticker,
-            "region": "US",
-            "lang": "en-US"
-        }
-    )
-
-    if not rss_text:
-        return []
-
-    items = []
-
-    try:
-        root = ElementTree.fromstring(rss_text)
-
-        for rss_item in root.findall("./channel/item")[:NEWS_ARTICLES_PER_TICKER]:
-            title_node = rss_item.find("title")
-            link_node = rss_item.find("link")
-            pub_date_node = rss_item.find("pubDate")
-
-            item = make_news_item(
-                source="Yahoo RSS",
-                market=market,
-                ticker=ticker,
-                title=title_node.text if title_node is not None else "",
-                url=link_node.text if link_node is not None else "",
-                publisher="Yahoo Finance RSS",
-                published_at=pub_date_node.text if pub_date_node is not None else ""
-            )
-
-            if item:
-                items.append(item)
-
-    except Exception as error:
-        log(f"Yahoo RSS parse error for {ticker}: {error}")
-
-    return items
-
-
-def fetch_yahoo_rss_news(tickers, market):
-    items = []
-
-    for ticker in tickers:
-        items.extend(fetch_yahoo_rss_for_ticker(ticker, market))
-
-    return items
-
-
-# ======================================================
 # NEWSAPI NEWS
 # ======================================================
 
@@ -771,63 +703,6 @@ def fetch_finnhub_news(tickers):
     return items
 
 
-# ======================================================
-# CRYPTOPANIC NEWS
-# ======================================================
-
-def fetch_cryptopanic_news():
-    if not CRYPTOPANIC_API_KEY:
-        return []
-
-    currencies = ",".join([clean_crypto_symbol(ticker) for ticker in CRYPTO_TICKERS[:8]])
-
-    data = safe_get_json(
-        "https://cryptopanic.com/api/v1/posts/",
-        params={
-            "auth_token": CRYPTOPANIC_API_KEY,
-            "public": "true",
-            "currencies": currencies
-        }
-    )
-
-    if not data:
-        return []
-
-    items = []
-
-    for article in data.get("results", []):
-        currencies_list = article.get("currencies", [])
-        ticker = "Crypto"
-
-        if currencies_list and isinstance(currencies_list, list):
-            first_currency = currencies_list[0]
-            if isinstance(first_currency, dict):
-                ticker = first_currency.get("code", "Crypto")
-
-        source_data = article.get("source", {})
-        publisher = "CryptoPanic"
-
-        if isinstance(source_data, dict):
-            publisher = source_data.get("title", "CryptoPanic")
-
-        item = make_news_item(
-            source="CryptoPanic",
-            market="Crypto",
-            ticker=ticker,
-            title=article.get("title", ""),
-            url=article.get("url", ""),
-            publisher=publisher,
-            published_at=article.get("published_at", "")
-        )
-
-        if item:
-            items.append(item)
-
-        if len(items) >= NEWS_MAX_ARTICLES_PER_MARKET:
-            break
-
-    return items
-
 
 # ======================================================
 # NEWS DIGEST SENDING
@@ -837,15 +712,12 @@ def collect_news_items(tickers, market, digest_type="scheduled"):
     items = []
 
     if market == "Crypto":
-        items.extend(fetch_cryptopanic_news())
         items.extend(fetch_newsapi_news("Crypto"))
-        items.extend(fetch_yahoo_rss_news(tickers, "Crypto"))
         items.extend(fetch_yfinance_news(tickers, "Crypto"))
 
     if market == "Stock":
         items.extend(fetch_newsapi_news("Stock"))
         items.extend(fetch_finnhub_news(tickers))
-        items.extend(fetch_yahoo_rss_news(tickers, "Stock"))
         items.extend(fetch_yfinance_news(tickers, "Stock"))
 
     breaking_only = digest_type == "breaking" or NEWS_BREAKING_ONLY
@@ -986,16 +858,13 @@ def send_startup_message():
     if not SEND_STARTUP_MESSAGE:
         return
 
-    enabled_sources = ["Yahoo RSS", "Yahoo Finance"]
+    enabled_sources = ["Yahoo Finance"]
 
     if NEWSAPI_KEY:
         enabled_sources.append("NewsAPI")
 
     if FINNHUB_API_KEY:
         enabled_sources.append("Finnhub")
-
-    if CRYPTOPANIC_API_KEY:
-        enabled_sources.append("CryptoPanic")
 
     fields = [
         {"name": "Status", "value": "Railway worker is online.", "inline": False},
@@ -1205,16 +1074,13 @@ def run_scan():
 
 
 def main():
-    enabled_sources = ["Yahoo RSS", "Yahoo Finance"]
+    enabled_sources = ["Yahoo Finance"]
 
     if NEWSAPI_KEY:
         enabled_sources.append("NewsAPI")
 
     if FINNHUB_API_KEY:
         enabled_sources.append("Finnhub")
-
-    if CRYPTOPANIC_API_KEY:
-        enabled_sources.append("CryptoPanic")
 
     log("AI Trading Bot started.")
     log(f"Scan interval: {SCAN_INTERVAL_MINUTES} minutes")
@@ -1244,9 +1110,6 @@ def main():
 
     if not FINNHUB_API_KEY:
         log("INFO: FINNHUB_API_KEY missing. Finnhub source disabled.")
-
-    if not CRYPTOPANIC_API_KEY:
-        log("INFO: CRYPTOPANIC_API_KEY missing. CryptoPanic source disabled.")
 
     send_startup_message()
 
