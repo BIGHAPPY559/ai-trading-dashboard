@@ -203,7 +203,8 @@ BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v19-final-clean-verified"
+HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
+BOT_VERSION = "google-sheets-100-production-v21-heartbeat-polished"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -330,6 +331,20 @@ def bot_uptime_minutes():
         return 0
 
 
+def format_uptime():
+    total_minutes = int(max(0, bot_uptime_minutes()))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+
+    if hours <= 0:
+        return f"{minutes} min"
+
+    if minutes == 0:
+        return f"{hours} hr"
+
+    return f"{hours} hr {minutes} min"
+
+
 def log(message):
     print(message, flush=True)
 
@@ -364,6 +379,13 @@ def get_error_webhook():
         return STOCK_TRADE_WEBHOOK_URL
 
     return CRYPTO_TRADE_WEBHOOK_URL
+
+
+def get_heartbeat_webhook():
+    if HEARTBEAT_WEBHOOK_URL:
+        return HEARTBEAT_WEBHOOK_URL
+
+    return get_error_webhook()
 
 
 def send_error_alert(message):
@@ -1752,6 +1774,9 @@ def update_system_status(spreadsheet, scanned_count, candidates, sent_count, ski
             ["Finnhub News Delay Seconds", FINNHUB_NEWS_DELAY_SECONDS],
             ["Error Alerts Enabled", str(BOT_SEND_ERROR_ALERTS)],
             ["Error Alert Cooldown Minutes", BOT_ERROR_ALERT_COOLDOWN_MINUTES],
+            ["Heartbeat Enabled", str(BOT_HEARTBEAT_ENABLED)],
+            ["Heartbeat Interval Hours", BOT_HEARTBEAT_INTERVAL_HOURS],
+            ["Dedicated Heartbeat Webhook", "SET" if HEARTBEAT_WEBHOOK_URL else "MISSING"],
             ["Last Error Alert Time", format_epoch_time(LAST_ERROR_ALERT_TIME)],
             ["Last Google Sheets Connection Error Time", format_epoch_time(LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME)],
             ["NewsAPI Enabled", bool_text(NEWSAPI_KEY)],
@@ -2213,23 +2238,112 @@ def send_heartbeat(scanned_count=0, ticker_errors=0, post_scan_errors=0):
     if heartbeat_already_sent():
         return False
 
-    webhook_url = get_error_webhook()
+    webhook_url = get_heartbeat_webhook()
     if not webhook_url:
+        log("Heartbeat skipped: no heartbeat/error/trade webhook available.")
         return False
 
-    message = (
-        "✅ AI Trading Bot Heartbeat\n"
-        f"Version: {BOT_VERSION}\n"
-        f"Time: {now_text()}\n"
-        f"Uptime: {bot_uptime_minutes()} minutes\n"
-        f"Last Scan Rows: {scanned_count}\n"
-        f"Ticker Errors: {ticker_errors}\n"
-        f"Post Scan Errors: {post_scan_errors}"
+    total_errors = int(ticker_errors or 0) + int(post_scan_errors or 0)
+
+    if total_errors == 0:
+        status_text = "✅ Running Normally"
+        heartbeat_color = 5763719  # green
+        title = "🤖 AI Trading Bot Heartbeat"
+    else:
+        status_text = "⚠️ Running With Warnings"
+        heartbeat_color = 16776960  # yellow
+        title = "⚠️ AI Trading Bot Heartbeat"
+
+    google_sheets_status = "Enabled" if GOOGLE_SHEETS_ENABLED else "Disabled"
+    news_sources = []
+
+    if NEWSAPI_KEY:
+        news_sources.append("NewsAPI")
+
+    if FINNHUB_API_KEY:
+        news_sources.append("Finnhub")
+
+    if BOT_NEWS_YFINANCE_ENABLED:
+        news_sources.append("Yahoo Finance")
+
+    fields = [
+        {
+            "name": "System Status",
+            "value": status_text,
+            "inline": False
+        },
+        {
+            "name": "Uptime",
+            "value": format_uptime(),
+            "inline": True
+        },
+        {
+            "name": "Last Scan",
+            "value": f"{scanned_count} tickers",
+            "inline": True
+        },
+        {
+            "name": "Next Scan",
+            "value": f"About {SCAN_INTERVAL_MINUTES} min",
+            "inline": True
+        },
+        {
+            "name": "Ticker Errors",
+            "value": str(ticker_errors),
+            "inline": True
+        },
+        {
+            "name": "Post-Scan Errors",
+            "value": str(post_scan_errors),
+            "inline": True
+        },
+        {
+            "name": "Alert Threshold",
+            "value": f"{MIN_CONFIDENCE}%",
+            "inline": True
+        },
+        {
+            "name": "Scanner",
+            "value": "Active" if BOT_SCAN_MARKET_DATA_ENABLED else "Disabled",
+            "inline": True
+        },
+        {
+            "name": "Google Sheets",
+            "value": google_sheets_status,
+            "inline": True
+        },
+        {
+            "name": "Discord Alerts",
+            "value": "Operational",
+            "inline": True
+        },
+        {
+            "name": "News Sources",
+            "value": ", ".join(news_sources) if news_sources else "None configured",
+            "inline": False
+        },
+        {
+            "name": "Version",
+            "value": BOT_VERSION,
+            "inline": False
+        },
+        {
+            "name": "Time",
+            "value": now_text(),
+            "inline": False
+        }
+    ]
+
+    sent = send_discord_embed(
+        webhook_url,
+        title,
+        heartbeat_color,
+        fields
     )
 
-    sent = send_discord_message(webhook_url, message)
     if sent:
         mark_heartbeat_sent()
+
     return sent
 
 
@@ -2450,6 +2564,8 @@ def main():
     log(f"Error alerts enabled: {BOT_SEND_ERROR_ALERTS}")
     log(f"Error alert cooldown minutes: {BOT_ERROR_ALERT_COOLDOWN_MINUTES}")
     log(f"Error webhook configured: {bool_text(get_error_webhook())}")
+    log(f"Heartbeat webhook configured: {bool_text(get_heartbeat_webhook())}")
+    log(f"Dedicated heartbeat webhook configured: {bool_text(HEARTBEAT_WEBHOOK_URL)}")
     log(f"Bot data dir: {BOT_DATA_DIR}")
     log(f"Bot status file: {BOT_STATUS_FILE}")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
