@@ -1,5 +1,8 @@
+streamlit
+streamlit-autorefresh
 pandas
 yfinance
+plotly
 requests
 ta
 gspread
