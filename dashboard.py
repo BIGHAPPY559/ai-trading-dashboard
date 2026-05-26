@@ -86,7 +86,7 @@ ALERT_HISTORY_FILE = os.path.join(DATA_DIR, "alert_history.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v21_final_verified_notifications_ready"
+APP_VERSION = "v23_final_clean_verified"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -1531,7 +1531,7 @@ with account_tab:
         portfolio_df["Profit/Loss $"] = profits
         portfolio_df["Profit/Loss %"] = profit_percents
 
-        st.dataframe(portfolio_df, use_container_width=True)
+        st.dataframe(portfolio_df, width="stretch")
 
         total_unrealized = portfolio_df["Profit/Loss $"].sum()
         st.metric("Unrealized Portfolio P/L", f"${total_unrealized:.2f}")
@@ -1551,7 +1551,7 @@ with account_tab:
             ]
         )
         fig_allocation.update_layout(title="Portfolio Allocation")
-        st.plotly_chart(fig_allocation, use_container_width=True)
+        st.plotly_chart(fig_allocation, width="stretch")
 
         largest_position = allocation_df.loc[allocation_df["Allocation %"].idxmax()]
         if largest_position["Allocation %"] > 50:
@@ -1641,7 +1641,7 @@ with account_tab:
 
     if not trade_history_df.empty:
         st.subheader("Trade History")
-        st.dataframe(trade_history_df, use_container_width=True)
+        st.dataframe(trade_history_df, width="stretch")
 
         if "Action" in trade_history_df.columns:
             sell_trades = trade_history_df[
@@ -1688,13 +1688,13 @@ with crypto_tab:
         col3.metric("Signal", top_crypto["AI Signal"])
 
         st.write(create_ai_summary(top_crypto))
-        st.dataframe(crypto_watchlist_df, use_container_width=True)
+        st.dataframe(crypto_watchlist_df, width="stretch")
 
         selected_crypto = st.selectbox("Choose crypto", CRYPTO_TICKERS, key="selected_crypto")
         crypto_data = get_price_data(selected_crypto, "6mo")
 
         if not crypto_data.empty:
-            st.plotly_chart(create_price_chart(selected_crypto, crypto_data), use_container_width=True)
+            st.plotly_chart(create_price_chart(selected_crypto, crypto_data), width="stretch")
 
             dollar_amount = st.number_input(
                 "Dollar amount to buy",
@@ -1728,13 +1728,13 @@ with stock_tab:
         col3.metric("Signal", top_stock["AI Signal"])
 
         st.write(create_ai_summary(top_stock))
-        st.dataframe(stock_watchlist_df, use_container_width=True)
+        st.dataframe(stock_watchlist_df, width="stretch")
 
         selected_stock = st.selectbox("Choose stock", STOCK_TICKERS, key="selected_stock")
         stock_data = get_price_data(selected_stock, "6mo")
 
         if not stock_data.empty:
-            st.plotly_chart(create_price_chart(selected_stock, stock_data), use_container_width=True)
+            st.plotly_chart(create_price_chart(selected_stock, stock_data), width="stretch")
 
             dollar_amount = st.number_input(
                 "Dollar amount to buy",
@@ -1790,13 +1790,13 @@ with scanner_tab:
         with scanner_tab1:
             st.dataframe(
                 watchlist_df[watchlist_df["Market"] == "Crypto"],
-                use_container_width=True
+                width="stretch"
             )
 
         with scanner_tab2:
             st.dataframe(
                 watchlist_df[watchlist_df["Market"] == "Stock"],
-                use_container_width=True
+                width="stretch"
             )
 
         with scanner_tab3:
@@ -1829,7 +1829,7 @@ with scanner_tab:
                     filtered_watchlist["Ticker"].str.contains(ticker_search.upper(), na=False)
                 ]
 
-            st.dataframe(filtered_watchlist, use_container_width=True)
+            st.dataframe(filtered_watchlist, width="stretch")
 
             filtered_buy_amount = st.number_input(
                 "Dollar amount per filtered ticker",
@@ -1901,7 +1901,7 @@ with scanner_tab:
             )
         )
         heatmap_fig.update_layout(xaxis_title="Ticker", yaxis_title="Metric")
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.plotly_chart(heatmap_fig, width="stretch")
 
         csv = watchlist_df.to_csv(index=False)
         st.download_button(
@@ -2022,7 +2022,7 @@ with alerts_tab:
         if signal_filter != "ALL":
             filtered_alerts = filtered_alerts[filtered_alerts["Signal"] == signal_filter]
 
-        st.dataframe(filtered_alerts, use_container_width=True)
+        st.dataframe(filtered_alerts, width="stretch")
 
         csv_alerts = filtered_alerts.to_csv(index=False)
 
@@ -2157,7 +2157,7 @@ with backtest_tab:
                 col5.metric("Average Win", f"{average_win:.2f}%")
                 col6.metric("Average Loss", f"{average_loss:.2f}%")
 
-                st.dataframe(trade_log_df, use_container_width=True)
+                st.dataframe(trade_log_df, width="stretch")
 
                 st.subheader("Backtest Equity Curve")
                 st.line_chart(trade_log_df, x="Date", y="Portfolio Value")
@@ -2192,7 +2192,7 @@ with backtest_tab:
                         marker=dict(size=10, symbol="triangle-down")
                     )
                 )
-                st.plotly_chart(signal_fig, use_container_width=True)
+                st.plotly_chart(signal_fig, width="stretch")
 
 # ======================================================
 # SETTINGS TAB

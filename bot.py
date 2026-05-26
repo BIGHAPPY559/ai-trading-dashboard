@@ -203,7 +203,7 @@ BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v17-final-verified-notifications-ready"
+BOT_VERSION = "google-sheets-100-production-v19-final-clean-verified"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -1472,14 +1472,54 @@ SYSTEM_STATUS_HEADERS = [
 ]
 
 GOOGLE_SHEETS_TAB_COLORS = {
-    "Live Scanner": {"red": 0.2, "green": 0.6, "blue": 1.0},
-    "Scan History": {"red": 0.4, "green": 0.4, "blue": 0.4},
-    "Trade Alerts Log": {"red": 1.0, "green": 0.55, "blue": 0.0},
-    "Signal Tracker": {"red": 0.1, "green": 0.7, "blue": 0.35},
-    "Bot Performance": {"red": 0.55, "green": 0.35, "blue": 0.9},
-    "Best Tickers": {"red": 0.95, "green": 0.75, "blue": 0.15},
-    "System Status": {"red": 0.8, "green": 0.2, "blue": 0.2},
+    "Live Scanner": "#3399FF",
+    "Scan History": "#666666",
+    "Trade Alerts Log": "#FF8C00",
+    "Signal Tracker": "#1AB359",
+    "Bot Performance": "#8C59E6",
+    "Best Tickers": "#F2BF26",
+    "System Status": "#CC3333",
 }
+
+
+def hex_to_google_rgb(hex_color):
+    """Convert #RRGGBB to Google Sheets API RGB dict."""
+    color = str(hex_color or "").strip().lstrip("#")
+    if len(color) != 6:
+        return None
+    try:
+        return {
+            "red": int(color[0:2], 16) / 255,
+            "green": int(color[2:4], 16) / 255,
+            "blue": int(color[4:6], 16) / 255,
+        }
+    except Exception:
+        return None
+
+
+def safe_update_tab_color(worksheet, color):
+    """
+    Best-effort tab color update across gspread versions.
+    Some versions expect a hex string, while others expect a Google RGB dict.
+    """
+    if not color:
+        return False
+
+    try:
+        worksheet.update_tab_color(color)
+        return True
+    except Exception as first_error:
+        rgb_color = hex_to_google_rgb(color)
+        if rgb_color:
+            try:
+                worksheet.update_tab_color(rgb_color)
+                return True
+            except Exception as second_error:
+                log(f"Google Sheets tab color skipped for {worksheet.title}: {second_error}")
+                return False
+
+        log(f"Google Sheets tab color skipped for {worksheet.title}: {first_error}")
+        return False
 
 
 def safe_sheet_update(worksheet, range_name, values):
@@ -1537,18 +1577,14 @@ def format_worksheet_for_readability(worksheet, title, headers):
     except Exception as error:
         log(f"Google Sheets freeze skipped for {title}: {error}")
 
-    try:
-        color = GOOGLE_SHEETS_TAB_COLORS.get(title)
-        if color:
-            worksheet.update_tab_color(color)
-    except Exception as error:
-        log(f"Google Sheets tab color skipped for {title}: {error}")
+    color = GOOGLE_SHEETS_TAB_COLORS.get(title)
+    if color:
+        safe_update_tab_color(worksheet, color)
 
     try:
         worksheet.format(
             "1:1",
             {
-                "textFormat": {"bold": True},
                 "horizontalAlignment": "CENTER",
                 "backgroundColor": {"red": 0.12, "green": 0.12, "blue": 0.12},
                 "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
