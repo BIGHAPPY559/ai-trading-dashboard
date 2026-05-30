@@ -1,4 +1,5 @@
 import os
+import json
 import random
 import time
 from datetime import datetime, timezone, timedelta
@@ -81,12 +82,13 @@ SIGNAL_LOG_FILE = os.path.join(DATA_DIR, "bot_sent_signal_log.txt")  # shared wi
 NEWS_SCHEDULE_FILE = os.path.join(DATA_DIR, "news_schedule_log.txt")
 SIGNAL_SCHEDULE_FILE = os.path.join(DATA_DIR, "signal_schedule_log.txt")
 ALERT_HISTORY_FILE = os.path.join(DATA_DIR, "alert_history.csv")
+BOT_STATUS_FILE = os.path.join(DATA_DIR, "bot_last_status.json")
 
 # ======================================================
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v23_final_clean_verified"
+APP_VERSION = "v30.6_bot_compatibility_final_triple_deep_dive"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -473,6 +475,30 @@ def load_csv_records(file_path):
 
 def save_records(file_path, records):
     pd.DataFrame(records).to_csv(file_path, index=False)
+
+
+def load_bot_status():
+    try:
+        if os.path.exists(BOT_STATUS_FILE) and os.path.getsize(BOT_STATUS_FILE) > 0:
+            with open(BOT_STATUS_FILE, "r", encoding="utf-8") as file:
+                return json.load(file)
+    except Exception as error:
+        print("Bot status load error:", error)
+    return {}
+
+
+def status_age_minutes(status):
+    try:
+        timestamp_text = status.get("timestamp_utc", "")
+        if not timestamp_text:
+            return None
+        timestamp = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return round((datetime.now(timezone.utc) - timestamp).total_seconds() / 60, 2)
+    except Exception:
+        return None
+
 
 def load_alert_history():
     try:
@@ -1443,13 +1469,14 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, settings_tab = st.tabs([
+account_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Crypto",
     "Stocks",
     "AI Scanner",
     "Trade Notifications",
     "Backtesting",
+    "Bot Status",
     "Settings"
 ])
 
@@ -2193,6 +2220,63 @@ with backtest_tab:
                     )
                 )
                 st.plotly_chart(signal_fig, width="stretch")
+
+# ======================================================
+# BOT STATUS TAB
+# ======================================================
+
+with bot_status_tab:
+    st.header("Background Bot Status")
+
+    bot_status = load_bot_status()
+
+    if not bot_status:
+        st.warning(
+            "No bot_last_status.json file found yet. If your bot is running on Railway, "
+            "set the same BOT_DATA_DIR / DASHBOARD_DATA_DIR volume path for both apps so the dashboard can read live bot status."
+        )
+    else:
+        age_minutes = status_age_minutes(bot_status)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Bot Version", bot_status.get("bot_version", "Unknown"))
+        col2.metric("Last Status", bot_status.get("timestamp", "Unknown"))
+        col3.metric("Status Age", f"{age_minutes} min" if age_minutes is not None else "Unknown")
+        col4.metric("Scanned", bot_status.get("scanned", 0))
+
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("Candidates", bot_status.get("candidates", 0))
+        col6.metric("Sent", bot_status.get("sent", 0))
+        col7.metric("Ticker Errors", bot_status.get("ticker_errors", 0))
+        col8.metric("Post Scan Errors", bot_status.get("post_scan_errors", 0))
+
+        if bot_status.get("interrupted"):
+            st.error("Last scan was interrupted.")
+        elif int(bot_status.get("ticker_errors", 0) or 0) + int(bot_status.get("post_scan_errors", 0) or 0) > 0:
+            st.warning("Last scan completed with warnings.")
+        else:
+            st.success("Last scan completed normally.")
+
+        with st.expander("Raw bot status JSON"):
+            st.json(bot_status)
+
+    st.subheader("v30.6 Feature Compatibility Checklist")
+    checklist = pd.DataFrame([
+        {"System": "Market Regime Detection", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "AI Signal Ranking", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Position Sizing", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Trailing Stops", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Portfolio Exposure Controls", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Walk-Forward Backtesting", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Signal Outcome Tracking", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
+        {"System": "Dashboard Analytics", "Dashboard Visibility": "Google Sheets tab + local Bot Status", "Source of Truth": "Background bot"},
+    ])
+    st.dataframe(checklist, width="stretch")
+
+    st.info(
+        "Important: the dashboard's local scanner is still a lightweight visual scanner. "
+        "Your v30.6+ background bot remains the source of truth for ranked alerts, exposure controls, trade plans, and advanced backtesting."
+    )
+
 
 # ======================================================
 # SETTINGS TAB

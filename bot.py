@@ -5,6 +5,7 @@ import json
 import signal
 import traceback
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -204,7 +205,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v21-heartbeat-polished"
+BOT_VERSION = "google-sheets-100-production-v30.6-bot-dashboard-final-triple-deep-dive"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -229,6 +230,133 @@ MIN_CONFIDENCE = max(
         100
     )
 )
+
+# Multi-timeframe analysis adds confirmation from short-term and higher-timeframe trend.
+# Keep this enabled by default for v22. Set BOT_MULTI_TIMEFRAME_ENABLED=false to go back
+# to the original single-timeframe scoring behavior without changing the rest of the bot.
+BOT_MULTI_TIMEFRAME_ENABLED = get_env_bool("BOT_MULTI_TIMEFRAME_ENABLED", True)
+BOT_SHORT_TIMEFRAME_PERIOD = os.getenv("BOT_SHORT_TIMEFRAME_PERIOD", "60d")
+BOT_SHORT_TIMEFRAME_INTERVAL = os.getenv("BOT_SHORT_TIMEFRAME_INTERVAL", "1h")
+BOT_PRIMARY_TIMEFRAME_LABEL = os.getenv("BOT_PRIMARY_TIMEFRAME_LABEL", "1D")
+BOT_HIGHER_TIMEFRAME_LABEL = os.getenv("BOT_HIGHER_TIMEFRAME_LABEL", "1W")
+BOT_MTF_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_MTF_MAX_ADJUSTMENT", 20), 30))
+BOT_MTF_SHORT_CONFIRM_POINTS = max(0, min(get_env_int("BOT_MTF_SHORT_CONFIRM_POINTS", 8), 15))
+BOT_MTF_HIGHER_CONFIRM_POINTS = max(0, min(get_env_int("BOT_MTF_HIGHER_CONFIRM_POINTS", 12), 20))
+BOT_MTF_REQUIRE_MIN_ROWS = max(35, get_env_int("BOT_MTF_REQUIRE_MIN_ROWS", 35))
+BOT_MTF_SHORT_ENABLED = get_env_bool("BOT_MTF_SHORT_ENABLED", True)
+BOT_MTF_HIGHER_ENABLED = get_env_bool("BOT_MTF_HIGHER_ENABLED", True)
+BOT_MTF_TIME_GUARD_SECONDS = max(10, get_env_int("BOT_MTF_TIME_GUARD_SECONDS", 45))
+BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE = os.getenv("BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE", "W-FRI")
+
+# Volume spike detection helps confirm whether a move has real participation behind it.
+# Set BOT_VOLUME_SPIKE_ENABLED=false to disable this adjustment while keeping all columns.
+BOT_VOLUME_SPIKE_ENABLED = get_env_bool("BOT_VOLUME_SPIKE_ENABLED", True)
+BOT_VOLUME_AVG_WINDOW = max(5, get_env_int("BOT_VOLUME_AVG_WINDOW", 20))
+BOT_VOLUME_SPIKE_THRESHOLD = max(1.0, get_env_float("BOT_VOLUME_SPIKE_THRESHOLD", 1.5))
+BOT_VOLUME_STRONG_SPIKE_THRESHOLD = max(BOT_VOLUME_SPIKE_THRESHOLD, get_env_float("BOT_VOLUME_STRONG_SPIKE_THRESHOLD", 2.0))
+BOT_VOLUME_DRY_UP_THRESHOLD = max(0.1, min(get_env_float("BOT_VOLUME_DRY_UP_THRESHOLD", 0.7), 1.0))
+BOT_VOLUME_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_VOLUME_MAX_ADJUSTMENT", 10), 20))
+
+# Market trend filter checks broad market direction before trusting a signal.
+# Crypto uses BTC/ETH by default. Stocks use SPY/QQQ by default.
+BOT_MARKET_TREND_FILTER_ENABLED = get_env_bool("BOT_MARKET_TREND_FILTER_ENABLED", True)
+BOT_MARKET_TREND_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_MARKET_TREND_MAX_ADJUSTMENT", 12), 20))
+BOT_MARKET_TREND_MIN_ANCHORS = max(1, get_env_int("BOT_MARKET_TREND_MIN_ANCHORS", 1))
+BOT_CRYPTO_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_CRYPTO_MARKET_TICKERS", ["BTC-USD", "ETH-USD"]))
+BOT_STOCK_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_STOCK_MARKET_TICKERS", ["SPY", "QQQ"]))
+
+# Better confidence scoring combines technicals, MTF, volume, and market context.
+# Set BOT_CONFIDENCE_ENGINE_ENABLED=false to fall back to the older final-score confidence.
+BOT_CONFIDENCE_ENGINE_ENABLED = get_env_bool("BOT_CONFIDENCE_ENGINE_ENABLED", True)
+BOT_CONFIDENCE_BASELINE = max(0, min(get_env_float("BOT_CONFIDENCE_BASELINE", 50), 100))
+BOT_CONFIDENCE_TECH_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_TECH_WEIGHT", 0.40))
+BOT_CONFIDENCE_MTF_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_MTF_WEIGHT", 0.25))
+BOT_CONFIDENCE_VOLUME_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_VOLUME_WEIGHT", 0.15))
+BOT_CONFIDENCE_MARKET_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_MARKET_WEIGHT", 0.20))
+BOT_CONFIDENCE_SR_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_SR_WEIGHT", 0.10))
+
+# Support/resistance checks recent price structure before trusting a signal.
+# Set BOT_SUPPORT_RESISTANCE_ENABLED=false to disable this adjustment while keeping all columns.
+BOT_SUPPORT_RESISTANCE_ENABLED = get_env_bool("BOT_SUPPORT_RESISTANCE_ENABLED", True)
+BOT_SUPPORT_RESISTANCE_LOOKBACK = max(20, get_env_int("BOT_SUPPORT_RESISTANCE_LOOKBACK", 60))
+BOT_SUPPORT_RESISTANCE_NEAR_PCT = max(0.1, get_env_float("BOT_SUPPORT_RESISTANCE_NEAR_PCT", 2.0))
+BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT = max(0.0, get_env_float("BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT", 0.25))
+BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT", 10), 20))
+
+# News sentiment weighting scores recent headlines and adds a small directional adjustment.
+# This does not replace the existing news digests; it only uses headlines as another
+# confirmation layer for trade confidence.
+BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED = get_env_bool("BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED", True)
+BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT", 10), 20))
+BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER = max(1, get_env_int("BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER", 3))
+BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS = max(1, get_env_int("BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS", 6))
+BOT_NEWS_SENTIMENT_USE_MARKET_NEWS = get_env_bool("BOT_NEWS_SENTIMENT_USE_MARKET_NEWS", True)
+BOT_NEWS_SENTIMENT_TIME_GUARD_SECONDS = max(10, get_env_int("BOT_NEWS_SENTIMENT_TIME_GUARD_SECONDS", 60))
+BOT_CONFIDENCE_NEWS_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_NEWS_WEIGHT", 0.10))
+
+# Full professional confidence engine weights. These are normalized automatically.
+BOT_CONFIDENCE_RSI_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_RSI_WEIGHT", 0.10))
+BOT_CONFIDENCE_MACD_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_MACD_WEIGHT", 0.10))
+BOT_CONFIDENCE_TREND_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_TREND_WEIGHT", 0.15))
+BOT_CONFIDENCE_RISK_REWARD_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_RISK_REWARD_WEIGHT", 0.10))
+
+# Trade management logic creates an actionable plan for each directional signal.
+BOT_TRADE_MANAGEMENT_ENABLED = get_env_bool("BOT_TRADE_MANAGEMENT_ENABLED", True)
+BOT_ATR_WINDOW = max(5, get_env_int("BOT_ATR_WINDOW", 14))
+BOT_ATR_STOP_MULTIPLIER = max(0.5, get_env_float("BOT_ATR_STOP_MULTIPLIER", 1.5))
+BOT_ATR_TARGET1_MULTIPLIER = max(0.5, get_env_float("BOT_ATR_TARGET1_MULTIPLIER", 1.5))
+BOT_ATR_TARGET2_MULTIPLIER = max(BOT_ATR_TARGET1_MULTIPLIER, get_env_float("BOT_ATR_TARGET2_MULTIPLIER", 3.0))
+BOT_MIN_RISK_REWARD = max(0.1, get_env_float("BOT_MIN_RISK_REWARD", 1.5))
+BOT_SR_STOP_BUFFER_PCT = max(0.0, get_env_float("BOT_SR_STOP_BUFFER_PCT", 0.35))
+BOT_TRADE_PLAN_MAX_HOLD_DAYS = max(1, get_env_int("BOT_TRADE_PLAN_MAX_HOLD_DAYS", 10))
+
+# Advanced backtesting validates signal quality before paper/live automation.
+BOT_BACKTESTING_ENABLED = get_env_bool("BOT_BACKTESTING_ENABLED", True)
+BOT_BACKTEST_INTERVAL_HOURS = max(1, get_env_float("BOT_BACKTEST_INTERVAL_HOURS", 24))
+BOT_BACKTEST_PERIOD = os.getenv("BOT_BACKTEST_PERIOD", "1y")
+BOT_BACKTEST_HOLD_DAYS = max(1, get_env_int("BOT_BACKTEST_HOLD_DAYS", 5))
+BOT_BACKTEST_LOOKBACK_DAYS = max(80, get_env_int("BOT_BACKTEST_LOOKBACK_DAYS", 140))
+BOT_BACKTEST_MIN_CONFIDENCE = max(0, min(get_env_float("BOT_BACKTEST_MIN_CONFIDENCE", MIN_CONFIDENCE), 100))
+BOT_BACKTEST_MAX_TICKERS = max(1, get_env_int("BOT_BACKTEST_MAX_TICKERS", 12))
+BOT_BACKTEST_MIN_SIGNALS = max(1, get_env_int("BOT_BACKTEST_MIN_SIGNALS", 3))
+BOT_BACKTEST_INITIAL_EQUITY = max(100, get_env_float("BOT_BACKTEST_INITIAL_EQUITY", 10000))
+BOT_BACKTEST_RISK_PER_TRADE_PCT = max(0.1, min(get_env_float("BOT_BACKTEST_RISK_PER_TRADE_PCT", 1.0), 10))
+BOT_BACKTEST_INCLUDE_TRADE_MANAGEMENT = get_env_bool("BOT_BACKTEST_INCLUDE_TRADE_MANAGEMENT", True)
+
+# Phase 3 upgrades: regime detection, ranking, sizing, trailing stops, exposure controls,
+# walk-forward validation, outcome tracking, and dashboard analytics.
+BOT_MARKET_REGIME_DETECTION_ENABLED = get_env_bool("BOT_MARKET_REGIME_DETECTION_ENABLED", True)
+BOT_MARKET_REGIME_VOLATILITY_THRESHOLD = max(1.0, get_env_float("BOT_MARKET_REGIME_VOLATILITY_THRESHOLD", 8.0))
+BOT_SIGNAL_RANKING_ENABLED = get_env_bool("BOT_SIGNAL_RANKING_ENABLED", True)
+BOT_MAX_ALERTS_PER_SCAN = max(0, get_env_int("BOT_MAX_ALERTS_PER_SCAN", 8))
+BOT_POSITION_SIZING_ENABLED = get_env_bool("BOT_POSITION_SIZING_ENABLED", True)
+BOT_ACCOUNT_SIZE = max(100, get_env_float("BOT_ACCOUNT_SIZE", 10000))
+BOT_RISK_PER_TRADE_PCT = max(0.1, min(get_env_float("BOT_RISK_PER_TRADE_PCT", 1.0), 10))
+BOT_MAX_POSITION_PCT = max(1, min(get_env_float("BOT_MAX_POSITION_PCT", 20), 100))
+BOT_TRAILING_STOP_ENABLED = get_env_bool("BOT_TRAILING_STOP_ENABLED", True)
+BOT_TRAILING_ATR_MULTIPLIER = max(0.5, get_env_float("BOT_TRAILING_ATR_MULTIPLIER", 1.2))
+BOT_BREAKEVEN_TRIGGER_R = max(0.5, get_env_float("BOT_BREAKEVEN_TRIGGER_R", 1.0))
+BOT_EXPOSURE_CONTROLS_ENABLED = get_env_bool("BOT_EXPOSURE_CONTROLS_ENABLED", True)
+BOT_MAX_ALERTS_PER_MARKET = max(1, get_env_int("BOT_MAX_ALERTS_PER_MARKET", 4))
+BOT_MAX_ALERTS_PER_CATEGORY = max(1, get_env_int("BOT_MAX_ALERTS_PER_CATEGORY", 3))
+BOT_WALK_FORWARD_ENABLED = get_env_bool("BOT_WALK_FORWARD_ENABLED", True)
+BOT_WALK_FORWARD_WINDOWS = max(2, get_env_int("BOT_WALK_FORWARD_WINDOWS", 4))
+BOT_OUTCOME_TRACKING_ENABLED = get_env_bool("BOT_OUTCOME_TRACKING_ENABLED", True)
+BOT_DASHBOARD_ANALYTICS_ENABLED = get_env_bool("BOT_DASHBOARD_ANALYTICS_ENABLED", True)
+
+BULLISH_NEWS_KEYWORDS = [
+    "approval", "approved", "etf approved", "partnership", "beats", "beat estimates",
+    "raises guidance", "raised guidance", "upgrade", "upgraded", "surges", "rallies",
+    "record revenue", "profit jumps", "strong demand", "launches", "adoption",
+    "inflows", "buy rating", "price target raised", "acquisition", "merger"
+]
+
+BEARISH_NEWS_KEYWORDS = [
+    "lawsuit", "sued", "sec", "investigation", "probe", "downgrade", "downgraded",
+    "misses", "missed estimates", "cuts guidance", "cut guidance", "plunges", "crashes",
+    "bankruptcy", "halted", "exploit", "hack", "outflows", "recall", "fraud",
+    "warning", "layoffs", "price target cut", "bearish"
+]
 
 SEND_STARTUP_MESSAGE = get_env_bool("BOT_SEND_STARTUP_MESSAGE", True)
 
@@ -255,6 +383,7 @@ SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_summary_log.txt")
 NEWS_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_news_log.txt")
 NEWS_SCHEDULE_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_news_schedule_log.txt")
 BREAKING_NEWS_SCHEDULE_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_breaking_news_schedule_log.txt")
+BACKTEST_SCHEDULE_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_backtest_schedule_log.txt")
 
 BOT_HEARTBEAT_ENABLED = get_env_bool("BOT_HEARTBEAT_ENABLED", True)
 BOT_HEARTBEAT_INTERVAL_HOURS = max(1, get_env_float("BOT_HEARTBEAT_INTERVAL_HOURS", 12))
@@ -350,6 +479,7 @@ def log(message):
 
 
 def get_asset_type(ticker):
+    ticker = str(ticker or "").upper()
     return "Crypto" if ticker.endswith("-USD") else "Stock"
 
 
@@ -680,6 +810,12 @@ def validate_runtime_config():
     if SEND_NEWS and not NEWSAPI_KEY and not FINNHUB_API_KEY and not BOT_NEWS_YFINANCE_ENABLED:
         warnings.append("News is enabled, but NewsAPI/Finnhub keys are missing and Yahoo/yfinance news is disabled. News digests will likely be empty.")
 
+    if BOT_MARKET_TREND_FILTER_ENABLED:
+        if not BOT_CRYPTO_MARKET_TICKERS:
+            warnings.append("BOT_MARKET_TREND_FILTER_ENABLED is true but BOT_CRYPTO_MARKET_TICKERS is empty.")
+        if not BOT_STOCK_MARKET_TICKERS:
+            warnings.append("BOT_MARKET_TREND_FILTER_ENABLED is true but BOT_STOCK_MARKET_TICKERS is empty.")
+
     if GOOGLE_SHEETS_ENABLED:
         if not GOOGLE_SHEET_ID:
             warnings.append("GOOGLE_SHEETS_ENABLED is true but GOOGLE_SHEET_ID is missing.")
@@ -727,7 +863,7 @@ def normalize_price_data(data):
     return data.dropna(subset=["Close"])
 
 
-def get_price_data(ticker, period="1y"):
+def get_price_data(ticker, period="1y", interval="1d"):
     if not BOT_SCAN_MARKET_DATA_ENABLED:
         return pd.DataFrame()
 
@@ -738,6 +874,7 @@ def get_price_data(ticker, period="1y"):
             data = yf.download(
                 ticker,
                 period=period,
+                interval=interval,
                 auto_adjust=False,
                 progress=False,
                 threads=False,
@@ -755,7 +892,7 @@ def get_price_data(ticker, period="1y"):
 
         if YFINANCE_USE_HISTORY_FALLBACK and not SHUTDOWN_REQUESTED:
             try:
-                data = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+                data = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
                 data = normalize_price_data(data)
 
                 if not data.empty:
@@ -775,24 +912,1113 @@ def get_price_data(ticker, period="1y"):
 def calculate_indicators(data):
     data = data.copy()
 
-    if len(data) < 50:
+    if data.empty:
         return data
 
     close = data["Close"]
 
-    data["RSI"] = RSIIndicator(close=close, window=14).rsi()
+    if len(data) >= 14:
+        data["RSI"] = RSIIndicator(close=close, window=14).rsi()
 
-    macd_indicator = MACD(close=close)
-    data["MACD"] = macd_indicator.macd()
-    data["MACD Signal"] = macd_indicator.macd_signal()
+    if len(data) >= 26:
+        macd_indicator = MACD(close=close)
+        data["MACD"] = macd_indicator.macd()
+        data["MACD Signal"] = macd_indicator.macd_signal()
 
-    data["MA50"] = close.rolling(window=50).mean()
-    data["MA200"] = close.rolling(window=200).mean()
+    if len(data) >= 50:
+        data["MA50"] = close.rolling(window=50).mean()
+
+    if len(data) >= 200:
+        data["MA200"] = close.rolling(window=200).mean()
+
+    if len(data) >= BOT_ATR_WINDOW + 1 and all(column in data.columns for column in ["High", "Low", "Close"]):
+        high = pd.to_numeric(data["High"], errors="coerce")
+        low = pd.to_numeric(data["Low"], errors="coerce")
+        prev_close = pd.to_numeric(data["Close"], errors="coerce").shift(1)
+        true_range = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        data["ATR"] = true_range.rolling(window=BOT_ATR_WINDOW).mean()
 
     return data
 
 
+def resample_to_higher_timeframe(data):
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    try:
+        higher = data.resample(BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE).agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        })
+    except Exception as error:
+        log(f"Higher timeframe full OHLCV resample failed: {error}")
+        try:
+            higher = data.resample(BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE).agg({
+                "Close": "last",
+            })
+        except Exception as fallback_error:
+            log(f"Higher timeframe close-only resample failed: {fallback_error}")
+            return pd.DataFrame()
+
+    return normalize_price_data(higher)
+
+
+def mtf_time_guard_allows(scan_started_at):
+    if scan_started_at is None:
+        return True
+
+    try:
+        elapsed = time.time() - scan_started_at
+        remaining = BOT_MAX_SCAN_SECONDS - elapsed
+        return remaining > BOT_MTF_TIME_GUARD_SECONDS
+    except Exception:
+        return True
+
+
+def safe_latest_value(row, column, default=0):
+    try:
+        value = row.get(column, default)
+        return float(value) if pd.notna(value) else default
+    except Exception:
+        return default
+
+
+def calculate_volume_context(data, primary_trend):
+    default_context = {
+        "volume": 0,
+        "avg_volume": 0,
+        "relative_volume": 0,
+        "volume_signal": "Unavailable",
+        "volume_score_adj": 0,
+    }
+
+    if not BOT_VOLUME_SPIKE_ENABLED:
+        default_context["volume_signal"] = "Disabled"
+        return default_context
+
+    if data is None or data.empty or "Volume" not in data.columns:
+        return default_context
+
+    try:
+        volume_series = pd.to_numeric(data["Volume"], errors="coerce").dropna()
+
+        if len(volume_series) < BOT_VOLUME_AVG_WINDOW + 1:
+            return default_context
+
+        current_volume = float(volume_series.iloc[-1])
+        average_volume = float(volume_series.iloc[-(BOT_VOLUME_AVG_WINDOW + 1):-1].mean())
+
+        if average_volume <= 0:
+            return default_context
+
+        relative_volume = current_volume / average_volume
+        volume_signal = "Normal"
+        volume_score_adj = 0
+
+        if relative_volume >= BOT_VOLUME_STRONG_SPIKE_THRESHOLD:
+            volume_signal = "Strong Spike"
+            if primary_trend == "Bullish":
+                volume_score_adj = BOT_VOLUME_MAX_ADJUSTMENT
+            elif primary_trend == "Bearish":
+                volume_score_adj = -BOT_VOLUME_MAX_ADJUSTMENT
+        elif relative_volume >= BOT_VOLUME_SPIKE_THRESHOLD:
+            volume_signal = "Spike"
+            confirm_points = max(1, round(BOT_VOLUME_MAX_ADJUSTMENT / 2))
+            if primary_trend == "Bullish":
+                volume_score_adj = confirm_points
+            elif primary_trend == "Bearish":
+                volume_score_adj = -confirm_points
+        elif relative_volume <= BOT_VOLUME_DRY_UP_THRESHOLD:
+            volume_signal = "Low Volume"
+            weak_points = max(1, round(BOT_VOLUME_MAX_ADJUSTMENT / 2))
+            if primary_trend == "Bullish":
+                volume_score_adj = -weak_points
+            elif primary_trend == "Bearish":
+                volume_score_adj = weak_points
+
+        return {
+            "volume": round(current_volume, 2),
+            "avg_volume": round(average_volume, 2),
+            "relative_volume": round(relative_volume, 2),
+            "volume_signal": volume_signal,
+            "volume_score_adj": int(volume_score_adj),
+        }
+
+    except Exception as error:
+        log(f"Volume context calculation error: {error}")
+        return default_context
+
+
+
+
+def calculate_support_resistance_context(data, primary_trend):
+    default_context = {
+        "support_level": 0,
+        "resistance_level": 0,
+        "distance_to_support_pct": 0,
+        "distance_to_resistance_pct": 0,
+        "support_resistance_signal": "Unavailable",
+        "support_resistance_score_adj": 0,
+        "sr_strength": 0,
+        "sr_position": "Unavailable",
+        "support_touches": 0,
+        "resistance_touches": 0,
+        "sr_notes": "support/resistance unavailable",
+    }
+
+    if not BOT_SUPPORT_RESISTANCE_ENABLED:
+        default_context["support_resistance_signal"] = "Disabled"
+        default_context["sr_notes"] = "support/resistance disabled"
+        return default_context
+
+    if data is None or data.empty or "Close" not in data.columns:
+        return default_context
+
+    try:
+        frame = data.copy().dropna(subset=["Close"])
+
+        if len(frame) < BOT_SUPPORT_RESISTANCE_LOOKBACK + 1:
+            return default_context
+
+        latest = frame.iloc[-1]
+        current_price = float(latest["Close"])
+
+        if current_price <= 0:
+            return default_context
+
+        lookback_frame = frame.iloc[-(BOT_SUPPORT_RESISTANCE_LOOKBACK + 1):-1].copy()
+        low_source = "Low" if "Low" in lookback_frame.columns else "Close"
+        high_source = "High" if "High" in lookback_frame.columns else "Close"
+
+        lows = pd.to_numeric(lookback_frame[low_source], errors="coerce").dropna()
+        highs = pd.to_numeric(lookback_frame[high_source], errors="coerce").dropna()
+
+        if lows.empty or highs.empty:
+            return default_context
+
+        support_level = float(lows.quantile(0.10))
+        resistance_level = float(highs.quantile(0.90))
+        absolute_low = float(lows.min())
+        absolute_high = float(highs.max())
+
+        # Blend raw extremes with percentile levels so one bad wick does not dominate.
+        support_level = min(max(support_level, absolute_low), current_price) if current_price > absolute_low else absolute_low
+        resistance_level = max(min(resistance_level, absolute_high), current_price) if current_price < absolute_high else absolute_high
+
+        if support_level <= 0 or resistance_level <= 0:
+            return default_context
+
+        distance_to_support_pct = ((current_price - support_level) / support_level) * 100
+        distance_to_resistance_pct = ((resistance_level - current_price) / resistance_level) * 100
+
+        touch_band = BOT_SUPPORT_RESISTANCE_NEAR_PCT / 100
+        support_touches = int(((lows >= support_level * (1 - touch_band)) & (lows <= support_level * (1 + touch_band))).sum())
+        resistance_touches = int(((highs >= resistance_level * (1 - touch_band)) & (highs <= resistance_level * (1 + touch_band))).sum())
+
+        range_width = max(resistance_level - support_level, current_price * 0.001)
+        range_position = (current_price - support_level) / range_width
+        range_position = max(0, min(range_position, 1))
+
+        near_support = 0 <= distance_to_support_pct <= BOT_SUPPORT_RESISTANCE_NEAR_PCT
+        near_resistance = 0 <= distance_to_resistance_pct <= BOT_SUPPORT_RESISTANCE_NEAR_PCT
+
+        breakout_threshold = resistance_level * (1 + BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT / 100)
+        breakdown_threshold = support_level * (1 - BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT / 100)
+
+        is_breakout = current_price > breakout_threshold
+        is_breakdown = current_price < breakdown_threshold
+
+        signal = "Range"
+        adjustment = 0
+        notes = []
+        half_adjustment = max(1, round(BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT / 2))
+
+        sr_strength = min(5, max(1, support_touches + resistance_touches))
+
+        if is_breakout:
+            signal = "Breakout"
+            notes.append("price cleared resistance")
+            adjustment = BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT if primary_trend == "Bullish" else half_adjustment
+        elif is_breakdown:
+            signal = "Breakdown"
+            notes.append("price lost support")
+            adjustment = -BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT if primary_trend == "Bearish" else -half_adjustment
+        elif near_support:
+            signal = "Near Support"
+            notes.append("price is near support")
+            adjustment = half_adjustment if primary_trend in ["Bullish", "Bearish"] else 0
+        elif near_resistance:
+            signal = "Near Resistance"
+            notes.append("price is near resistance")
+            adjustment = -half_adjustment if primary_trend in ["Bullish", "Bearish"] else 0
+        elif range_position <= 0.35:
+            signal = "Lower Range"
+            notes.append("price is in lower third of range")
+            adjustment = max(1, round(half_adjustment / 2)) if primary_trend == "Bullish" else 0
+        elif range_position >= 0.65:
+            signal = "Upper Range"
+            notes.append("price is in upper third of range")
+            adjustment = -max(1, round(half_adjustment / 2)) if primary_trend == "Bullish" else 0
+        else:
+            notes.append("price is mid-range")
+
+        if support_touches >= 3:
+            notes.append(f"{support_touches} support touches")
+        if resistance_touches >= 3:
+            notes.append(f"{resistance_touches} resistance touches")
+
+        sr_position = (
+            "Above Resistance" if is_breakout else
+            "Below Support" if is_breakdown else
+            "Near Support" if near_support else
+            "Near Resistance" if near_resistance else
+            "Upper Range" if range_position >= 0.65 else
+            "Lower Range" if range_position <= 0.35 else
+            "Mid Range"
+        )
+
+        return {
+            "support_level": round(support_level, 4),
+            "resistance_level": round(resistance_level, 4),
+            "distance_to_support_pct": round(distance_to_support_pct, 2),
+            "distance_to_resistance_pct": round(distance_to_resistance_pct, 2),
+            "support_resistance_signal": signal,
+            "support_resistance_score_adj": int(adjustment),
+            "sr_strength": int(sr_strength),
+            "sr_position": sr_position,
+            "support_touches": support_touches,
+            "resistance_touches": resistance_touches,
+            "sr_notes": ", ".join(notes),
+        }
+
+    except Exception as error:
+        log(f"Support/resistance context calculation error: {error}")
+        return default_context
+
+
+def calculate_trade_management_context(data, signal, current_price, support_resistance_context=None):
+    default_context = {
+        "entry_price": round(float(current_price or 0), 4) if current_price else 0,
+        "stop_loss": 0,
+        "take_profit_1": 0,
+        "take_profit_2": 0,
+        "risk_per_share": 0,
+        "reward_1": 0,
+        "reward_2": 0,
+        "risk_reward_1": 0,
+        "risk_reward_2": 0,
+        "trade_plan": "Unavailable",
+        "trade_management_notes": "trade management unavailable",
+    }
+
+    if not BOT_TRADE_MANAGEMENT_ENABLED:
+        default_context["trade_plan"] = "Disabled"
+        default_context["trade_management_notes"] = "trade management disabled"
+        return default_context
+
+    try:
+        current_price = float(current_price)
+        if current_price <= 0:
+            return default_context
+
+        if not is_directional_signal(signal):
+            default_context["trade_plan"] = "No Trade"
+            default_context["trade_management_notes"] = "hold signal has no trade plan"
+            return default_context
+
+        frame = calculate_indicators(data.copy()) if data is not None and not data.empty else pd.DataFrame()
+        latest = frame.iloc[-1] if not frame.empty else {}
+        atr = safe_latest_value(latest, "ATR", 0)
+
+        if atr <= 0:
+            atr = max(current_price * 0.02, 0.01)
+
+        sr = support_resistance_context or {}
+        support_level = safe_float(sr.get("support_level", 0))
+        resistance_level = safe_float(sr.get("resistance_level", 0))
+        buffer = current_price * (BOT_SR_STOP_BUFFER_PCT / 100)
+
+        entry = current_price
+
+        if "BUY" in signal:
+            atr_stop = entry - atr * BOT_ATR_STOP_MULTIPLIER
+            sr_stop = support_level - buffer if support_level > 0 and support_level < entry else atr_stop
+            stop_loss = max(0.01, max(atr_stop, sr_stop))
+            take_profit_1 = entry + atr * BOT_ATR_TARGET1_MULTIPLIER
+            sr_target = resistance_level if resistance_level > entry * (1 + BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT / 100) else 0
+            if sr_target and sr_target > entry:
+                capped_tp1 = min(take_profit_1, sr_target)
+                if capped_tp1 > entry:
+                    take_profit_1 = capped_tp1
+            take_profit_2 = entry + atr * BOT_ATR_TARGET2_MULTIPLIER
+            if resistance_level > entry:
+                take_profit_2 = max(take_profit_2, resistance_level)
+            risk = entry - stop_loss
+            reward_1 = take_profit_1 - entry
+            reward_2 = take_profit_2 - entry
+        else:
+            atr_stop = entry + atr * BOT_ATR_STOP_MULTIPLIER
+            sr_stop = resistance_level + buffer if resistance_level > entry else atr_stop
+            stop_loss = min(atr_stop, sr_stop) if sr_stop > entry else atr_stop
+            take_profit_1 = entry - atr * BOT_ATR_TARGET1_MULTIPLIER
+            sr_target = support_level if 0 < support_level < entry * (1 - BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT / 100) else 0
+            if sr_target and sr_target < entry:
+                capped_tp1 = max(take_profit_1, sr_target)
+                if capped_tp1 < entry:
+                    take_profit_1 = capped_tp1
+            take_profit_2 = entry - atr * BOT_ATR_TARGET2_MULTIPLIER
+            if 0 < support_level < entry:
+                take_profit_2 = min(take_profit_2, support_level)
+            take_profit_1 = max(0.01, take_profit_1)
+            take_profit_2 = max(0.01, take_profit_2)
+            risk = stop_loss - entry
+            reward_1 = entry - take_profit_1
+            reward_2 = entry - take_profit_2
+
+        if risk <= 0:
+            return default_context
+
+        rr1 = reward_1 / risk if risk else 0
+        rr2 = reward_2 / risk if risk else 0
+        plan_quality = "Good R/R" if rr2 >= BOT_MIN_RISK_REWARD else "Weak R/R"
+
+        return {
+            "entry_price": round(entry, 4),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit_1": round(take_profit_1, 4),
+            "take_profit_2": round(take_profit_2, 4),
+            "risk_per_share": round(risk, 4),
+            "reward_1": round(reward_1, 4),
+            "reward_2": round(reward_2, 4),
+            "risk_reward_1": round(rr1, 2),
+            "risk_reward_2": round(rr2, 2),
+            "trade_plan": plan_quality,
+            "trade_management_notes": f"ATR {round(atr, 4)} | max hold {BOT_TRADE_PLAN_MAX_HOLD_DAYS} days",
+        }
+
+    except Exception as error:
+        log(f"Trade management calculation error: {error}")
+        return default_context
+
+def calculate_market_regime_from_anchor_scores(anchor_scores):
+    if not anchor_scores:
+        return "Unavailable", 0
+
+    try:
+        average_score = sum(anchor_scores) / len(anchor_scores)
+    except Exception:
+        return "Unavailable", 0
+
+    if average_score >= 75:
+        return "Bullish", round(average_score, 2)
+
+    if average_score < 50:
+        return "Bearish", round(average_score, 2)
+
+    return "Neutral", round(average_score, 2)
+
+
+def build_market_context(anchor_tickers, scan_started_at=None):
+    default_context = {
+        "market_regime": "Unavailable",
+        "market_score": 0,
+        "market_anchors": "None",
+        "market_notes": "market trend unavailable",
+        "advanced_market_regime": "Unavailable",
+        "regime_strength": 0,
+        "risk_mode": "Unavailable",
+        "regime_notes": "market trend unavailable",
+    }
+
+    if not BOT_MARKET_TREND_FILTER_ENABLED:
+        default_context["market_regime"] = "Disabled"
+        default_context["advanced_market_regime"] = "Disabled"
+        default_context["risk_mode"] = "Disabled"
+        default_context["market_notes"] = "market trend filter disabled"
+        default_context["regime_notes"] = "market trend filter disabled"
+        return default_context
+
+    cleaned_anchors = clean_ticker_list(anchor_tickers or [])
+    if not cleaned_anchors:
+        return default_context
+
+    anchor_scores = []
+    anchor_labels = []
+
+    for anchor in cleaned_anchors:
+        if SHUTDOWN_REQUESTED:
+            break
+
+        if not mtf_time_guard_allows(scan_started_at):
+            default_context["market_regime"] = "Skipped"
+            default_context["market_notes"] = "market trend skipped by time guard"
+            return default_context
+
+        try:
+            anchor_data = get_price_data(anchor, "1y", "1d")
+            anchor_frame = score_price_frame(anchor_data)
+
+            if not anchor_frame:
+                continue
+
+            anchor_scores.append(anchor_frame["score"])
+            anchor_labels.append(f"{anchor}:{anchor_frame['trend']}")
+
+        except Exception as error:
+            log(f"Market trend anchor error for {anchor}: {error}")
+
+    if len(anchor_scores) < BOT_MARKET_TREND_MIN_ANCHORS:
+        return default_context
+
+    market_regime, market_score = calculate_market_regime_from_anchor_scores(anchor_scores)
+
+    advanced = calculate_advanced_market_regime(anchor_scores, anchor_labels)
+
+    return {
+        "market_regime": market_regime,
+        "market_score": market_score,
+        "market_anchors": ", ".join(anchor_labels) if anchor_labels else "None",
+        "market_notes": f"{market_regime} market from {len(anchor_scores)} anchor(s)",
+        "advanced_market_regime": advanced.get("advanced_market_regime", market_regime),
+        "regime_strength": advanced.get("regime_strength", 0),
+        "risk_mode": advanced.get("risk_mode", "Unavailable"),
+        "regime_notes": advanced.get("regime_notes", "advanced regime unavailable"),
+    }
+
+
+def build_market_contexts(scan_started_at=None):
+    if not BOT_MARKET_TREND_FILTER_ENABLED:
+        disabled_context = {
+            "market_regime": "Disabled",
+            "market_score": 0,
+            "market_anchors": "None",
+            "market_notes": "market trend filter disabled",
+        }
+        return {"Crypto": disabled_context, "Stock": disabled_context}
+
+    return {
+        "Crypto": build_market_context(BOT_CRYPTO_MARKET_TICKERS, scan_started_at),
+        "Stock": build_market_context(BOT_STOCK_MARKET_TICKERS, scan_started_at),
+    }
+
+
+def unavailable_market_context(reason="market trend unavailable"):
+    return {
+        "market_regime": "Unavailable",
+        "market_score": 0,
+        "market_anchors": "None",
+        "market_notes": reason,
+    }
+
+
+def safe_build_market_contexts(scan_started_at=None):
+    try:
+        contexts = build_market_contexts(scan_started_at)
+
+        if not isinstance(contexts, dict):
+            raise ValueError("market context builder returned a non-dict value")
+
+        return {
+            "Crypto": contexts.get("Crypto") or unavailable_market_context(),
+            "Stock": contexts.get("Stock") or unavailable_market_context(),
+        }
+
+    except Exception as error:
+        log(f"Market context build error: {error}")
+        fallback = unavailable_market_context("market trend unavailable after context error")
+        return {"Crypto": fallback, "Stock": fallback}
+
+
+def calculate_market_trend_adjustment(primary_trend, market_context):
+    if not BOT_MARKET_TREND_FILTER_ENABLED:
+        return 0, "Disabled"
+
+    market_context = market_context or {}
+    market_regime = market_context.get("market_regime", "Unavailable")
+    notes = market_context.get("market_notes", "market trend unavailable")
+    adjustment = 0
+
+    if market_regime not in ["Bullish", "Bearish", "Neutral"]:
+        return 0, notes
+
+    if primary_trend == "Bullish":
+        if market_regime == "Bullish":
+            adjustment = BOT_MARKET_TREND_MAX_ADJUSTMENT
+            notes = f"market confirms bullish ({notes})"
+        elif market_regime == "Bearish":
+            adjustment = -BOT_MARKET_TREND_MAX_ADJUSTMENT
+            notes = f"market conflicts bullish ({notes})"
+        else:
+            notes = f"neutral market for bullish setup ({notes})"
+
+    elif primary_trend == "Bearish":
+        if market_regime == "Bearish":
+            adjustment = -BOT_MARKET_TREND_MAX_ADJUSTMENT
+            notes = f"market confirms bearish ({notes})"
+        elif market_regime == "Bullish":
+            adjustment = BOT_MARKET_TREND_MAX_ADJUSTMENT
+            notes = f"market conflicts bearish ({notes})"
+        else:
+            notes = f"neutral market for bearish setup ({notes})"
+
+    else:
+        notes = f"market checked but primary trend is neutral ({notes})"
+
+    return int(adjustment), notes
+
+
+def calculate_technical_score_from_latest(latest, current_price):
+    rsi = latest.get("RSI")
+    macd = latest.get("MACD")
+    macd_signal = latest.get("MACD Signal")
+    ma50 = latest.get("MA50")
+    ma200 = latest.get("MA200")
+
+    technical_score = 0
+
+    if pd.notna(ma50) and current_price > ma50:
+        technical_score += 30
+
+    if pd.notna(ma50) and pd.notna(ma200) and ma50 > ma200:
+        technical_score += 30
+
+    if pd.notna(rsi) and rsi < 70:
+        technical_score += 20
+
+    if pd.notna(rsi) and rsi > 40:
+        technical_score += 20
+
+    if pd.notna(macd) and pd.notna(macd_signal) and macd > macd_signal:
+        technical_score += 20
+
+    return technical_score
+
+
+def timeframe_trend_from_score(score):
+    try:
+        score = float(score)
+    except Exception:
+        return "Unknown"
+
+    if score >= 75:
+        return "Bullish"
+
+    if score < 50:
+        return "Bearish"
+
+    return "Neutral"
+
+
+def is_known_trend(trend):
+    return trend in ["Bullish", "Bearish", "Neutral"]
+
+
+def trend_pair_text(short_trend, higher_trend):
+    return f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} {short_trend} / {BOT_HIGHER_TIMEFRAME_LABEL} {higher_trend}"
+
+
+def score_price_frame(data):
+    if data.empty or len(data) < BOT_MTF_REQUIRE_MIN_ROWS:
+        return None
+
+    data = calculate_indicators(data)
+    latest = data.iloc[-1]
+    current_price = float(latest["Close"])
+
+    technical_score = calculate_technical_score_from_latest(latest, current_price)
+
+    return {
+        "score": technical_score,
+        "trend": timeframe_trend_from_score(technical_score),
+        "rsi": safe_latest_value(latest, "RSI", 0),
+        "macd": safe_latest_value(latest, "MACD", 0),
+        "macd_signal": safe_latest_value(latest, "MACD Signal", 0),
+    }
+
+
+def calculate_mtf_adjustment(primary_trend, short_trend, higher_trend):
+    if not BOT_MULTI_TIMEFRAME_ENABLED:
+        return 0, "Disabled"
+
+    adjustment = 0
+    notes = []
+    short_points = BOT_MTF_SHORT_CONFIRM_POINTS
+    higher_points = BOT_MTF_HIGHER_CONFIRM_POINTS
+
+    short_label = BOT_SHORT_TIMEFRAME_INTERVAL.upper()
+    higher_label = BOT_HIGHER_TIMEFRAME_LABEL
+
+    if not BOT_MTF_SHORT_ENABLED:
+        notes.append(f"{short_label} disabled")
+    elif short_trend == "Skipped":
+        notes.append(f"{short_label} skipped by time guard")
+    elif not is_known_trend(short_trend):
+        notes.append(f"{short_label} unavailable")
+
+    if not BOT_MTF_HIGHER_ENABLED:
+        notes.append(f"{higher_label} disabled")
+    elif higher_trend == "Skipped":
+        notes.append(f"{higher_label} skipped by time guard")
+    elif not is_known_trend(higher_trend):
+        notes.append(f"{higher_label} unavailable")
+
+    if primary_trend == "Bullish":
+        if short_trend == "Bullish":
+            adjustment += short_points
+            notes.append(f"{short_label} confirms bullish")
+        elif short_trend == "Bearish":
+            adjustment -= short_points
+            notes.append(f"{short_label} conflicts bullish")
+
+        if higher_trend == "Bullish":
+            adjustment += higher_points
+            notes.append(f"{higher_label} confirms bullish")
+        elif higher_trend == "Bearish":
+            adjustment -= higher_points
+            notes.append(f"{higher_label} conflicts bullish")
+
+    elif primary_trend == "Bearish":
+        if short_trend == "Bearish":
+            adjustment -= short_points
+            notes.append(f"{short_label} confirms bearish")
+        elif short_trend == "Bullish":
+            adjustment += short_points
+            notes.append(f"{short_label} conflicts bearish")
+
+        if higher_trend == "Bearish":
+            adjustment -= higher_points
+            notes.append(f"{higher_label} confirms bearish")
+        elif higher_trend == "Bullish":
+            adjustment += higher_points
+            notes.append(f"{higher_label} conflicts bearish")
+
+    else:
+        if short_trend == "Bullish" and higher_trend == "Bullish":
+            adjustment += min(short_points + higher_points, BOT_MTF_MAX_ADJUSTMENT)
+            notes.append(f"{short_label}/{higher_label} leaning bullish")
+        elif short_trend == "Bearish" and higher_trend == "Bearish":
+            adjustment -= min(short_points + higher_points, BOT_MTF_MAX_ADJUSTMENT)
+            notes.append(f"{short_label}/{higher_label} leaning bearish")
+        elif is_known_trend(short_trend) or is_known_trend(higher_trend):
+            notes.append("mixed confirmation")
+
+    adjustment = max(-BOT_MTF_MAX_ADJUSTMENT, min(adjustment, BOT_MTF_MAX_ADJUSTMENT))
+
+    if not notes:
+        notes.append("not enough confirmation")
+
+    return adjustment, ", ".join(notes)
+
+
+
+def confidence_grade(confidence):
+    try:
+        confidence = float(confidence)
+    except Exception:
+        confidence = 0
+
+    if confidence >= 95:
+        return "A+"
+    if confidence >= 90:
+        return "A"
+    if confidence >= 80:
+        return "B"
+    if confidence >= 70:
+        return "C"
+    if confidence >= 60:
+        return "D"
+    return "F"
+
+
+
+def normalize_confidence_weights():
+    weights = {
+        "rsi": BOT_CONFIDENCE_RSI_WEIGHT,
+        "macd": BOT_CONFIDENCE_MACD_WEIGHT,
+        "trend": BOT_CONFIDENCE_TREND_WEIGHT,
+        "mtf": BOT_CONFIDENCE_MTF_WEIGHT,
+        "volume": BOT_CONFIDENCE_VOLUME_WEIGHT,
+        "market": BOT_CONFIDENCE_MARKET_WEIGHT,
+        "support_resistance": BOT_CONFIDENCE_SR_WEIGHT,
+        "news": BOT_CONFIDENCE_NEWS_WEIGHT,
+        "risk_reward": BOT_CONFIDENCE_RISK_REWARD_WEIGHT,
+    }
+
+    total = sum(value for value in weights.values() if value > 0)
+
+    if total <= 0:
+        return {
+            "rsi": 0.10,
+            "macd": 0.10,
+            "trend": 0.15,
+            "mtf": 0.20,
+            "volume": 0.12,
+            "market": 0.15,
+            "support_resistance": 0.10,
+            "news": 0.08,
+            "risk_reward": 0.10,
+        }
+
+    return {
+        key: value / total
+        for key, value in weights.items()
+    }
+
+
+def component_confidence_from_rsi(rsi_value, signal_direction):
+    rsi = safe_float(rsi_value, 50)
+
+    if signal_direction == "BUY":
+        if 45 <= rsi <= 65:
+            return 85
+        if 35 <= rsi < 45:
+            return 75
+        if rsi < 35:
+            return 65
+        if 65 < rsi <= 72:
+            return 55
+        return 30
+
+    if signal_direction == "SELL":
+        if 35 <= rsi <= 55:
+            return 80
+        if 55 < rsi <= 70:
+            return 65
+        if rsi > 70:
+            return 75
+        if 25 <= rsi < 35:
+            return 55
+        return 30
+
+    return BOT_CONFIDENCE_BASELINE
+
+
+def component_confidence_from_macd(macd_value, macd_signal_value, signal_direction):
+    macd = safe_float(macd_value, 0)
+    macd_signal = safe_float(macd_signal_value, 0)
+
+    if signal_direction == "BUY":
+        return 85 if macd > macd_signal else 40
+
+    if signal_direction == "SELL":
+        return 85 if macd < macd_signal else 40
+
+    return BOT_CONFIDENCE_BASELINE
+
+
+def component_confidence_from_risk_reward(trade_context, signal_direction):
+    if not BOT_TRADE_MANAGEMENT_ENABLED or signal_direction not in ["BUY", "SELL"]:
+        return BOT_CONFIDENCE_BASELINE
+
+    trade_context = trade_context or {}
+    rr2 = safe_float(trade_context.get("risk_reward_2", 0), 0)
+
+    if rr2 >= 3:
+        return 95
+    if rr2 >= 2:
+        return 85
+    if rr2 >= BOT_MIN_RISK_REWARD:
+        return 75
+    if rr2 >= 1:
+        return 55
+    return 35
+
+def bounded_percent(value):
+    try:
+        value = float(value)
+    except Exception:
+        value = 0
+
+    return round(max(0, min(value, 100)), 2)
+
+
+def component_confidence_from_adjustment(adjustment, max_adjustment, signal_direction):
+    try:
+        adjustment = float(adjustment)
+        max_adjustment = float(max_adjustment)
+    except Exception:
+        return BOT_CONFIDENCE_BASELINE
+
+    if max_adjustment <= 0:
+        return BOT_CONFIDENCE_BASELINE
+
+    if signal_direction == "BUY":
+        directional_strength = adjustment / max_adjustment
+    elif signal_direction == "SELL":
+        directional_strength = -adjustment / max_adjustment
+    else:
+        directional_strength = 0
+
+    directional_strength = max(-1, min(directional_strength, 1))
+    return bounded_percent(BOT_CONFIDENCE_BASELINE + directional_strength * 50)
+
+
+def component_confidence_from_trend(primary_trend, signal_direction):
+    if signal_direction == "BUY":
+        if primary_trend == "Bullish":
+            return 100
+        if primary_trend == "Neutral":
+            return 60
+        if primary_trend == "Bearish":
+            return 20
+
+    if signal_direction == "SELL":
+        if primary_trend == "Bearish":
+            return 100
+        if primary_trend == "Neutral":
+            return 60
+        if primary_trend == "Bullish":
+            return 20
+
+    return BOT_CONFIDENCE_BASELINE
+
+
+def component_confidence_from_volume(volume_context, signal_direction):
+    if not BOT_VOLUME_SPIKE_ENABLED:
+        return BOT_CONFIDENCE_BASELINE
+
+    volume_context = volume_context or {}
+    volume_signal = str(volume_context.get("volume_signal", "Unavailable"))
+    adjustment = volume_context.get("volume_score_adj", 0)
+
+    if volume_signal in ["Unavailable", "Disabled"]:
+        return BOT_CONFIDENCE_BASELINE
+
+    return component_confidence_from_adjustment(
+        adjustment,
+        max(1, BOT_VOLUME_MAX_ADJUSTMENT),
+        signal_direction
+    )
+
+
+def component_confidence_from_market(market_adjustment, market_context, signal_direction):
+    if not BOT_MARKET_TREND_FILTER_ENABLED:
+        return BOT_CONFIDENCE_BASELINE
+
+    market_context = market_context or {}
+    market_regime = market_context.get("market_regime", "Unavailable")
+
+    if market_regime not in ["Bullish", "Bearish", "Neutral"]:
+        return BOT_CONFIDENCE_BASELINE
+
+    return component_confidence_from_adjustment(
+        market_adjustment,
+        max(1, BOT_MARKET_TREND_MAX_ADJUSTMENT),
+        signal_direction
+    )
+
+
+def component_confidence_from_support_resistance(support_resistance_context, signal_direction):
+    if not BOT_SUPPORT_RESISTANCE_ENABLED:
+        return BOT_CONFIDENCE_BASELINE
+
+    support_resistance_context = support_resistance_context or {}
+    sr_signal = str(support_resistance_context.get("support_resistance_signal", "Unavailable"))
+    sr_adjustment = support_resistance_context.get("support_resistance_score_adj", 0)
+
+    if sr_signal in ["Unavailable", "Disabled"]:
+        return BOT_CONFIDENCE_BASELINE
+
+    return component_confidence_from_adjustment(
+        sr_adjustment,
+        max(1, BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT),
+        signal_direction
+    )
+
+
+def component_confidence_from_news(news_sentiment_context, signal_direction):
+    if not BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED:
+        return BOT_CONFIDENCE_BASELINE
+
+    news_sentiment_context = news_sentiment_context or {}
+    news_signal = str(news_sentiment_context.get("news_sentiment_label", "Unavailable"))
+    news_adjustment = news_sentiment_context.get("news_score_adj", 0)
+
+    if news_signal in ["Unavailable", "Disabled"]:
+        return BOT_CONFIDENCE_BASELINE
+
+    return component_confidence_from_adjustment(
+        news_adjustment,
+        max(1, BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT),
+        signal_direction
+    )
+
+
+def component_confidence_from_mtf(mtf_adjustment, short_trend, higher_trend, signal_direction):
+    if not BOT_MULTI_TIMEFRAME_ENABLED:
+        return BOT_CONFIDENCE_BASELINE
+
+    known_count = len([
+        trend for trend in [short_trend, higher_trend]
+        if is_known_trend(trend)
+    ])
+
+    if known_count == 0:
+        return BOT_CONFIDENCE_BASELINE
+
+    return component_confidence_from_adjustment(
+        mtf_adjustment,
+        max(1, BOT_MTF_MAX_ADJUSTMENT),
+        signal_direction
+    )
+
+
+def signal_direction_from_score(final_score):
+    try:
+        final_score = float(final_score)
+    except Exception:
+        return "HOLD"
+
+    if final_score >= 75:
+        return "BUY"
+
+    if final_score < 50:
+        return "SELL"
+
+    return "HOLD"
+
+
+
+def calculate_confidence_breakdown(
+    final_score,
+    primary_trend,
+    mtf_adjustment,
+    short_trend,
+    higher_trend,
+    volume_context,
+    market_adjustment,
+    market_context,
+    support_resistance_context=None,
+    news_sentiment_context=None,
+    trade_context=None,
+    rsi_value=50,
+    macd_value=0,
+    macd_signal_value=0,
+):
+    legacy_signal, legacy_confidence = calculate_signal_and_confidence(final_score)
+    signal_direction = signal_direction_from_score(final_score)
+
+    if not BOT_CONFIDENCE_ENGINE_ENABLED or signal_direction == "HOLD":
+        legacy_confidence = bounded_percent(legacy_confidence)
+        return {
+            "confidence_percent": legacy_confidence,
+            "confidence_grade": confidence_grade(legacy_confidence),
+            "rsi_confidence": legacy_confidence,
+            "macd_confidence": legacy_confidence,
+            "trend_confidence": legacy_confidence,
+            "technical_confidence": legacy_confidence,
+            "mtf_confidence": BOT_CONFIDENCE_BASELINE,
+            "volume_confidence": BOT_CONFIDENCE_BASELINE,
+            "market_confidence": BOT_CONFIDENCE_BASELINE,
+            "sr_confidence": BOT_CONFIDENCE_BASELINE,
+            "news_confidence": BOT_CONFIDENCE_BASELINE,
+            "risk_reward_confidence": BOT_CONFIDENCE_BASELINE,
+            "confidence_engine": "Legacy" if not BOT_CONFIDENCE_ENGINE_ENABLED else "Hold Score",
+            "confidence_notes": "confidence based on final score",
+        }
+
+    rsi_confidence = component_confidence_from_rsi(rsi_value, signal_direction)
+    macd_confidence = component_confidence_from_macd(macd_value, macd_signal_value, signal_direction)
+    trend_confidence = component_confidence_from_trend(primary_trend, signal_direction)
+    technical_confidence = bounded_percent((rsi_confidence + macd_confidence + trend_confidence) / 3)
+
+    mtf_confidence = component_confidence_from_mtf(
+        mtf_adjustment,
+        short_trend,
+        higher_trend,
+        signal_direction
+    )
+    volume_confidence = component_confidence_from_volume(volume_context, signal_direction)
+    market_confidence = component_confidence_from_market(
+        market_adjustment,
+        market_context,
+        signal_direction
+    )
+    sr_confidence = component_confidence_from_support_resistance(
+        support_resistance_context,
+        signal_direction
+    )
+    news_confidence = component_confidence_from_news(
+        news_sentiment_context,
+        signal_direction
+    )
+    risk_reward_confidence = component_confidence_from_risk_reward(
+        trade_context,
+        signal_direction
+    )
+
+    weights = normalize_confidence_weights()
+    confidence = (
+        rsi_confidence * weights["rsi"]
+        + macd_confidence * weights["macd"]
+        + trend_confidence * weights["trend"]
+        + mtf_confidence * weights["mtf"]
+        + volume_confidence * weights["volume"]
+        + market_confidence * weights["market"]
+        + sr_confidence * weights["support_resistance"]
+        + news_confidence * weights["news"]
+        + risk_reward_confidence * weights["risk_reward"]
+    )
+
+    # Keep confidence realistic: components can improve confidence, but not wildly
+    # beyond the actual directional score.
+    score_cap = max(legacy_confidence, min(100, legacy_confidence + 22))
+    confidence = min(confidence, score_cap)
+    confidence = bounded_percent(confidence)
+
+    agreement_parts = []
+    if trend_confidence >= 70:
+        agreement_parts.append("trend")
+    if rsi_confidence >= 70:
+        agreement_parts.append("RSI")
+    if macd_confidence >= 70:
+        agreement_parts.append("MACD")
+    if mtf_confidence >= 70:
+        agreement_parts.append("MTF")
+    if volume_confidence >= 70:
+        agreement_parts.append("volume")
+    if market_confidence >= 70:
+        agreement_parts.append("market")
+    if sr_confidence >= 70:
+        agreement_parts.append("S/R")
+    if news_confidence >= 70:
+        agreement_parts.append("news")
+    if risk_reward_confidence >= 70:
+        agreement_parts.append("R/R")
+
+    confidence_notes = (
+        f"{len(agreement_parts)}/9 confirmations: "
+        + (", ".join(agreement_parts) if agreement_parts else "none")
+    )
+
+    return {
+        "confidence_percent": confidence,
+        "confidence_grade": confidence_grade(confidence),
+        "rsi_confidence": bounded_percent(rsi_confidence),
+        "macd_confidence": bounded_percent(macd_confidence),
+        "trend_confidence": bounded_percent(trend_confidence),
+        "technical_confidence": bounded_percent(technical_confidence),
+        "mtf_confidence": bounded_percent(mtf_confidence),
+        "volume_confidence": bounded_percent(volume_confidence),
+        "market_confidence": bounded_percent(market_confidence),
+        "sr_confidence": bounded_percent(sr_confidence),
+        "news_confidence": bounded_percent(news_confidence),
+        "risk_reward_confidence": bounded_percent(risk_reward_confidence),
+        "confidence_engine": "v30.6 Phase 3 Professional Weighted",
+        "confidence_notes": confidence_notes,
+    }
+
+
 def calculate_signal_and_confidence(final_score):
+    final_score = max(0, min(final_score, 120))
+
     bullish_confidence = (final_score / 120) * 100
     bearish_confidence = ((120 - final_score) / 120) * 100
 
@@ -813,68 +2039,563 @@ def calculate_signal_and_confidence(final_score):
     return "HOLD", hold_confidence
 
 
-def score_ticker(ticker):
-    data = get_price_data(ticker, "1y")
+def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentiment_contexts=None):
+    daily_data = get_price_data(ticker, "1y", "1d")
 
-    if data.empty or len(data) < 50:
+    if daily_data.empty or len(daily_data) < 50:
         return None
 
-    data = calculate_indicators(data)
-    latest = data.iloc[-1]
+    daily_data = calculate_indicators(daily_data)
+    latest = daily_data.iloc[-1]
 
     current_price = float(latest["Close"])
-    previous_price = float(data["Close"].iloc[-2])
+    previous_price = float(daily_data["Close"].iloc[-2])
 
     if previous_price == 0:
         price_change_percent = 0
     else:
         price_change_percent = ((current_price - previous_price) / previous_price) * 100
 
-    rsi = latest.get("RSI")
-    macd = latest.get("MACD")
-    macd_signal = latest.get("MACD Signal")
-    ma50 = latest.get("MA50")
-    ma200 = latest.get("MA200")
+    rsi_value = safe_latest_value(latest, "RSI", 0)
+    macd_value = safe_latest_value(latest, "MACD", 0)
+    macd_signal_value = safe_latest_value(latest, "MACD Signal", 0)
 
-    rsi_value = float(rsi) if pd.notna(rsi) else 0
-    macd_value = float(macd) if pd.notna(macd) else 0
-    macd_signal_value = float(macd_signal) if pd.notna(macd_signal) else 0
+    technical_score = calculate_technical_score_from_latest(latest, current_price)
+    daily_trend = timeframe_trend_from_score(technical_score)
 
-    technical_score = 0
+    short_score = 0
+    short_trend = "Unknown"
 
-    if pd.notna(ma50) and current_price > ma50:
-        technical_score += 30
+    if BOT_MULTI_TIMEFRAME_ENABLED and BOT_MTF_SHORT_ENABLED:
+        if mtf_time_guard_allows(scan_started_at):
+            short_data = get_price_data(ticker, BOT_SHORT_TIMEFRAME_PERIOD, BOT_SHORT_TIMEFRAME_INTERVAL)
+            short_frame = score_price_frame(short_data)
 
-    if pd.notna(ma50) and pd.notna(ma200) and ma50 > ma200:
-        technical_score += 30
+            if short_frame:
+                short_score = short_frame["score"]
+                short_trend = short_frame["trend"]
+        else:
+            short_trend = "Skipped"
 
-    if pd.notna(rsi) and rsi < 70:
-        technical_score += 20
+    weekly_score = 0
+    weekly_trend = "Unknown"
 
-    if pd.notna(rsi) and rsi > 40:
-        technical_score += 20
+    if BOT_MULTI_TIMEFRAME_ENABLED and BOT_MTF_HIGHER_ENABLED:
+        if mtf_time_guard_allows(scan_started_at):
+            higher_data = resample_to_higher_timeframe(daily_data)
+            higher_frame = score_price_frame(higher_data)
 
-    if pd.notna(macd) and pd.notna(macd_signal) and macd > macd_signal:
-        technical_score += 20
+            if higher_frame:
+                weekly_score = higher_frame["score"]
+                weekly_trend = higher_frame["trend"]
+        else:
+            weekly_trend = "Skipped"
 
-    final_score = technical_score
-    ai_signal, confidence_percent = calculate_signal_and_confidence(final_score)
-    confidence_percent = max(0, min(confidence_percent, 100))
+    mtf_adjustment, mtf_alignment = calculate_mtf_adjustment(
+        daily_trend,
+        short_trend,
+        weekly_trend
+    )
+
+    volume_context = calculate_volume_context(daily_data, daily_trend)
+    volume_adjustment = volume_context["volume_score_adj"]
+
+    market_contexts = market_contexts or {}
+    market_context = market_contexts.get(get_asset_type(ticker), {})
+    market_adjustment, market_alignment = calculate_market_trend_adjustment(daily_trend, market_context)
+
+    support_resistance_context = calculate_support_resistance_context(daily_data, daily_trend)
+    support_resistance_adjustment = support_resistance_context["support_resistance_score_adj"]
+
+    news_sentiment_contexts = news_sentiment_contexts or {}
+    news_sentiment_context = news_sentiment_contexts.get(ticker, summarize_news_sentiment([]))
+    news_adjustment = news_sentiment_context.get("news_score_adj", 0)
+
+    final_score = max(0, min(technical_score + mtf_adjustment + volume_adjustment + market_adjustment + support_resistance_adjustment + news_adjustment, 120))
+    ai_signal, legacy_confidence_percent = calculate_signal_and_confidence(final_score)
+
+    trade_context = calculate_trade_management_context(
+        daily_data,
+        ai_signal,
+        current_price,
+        support_resistance_context
+    )
+
+    position_context = calculate_position_sizing_context(ai_signal, current_price, trade_context)
+    trailing_context = calculate_trailing_stop_context(ai_signal, current_price, trade_context)
+
+    confidence_context = calculate_confidence_breakdown(
+        final_score,
+        daily_trend,
+        mtf_adjustment,
+        short_trend,
+        weekly_trend,
+        volume_context,
+        market_adjustment,
+        market_context,
+        support_resistance_context,
+        news_sentiment_context,
+        trade_context,
+        rsi_value,
+        macd_value,
+        macd_signal_value
+    )
+
+    confidence_percent = confidence_context["confidence_percent"]
 
     return {
         "Ticker": ticker,
         "Market": get_asset_type(ticker),
         "Price": round(current_price, 2),
         "Daily Change %": round(price_change_percent, 2),
+        "Volume": volume_context["volume"],
+        "Avg Volume": volume_context["avg_volume"],
+        "Relative Volume": volume_context["relative_volume"],
+        "Volume Signal": volume_context["volume_signal"],
+        "Volume Score Adj": volume_adjustment,
+        "Market Regime": market_context.get("market_regime", "Unavailable"),
+        "Market Score": market_context.get("market_score", 0),
+        "Market Anchors": market_context.get("market_anchors", "None"),
+        "Advanced Market Regime": market_context.get("advanced_market_regime", market_context.get("market_regime", "Unavailable")),
+        "Regime Strength": market_context.get("regime_strength", 0),
+        "Risk Mode": market_context.get("risk_mode", "Unavailable"),
+        "Regime Notes": market_context.get("regime_notes", market_context.get("market_notes", "")),
+        "Market Trend Adj": market_adjustment,
+        "Market Alignment": market_alignment,
+        "Support Level": support_resistance_context["support_level"],
+        "Resistance Level": support_resistance_context["resistance_level"],
+        "Distance To Support %": support_resistance_context["distance_to_support_pct"],
+        "Distance To Resistance %": support_resistance_context["distance_to_resistance_pct"],
+        "S/R Signal": support_resistance_context["support_resistance_signal"],
+        "S/R Score Adj": support_resistance_adjustment,
+        "S/R Strength": support_resistance_context.get("sr_strength", 0),
+        "S/R Position": support_resistance_context.get("sr_position", "Unavailable"),
+        "Support Touches": support_resistance_context.get("support_touches", 0),
+        "Resistance Touches": support_resistance_context.get("resistance_touches", 0),
+        "S/R Notes": support_resistance_context.get("sr_notes", ""),
+        "Trade Entry": trade_context.get("entry_price", 0),
+        "Stop Loss": trade_context.get("stop_loss", 0),
+        "Take Profit 1": trade_context.get("take_profit_1", 0),
+        "Take Profit 2": trade_context.get("take_profit_2", 0),
+        "Risk/Reward 1": trade_context.get("risk_reward_1", 0),
+        "Risk/Reward 2": trade_context.get("risk_reward_2", 0),
+        "Trade Plan": trade_context.get("trade_plan", "Unavailable"),
+        "Trade Notes": trade_context.get("trade_management_notes", ""),
+        "Account Size": position_context.get("account_size", 0),
+        "Risk %": position_context.get("risk_pct", 0),
+        "Risk Dollars": position_context.get("risk_dollars", 0),
+        "Position Size": position_context.get("position_size", 0),
+        "Position Value": position_context.get("position_value", 0),
+        "Position Notes": position_context.get("position_notes", ""),
+        "Trailing Stop": trailing_context.get("trailing_stop", 0),
+        "Breakeven Trigger": trailing_context.get("breakeven_trigger", 0),
+        "Trail Distance": trailing_context.get("trail_distance", 0),
+        "Trailing Notes": trailing_context.get("trailing_notes", ""),
+        "Asset Category": asset_category(ticker),
+        "Signal Quality Score": 0,
+        "Signal Rank": "",
+        "Alert Approved": "NO",
+        "Exposure Notes": "not evaluated",
+        "News Sentiment": news_sentiment_context.get("news_sentiment_label", "Unavailable"),
+        "News Sentiment Score": news_sentiment_context.get("news_sentiment_score", 0),
+        "News Strength": news_sentiment_context.get("news_strength", 0),
+        "News Score Adj": news_adjustment,
+        "News Headlines": news_sentiment_context.get("news_headlines", "None"),
+        "News Notes": news_sentiment_context.get("news_notes", "news sentiment unavailable"),
+        "RSI Confidence": confidence_context.get("rsi_confidence", 0),
+        "MACD Confidence": confidence_context.get("macd_confidence", 0),
+        "Trend Confidence": confidence_context.get("trend_confidence", 0),
+        "Technical Confidence": confidence_context["technical_confidence"],
+        "MTF Confidence": confidence_context["mtf_confidence"],
+        "Volume Confidence": confidence_context["volume_confidence"],
+        "Market Confidence": confidence_context["market_confidence"],
+        "S/R Confidence": confidence_context["sr_confidence"],
+        "News Confidence": confidence_context.get("news_confidence", BOT_CONFIDENCE_BASELINE),
+        "Risk/Reward Confidence": confidence_context.get("risk_reward_confidence", BOT_CONFIDENCE_BASELINE),
+        "Confidence Grade": confidence_context["confidence_grade"],
+        "Confidence Engine": confidence_context["confidence_engine"],
+        "Confidence Notes": confidence_context["confidence_notes"],
+        "Legacy Confidence %": round(bounded_percent(legacy_confidence_percent), 2),
         "RSI": round(rsi_value, 2),
         "MACD": round(macd_value, 2),
         "MACD Signal": round(macd_signal_value, 2),
         "Technical Score": technical_score,
+        "Short TF Score": short_score,
+        "Short TF Trend": short_trend,
+        "Daily Trend": daily_trend,
+        "Higher TF Score": weekly_score,
+        "Higher TF Trend": weekly_trend,
+        "MTF Alignment": mtf_alignment,
+        "MTF Score Adj": mtf_adjustment,
         "Final Score": final_score,
         "AI Confidence %": round(confidence_percent, 2),
         "AI Signal": ai_signal
     }
 
+
+# ======================================================
+# PHASE 3 PROFESSIONAL RISK / RANKING HELPERS
+# ======================================================
+
+def asset_category(ticker):
+    ticker = str(ticker or "").upper()
+    if ticker.endswith("-USD"):
+        majors = {"BTC-USD", "ETH-USD"}
+        return "Crypto Major" if ticker in majors else "Crypto Alt"
+    technology = {"AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "META", "AMZN", "PLTR", "TSLA"}
+    indices = {"SPY", "QQQ"}
+    if ticker in indices:
+        return "Index ETF"
+    if ticker in technology:
+        return "Technology/Growth"
+    return "Other Stock"
+
+
+def calculate_advanced_market_regime(anchor_scores, anchor_labels=None):
+    if not BOT_MARKET_REGIME_DETECTION_ENABLED:
+        return {
+            "advanced_market_regime": "Disabled",
+            "regime_strength": 0,
+            "risk_mode": "Disabled",
+            "regime_notes": "advanced regime detection disabled",
+        }
+
+    if not anchor_scores:
+        return {
+            "advanced_market_regime": "Unavailable",
+            "regime_strength": 0,
+            "risk_mode": "Unavailable",
+            "regime_notes": "not enough anchor data",
+        }
+
+    scores = [safe_float(value, 0) for value in anchor_scores]
+    average_score = sum(scores) / len(scores)
+    dispersion = max(scores) - min(scores) if len(scores) > 1 else 0
+    bullish_count = len([score for score in scores if score >= 75])
+    bearish_count = len([score for score in scores if score < 50])
+
+    if average_score >= 80 and bearish_count == 0:
+        regime = "Bull Trend"
+        risk_mode = "Risk-On"
+    elif average_score >= 68 and bearish_count == 0:
+        regime = "Bullish/Constructive"
+        risk_mode = "Risk-On"
+    elif average_score < 45 and bullish_count == 0:
+        regime = "Bear Trend"
+        risk_mode = "Risk-Off"
+    elif average_score < 55 and bullish_count == 0:
+        regime = "Bearish/Defensive"
+        risk_mode = "Risk-Off"
+    elif dispersion >= BOT_MARKET_REGIME_VOLATILITY_THRESHOLD * 5:
+        regime = "Mixed/Volatile"
+        risk_mode = "Caution"
+    else:
+        regime = "Sideways/Neutral"
+        risk_mode = "Neutral"
+
+    strength = min(100, max(0, round(abs(average_score - 50) * 2, 2)))
+    labels = ", ".join(anchor_labels or []) if anchor_labels else "anchors scored"
+
+    return {
+        "advanced_market_regime": regime,
+        "regime_strength": strength,
+        "risk_mode": risk_mode,
+        "regime_notes": f"avg {round(average_score, 2)} | spread {round(dispersion, 2)} | {labels}",
+    }
+
+
+def calculate_position_sizing_context(signal, current_price, trade_context):
+    default = {
+        "account_size": BOT_ACCOUNT_SIZE,
+        "risk_pct": BOT_RISK_PER_TRADE_PCT,
+        "risk_dollars": 0,
+        "position_size": 0,
+        "position_value": 0,
+        "max_position_value": round(BOT_ACCOUNT_SIZE * BOT_MAX_POSITION_PCT / 100, 2),
+        "position_notes": "position sizing unavailable",
+    }
+
+    if not BOT_POSITION_SIZING_ENABLED:
+        default["position_notes"] = "position sizing disabled"
+        return default
+
+    if not is_directional_signal(signal):
+        default["position_notes"] = "hold signal has no position size"
+        return default
+
+    try:
+        price = safe_float(current_price, 0)
+        risk_per_share = safe_float((trade_context or {}).get("risk_per_share", 0), 0)
+        if price <= 0 or risk_per_share <= 0:
+            return default
+
+        risk_dollars = BOT_ACCOUNT_SIZE * BOT_RISK_PER_TRADE_PCT / 100
+        max_position_value = BOT_ACCOUNT_SIZE * BOT_MAX_POSITION_PCT / 100
+        raw_size = risk_dollars / risk_per_share
+        max_size = max_position_value / price
+        position_size = max(0, min(raw_size, max_size))
+        position_value = position_size * price
+        capped = raw_size > max_size
+
+        return {
+            "account_size": round(BOT_ACCOUNT_SIZE, 2),
+            "risk_pct": round(BOT_RISK_PER_TRADE_PCT, 2),
+            "risk_dollars": round(risk_dollars, 2),
+            "position_size": round(position_size, 6),
+            "position_value": round(position_value, 2),
+            "max_position_value": round(max_position_value, 2),
+            "position_notes": "capped by max position" if capped else "sized by risk per trade",
+        }
+    except Exception as error:
+        log(f"Position sizing error: {error}")
+        return default
+
+
+def calculate_trailing_stop_context(signal, current_price, trade_context):
+    default = {
+        "trailing_stop": 0,
+        "breakeven_trigger": 0,
+        "trail_distance": 0,
+        "trailing_notes": "trailing stop unavailable",
+    }
+
+    if not BOT_TRAILING_STOP_ENABLED:
+        default["trailing_notes"] = "trailing stop disabled"
+        return default
+
+    if not is_directional_signal(signal):
+        default["trailing_notes"] = "hold signal has no trailing stop"
+        return default
+
+    try:
+        price = safe_float(current_price, 0)
+        trade_context = trade_context or {}
+        risk_per_share = safe_float(trade_context.get("risk_per_share", 0), 0)
+        stop_loss = safe_float(trade_context.get("stop_loss", 0), 0)
+        notes = str(trade_context.get("trade_management_notes", ""))
+        atr = 0
+        match = re.search(r"ATR\s+([0-9.]+)", notes)
+        if match:
+            atr = safe_float(match.group(1), 0)
+        if atr <= 0:
+            atr = max(price * 0.02, 0.01)
+
+        trail_distance = atr * BOT_TRAILING_ATR_MULTIPLIER
+        if "BUY" in str(signal):
+            trailing_stop = max(stop_loss, price - trail_distance)
+            breakeven_trigger = price + risk_per_share * BOT_BREAKEVEN_TRIGGER_R
+        else:
+            trailing_stop = min(stop_loss, price + trail_distance) if stop_loss > price else price + trail_distance
+            breakeven_trigger = price - risk_per_share * BOT_BREAKEVEN_TRIGGER_R
+
+        return {
+            "trailing_stop": round(max(0.01, trailing_stop), 4),
+            "breakeven_trigger": round(max(0.01, breakeven_trigger), 4),
+            "trail_distance": round(trail_distance, 4),
+            "trailing_notes": f"ATR trail x{BOT_TRAILING_ATR_MULTIPLIER} | BE at {BOT_BREAKEVEN_TRIGGER_R}R",
+        }
+    except Exception as error:
+        log(f"Trailing stop error: {error}")
+        return default
+
+
+def calculate_signal_quality_score(row):
+    try:
+        confidence = safe_float(row.get("AI Confidence %", 0), 0)
+        rr = safe_float(row.get("Risk/Reward 2", 0), 0)
+        rank_score = confidence
+        rank_score += min(10, rr * 3)
+        rank_score += max(-8, min(8, safe_float(row.get("MTF Score Adj", 0), 0) / 2))
+        rank_score += max(-6, min(6, safe_float(row.get("Volume Score Adj", 0), 0) / 2))
+        rank_score += max(-6, min(6, safe_float(row.get("S/R Score Adj", 0), 0) / 2))
+        rank_score += max(-5, min(5, safe_float(row.get("News Score Adj", 0), 0) / 2))
+        if str(row.get("Risk Mode", "")) == "Risk-Off" and "BUY" in str(row.get("AI Signal", "")):
+            rank_score -= 8
+        if str(row.get("Risk Mode", "")) == "Risk-On" and "SELL" in str(row.get("AI Signal", "")):
+            rank_score -= 6
+        return round(max(0, min(rank_score, 120)), 2)
+    except Exception:
+        return safe_float(row.get("AI Confidence %", 0), 0)
+
+
+def assign_signal_rankings(rows):
+    if not rows:
+        return rows
+    for row in rows:
+        row["Asset Category"] = row.get("Asset Category") or asset_category(row.get("Ticker"))
+        row["Signal Quality Score"] = calculate_signal_quality_score(row)
+        row["Signal Rank"] = ""
+        row["Alert Approved"] = "NO"
+        row["Exposure Notes"] = "ranking disabled" if not BOT_SIGNAL_RANKING_ENABLED else "not evaluated"
+
+    if not BOT_SIGNAL_RANKING_ENABLED:
+        return rows
+
+    directional = [row for row in rows if is_directional_signal(row.get("AI Signal", ""))]
+    directional.sort(key=lambda item: item.get("Signal Quality Score", 0), reverse=True)
+    for index, row in enumerate(directional, start=1):
+        row["Signal Rank"] = index
+    return rows
+
+
+def apply_exposure_controls(candidate_rows):
+    if not BOT_EXPOSURE_CONTROLS_ENABLED:
+        for row in candidate_rows:
+            row["Alert Approved"] = "YES"
+            row["Exposure Notes"] = "exposure controls disabled"
+        return candidate_rows
+
+    approved = []
+    market_counts = {}
+    category_counts = {}
+    max_alerts = BOT_MAX_ALERTS_PER_SCAN if BOT_MAX_ALERTS_PER_SCAN > 0 else len(candidate_rows)
+
+    for row in sorted(candidate_rows, key=lambda item: item.get("Signal Quality Score", 0), reverse=True):
+        market = row.get("Market", "Unknown")
+        category = row.get("Asset Category", asset_category(row.get("Ticker")))
+        row["Asset Category"] = category
+
+        if len(approved) >= max_alerts:
+            row["Alert Approved"] = "NO"
+            row["Exposure Notes"] = "blocked: max alerts per scan reached"
+            continue
+        if market_counts.get(market, 0) >= BOT_MAX_ALERTS_PER_MARKET:
+            row["Alert Approved"] = "NO"
+            row["Exposure Notes"] = f"blocked: max {market} alerts reached"
+            continue
+        if category_counts.get(category, 0) >= BOT_MAX_ALERTS_PER_CATEGORY:
+            row["Alert Approved"] = "NO"
+            row["Exposure Notes"] = f"blocked: max {category} exposure reached"
+            continue
+
+        row["Alert Approved"] = "YES"
+        row["Exposure Notes"] = "approved"
+        approved.append(row)
+        market_counts[market] = market_counts.get(market, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    return approved
+
+
+def determine_signal_outcome(row, current_price=None):
+    if not BOT_OUTCOME_TRACKING_ENABLED:
+        return "TRACKING DISABLED"
+    signal = str(row.get("AI Signal", row.get("Signal", "")))
+    price = safe_float(current_price if current_price is not None else row.get("Price", row.get("Current Price", 0)), 0)
+    stop = safe_float(row.get("Stop Loss", 0), 0)
+    tp1 = safe_float(row.get("Take Profit 1", 0), 0)
+    tp2 = safe_float(row.get("Take Profit 2", 0), 0)
+    if not is_directional_signal(signal) or price <= 0:
+        return "NO TRADE"
+    if "BUY" in signal:
+        if stop > 0 and price <= stop:
+            return "STOP HIT"
+        if tp2 > 0 and price >= tp2:
+            return "TP2 HIT"
+        if tp1 > 0 and price >= tp1:
+            return "TP1 HIT"
+    if "SELL" in signal:
+        if stop > 0 and price >= stop:
+            return "STOP HIT"
+        if tp2 > 0 and price <= tp2:
+            return "TP2 HIT"
+        if tp1 > 0 and price <= tp1:
+            return "TP1 HIT"
+    return "OPEN"
+
+
+def build_dashboard_analytics_rows(scanned_rows, backtest_results=None):
+    rows = []
+    scanned_rows = scanned_rows or []
+    backtest_results = backtest_results or []
+    directional = [row for row in scanned_rows if is_directional_signal(row.get("AI Signal", ""))]
+    ranked_directional = sorted(
+        directional,
+        key=lambda item: safe_float(item.get("Signal Quality Score", item.get("AI Confidence %", 0)), 0),
+        reverse=True
+    )
+    approved = [row for row in directional if str(row.get("Alert Approved", "")).upper() == "YES"]
+    blocked = [row for row in directional if str(row.get("Alert Approved", "")).upper() == "NO"]
+
+    rows.append(["Last Updated", now_text()])
+    rows.append(["Tickers Scanned", len(scanned_rows)])
+    rows.append(["Directional Signals", len(directional)])
+    rows.append(["Approved Alerts", len(approved)])
+    rows.append(["Blocked / Filtered Alerts", len(blocked)])
+    rows.append(["Average Confidence", round(sum(safe_float(row.get("AI Confidence %", 0)) for row in scanned_rows) / len(scanned_rows), 2) if scanned_rows else 0])
+    rows.append(["Average Risk/Reward", round(sum(safe_float(row.get("Risk/Reward 2", 0)) for row in directional) / len(directional), 2) if directional else 0])
+    rows.append(["Top Ranked Signal", ranked_directional[0].get("Ticker", "None") if ranked_directional else "None"])
+    rows.append(["Top Ranked Setup", f"{ranked_directional[0].get('Ticker', 'None')} {ranked_directional[0].get('AI Signal', '')} | QS {ranked_directional[0].get('Signal Quality Score', 0)} | R/R {ranked_directional[0].get('Risk/Reward 2', 0)}" if ranked_directional else "None"])
+    rows.append(["Weakest Current Setup", f"{ranked_directional[-1].get('Ticker', 'None')} {ranked_directional[-1].get('AI Signal', '')} | QS {ranked_directional[-1].get('Signal Quality Score', 0)}" if ranked_directional else "None"])
+    rows.append(["Risk-On Count", len([row for row in scanned_rows if row.get("Risk Mode") == "Risk-On"])])
+    rows.append(["Risk-Off Count", len([row for row in scanned_rows if row.get("Risk Mode") == "Risk-Off"])])
+    rows.append(["Sideways / Neutral Count", len([row for row in scanned_rows if str(row.get("Advanced Market Regime", "")).lower().startswith("sideways") or row.get("Risk Mode") == "Neutral"])])
+
+    valid = [r for r in backtest_results if r.get("Signals Tested", 0) > 0]
+    rows.append(["Backtests With Signals", len(valid)])
+    if valid:
+        best = sorted(valid, key=lambda r: (safe_float(r.get("Profit Factor", 0)), safe_float(r.get("Win Rate %", 0)), safe_float(r.get("Average Return %", 0))), reverse=True)[0]
+        worst = sorted(valid, key=lambda r: (safe_float(r.get("Profit Factor", 0)), safe_float(r.get("Win Rate %", 0)), safe_float(r.get("Average Return %", 0))))[0]
+        rows.append(["Average Backtest Win Rate", round(sum(safe_float(r.get("Win Rate %", 0)) for r in valid) / len(valid), 2)])
+        rows.append(["Average Backtest Profit Factor", round(sum(safe_float(r.get("Profit Factor", 0)) for r in valid) / len(valid), 2)])
+        rows.append(["Average Backtest Drawdown", round(sum(safe_float(r.get("Max Drawdown %", 0)) for r in valid) / len(valid), 2)])
+        rows.append(["Worst Backtest Drawdown", max(safe_float(r.get("Max Drawdown %", 0)) for r in valid)])
+        rows.append(["Best Backtest Ticker", f"{best.get('Ticker', '')} | WR {best.get('Win Rate %', 0)}% | PF {best.get('Profit Factor', 0)} | DD {best.get('Max Drawdown %', 0)}%"] )
+        rows.append(["Worst Backtest Ticker", f"{worst.get('Ticker', '')} | WR {worst.get('Win Rate %', 0)}% | PF {worst.get('Profit Factor', 0)} | DD {worst.get('Max Drawdown %', 0)}%"] )
+        rows.append(["Best Setup By Backtest", f"{best.get('Ticker', '')} | Avg Return {best.get('Average Return %', 0)}% | Expectancy {best.get('Expectancy %', 0)}%"] )
+        rows.append(["Worst Setup By Backtest", f"{worst.get('Ticker', '')} | Avg Return {worst.get('Average Return %', 0)}% | Expectancy {worst.get('Expectancy %', 0)}%"] )
+    else:
+        rows.append(["Average Backtest Win Rate", 0])
+        rows.append(["Average Backtest Profit Factor", 0])
+        rows.append(["Average Backtest Drawdown", 0])
+        rows.append(["Worst Backtest Drawdown", 0])
+        rows.append(["Best Backtest Ticker", "None"])
+        rows.append(["Worst Backtest Ticker", "None"])
+        rows.append(["Best Setup By Backtest", "None"])
+        rows.append(["Worst Setup By Backtest", "None"])
+    return rows
+
+def sync_dashboard_analytics_to_google_sheets(scanned_rows, backtest_results=None):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_DASHBOARD_ANALYTICS_ENABLED:
+        return False
+    spreadsheet = get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Dashboard Analytics", DASHBOARD_ANALYTICS_HEADERS)
+        rows = build_dashboard_analytics_rows(scanned_rows, backtest_results)
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [DASHBOARD_ANALYTICS_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Dashboard analytics sync error: {error}")
+        return False
+
+
+def calculate_walk_forward_summary(results):
+    if not BOT_WALK_FORWARD_ENABLED or not results:
+        return {
+            "Walk Forward Windows": 0,
+            "Walk Forward Passed": "NO DATA",
+            "Walk Forward Notes": "no backtest results",
+        }
+    valid = [result for result in results if result.get("Signals Tested", 0) > 0]
+    if not valid:
+        return {
+            "Walk Forward Windows": 0,
+            "Walk Forward Passed": "NO DATA",
+            "Walk Forward Notes": "no qualifying historical signals",
+        }
+    avg_win_rate = sum(safe_float(r.get("Win Rate %", 0)) for r in valid) / len(valid)
+    avg_pf = sum(safe_float(r.get("Profit Factor", 0)) for r in valid) / len(valid)
+    wf_rates = [safe_float(r.get("Walk Forward Pass Rate %", 0)) for r in valid if r.get("Walk Forward Windows", 0)]
+    avg_wf_rate = sum(wf_rates) / len(wf_rates) if wf_rates else 0
+    passed = avg_win_rate >= 50 and avg_pf >= 1 and (avg_wf_rate >= 50 if wf_rates else True)
+    return {
+        "Walk Forward Windows": BOT_WALK_FORWARD_WINDOWS,
+        "Walk Forward Passed": "YES" if passed else "NO",
+        "Walk Forward Notes": f"avg WR {round(avg_win_rate, 2)}% | avg PF {round(avg_pf, 2)} | avg WF pass {round(avg_wf_rate, 2)}% across {len(valid)} ticker(s)",
+    }
 
 # ======================================================
 # NEWS NORMALIZATION
@@ -900,8 +2621,12 @@ def make_news_item(source, market, ticker, title, url="", publisher="", publishe
 
 
 def is_breaking_news(title):
-    lowered = title.lower()
-    return any(keyword in lowered for keyword in BREAKING_KEYWORDS)
+    """Return True only when a breaking-news keyword appears as a real word/phrase.
+
+    This uses the same safe boundary matching as the v27 sentiment engine so words
+    like "sector" do not accidentally trigger the "SEC" breaking-news keyword.
+    """
+    return any(keyword_matches_text(keyword, title) for keyword in BREAKING_KEYWORDS)
 
 
 def article_key(item):
@@ -1153,6 +2878,196 @@ def fetch_finnhub_news(tickers):
     return items
 
 
+# ======================================================
+# NEWS SENTIMENT WEIGHTING
+# ======================================================
+
+def keyword_matches_text(keyword, text):
+    """
+    Match news keywords safely.
+
+    The first v27 draft used simple substring checks. That worked, but it could
+    misread words like "sector" as "SEC" or "disapproval" as "approval".
+    This helper keeps phrase matching simple while requiring word boundaries.
+    """
+    try:
+        keyword = str(keyword or "").strip().lower()
+        text = str(text or "").lower()
+        if not keyword or not text:
+            return False
+
+        escaped = re.escape(keyword)
+        escaped = escaped.replace("\\ ", r"\s+")
+        return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text) is not None
+    except Exception:
+        return False
+
+
+def score_headline_sentiment(title):
+    text = str(title or "").lower()
+    bullish_hits = [
+        keyword for keyword in BULLISH_NEWS_KEYWORDS
+        if keyword_matches_text(keyword, text)
+    ]
+    bearish_hits = [
+        keyword for keyword in BEARISH_NEWS_KEYWORDS
+        if keyword_matches_text(keyword, text)
+    ]
+
+    # Context cleanup: some words are bullish in product/business headlines but
+    # should not offset legal/regulatory bearish headlines.
+    # Example: "SEC launches investigation" should be bearish, not partly bullish
+    # because of the word "launches".
+    if bearish_hits and "launches" in bullish_hits:
+        bullish_hits = [keyword for keyword in bullish_hits if keyword != "launches"]
+
+    # Approval can appear inside bearish/uncertain phrases.
+    # Example: "FDA rejects approval" or "SEC delays ETF approval".
+    negative_approval_context = (
+        keyword_matches_text("rejects", text)
+        or keyword_matches_text("rejected", text)
+        or keyword_matches_text("denies", text)
+        or keyword_matches_text("denied", text)
+        or keyword_matches_text("delays", text)
+        or keyword_matches_text("delayed", text)
+    )
+    if negative_approval_context:
+        bullish_hits = [
+            keyword for keyword in bullish_hits
+            if keyword not in ["approval", "approved", "etf approved"]
+        ]
+        if not any(keyword in bearish_hits for keyword in ["warning", "investigation"]):
+            bearish_hits.append("negative approval context")
+
+    raw_score = len(bullish_hits) - len(bearish_hits)
+
+    if raw_score > 0:
+        label = "Bullish"
+    elif raw_score < 0:
+        label = "Bearish"
+    else:
+        label = "Neutral"
+
+    strength = min(5, max(1, abs(raw_score))) if raw_score else 0
+
+    return {
+        "label": label,
+        "score": raw_score,
+        "strength": strength,
+        "bullish_hits": bullish_hits[:5],
+        "bearish_hits": bearish_hits[:5],
+    }
+
+
+def summarize_news_sentiment(items):
+    if not BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED:
+        return {
+            "news_sentiment_label": "Disabled",
+            "news_sentiment_score": 0,
+            "news_strength": 0,
+            "news_score_adj": 0,
+            "news_headlines": "None",
+            "news_notes": "news sentiment weighting disabled",
+        }
+
+    if not items:
+        return {
+            "news_sentiment_label": "Unavailable",
+            "news_sentiment_score": 0,
+            "news_strength": 0,
+            "news_score_adj": 0,
+            "news_headlines": "None",
+            "news_notes": "no usable recent headlines",
+        }
+
+    total_score = 0
+    total_strength = 0
+    selected_titles = []
+
+    for item in items[:BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER]:
+        title = item.get("title", "")
+        result = score_headline_sentiment(title)
+        total_score += result["score"]
+        total_strength += result["strength"]
+        if title:
+            selected_titles.append(str(title)[:120])
+
+    if total_score > 0:
+        label = "Bullish"
+    elif total_score < 0:
+        label = "Bearish"
+    else:
+        label = "Neutral"
+
+    capped_score = max(-5, min(total_score, 5))
+    if capped_score == 0:
+        adjustment = 0
+    else:
+        adjustment = round((capped_score / 5) * BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT)
+
+    return {
+        "news_sentiment_label": label,
+        "news_sentiment_score": int(total_score),
+        "news_strength": int(total_strength),
+        "news_score_adj": int(adjustment),
+        "news_headlines": " | ".join(selected_titles[:2]) if selected_titles else "None",
+        "news_notes": f"{label} sentiment from {len(items[:BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER])} headline(s)",
+    }
+
+
+def build_news_sentiment_contexts(scan_started_at=None):
+    default = summarize_news_sentiment([])
+
+    if not BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED:
+        return {ticker: default for ticker in ALL_TICKERS}
+
+    contexts = {ticker: default for ticker in ALL_TICKERS}
+
+    try:
+        market_items = {"Crypto": [], "Stock": []}
+
+        if BOT_NEWS_SENTIMENT_USE_MARKET_NEWS:
+            if NEWSAPI_KEY:
+                market_items["Crypto"] = fetch_newsapi_news("Crypto")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
+                market_items["Stock"] = fetch_newsapi_news("Stock")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
+
+        for ticker in ALL_TICKERS:
+            if SHUTDOWN_REQUESTED:
+                break
+
+            if scan_started_at is not None:
+                elapsed = time.time() - scan_started_at
+                remaining = BOT_MAX_SCAN_SECONDS - elapsed
+                if remaining <= BOT_NEWS_SENTIMENT_TIME_GUARD_SECONDS:
+                    contexts[ticker] = {
+                        **default,
+                        "news_notes": "news sentiment skipped by time guard",
+                    }
+                    continue
+
+            market = get_asset_type(ticker)
+            items = []
+
+            if market == "Stock" and FINNHUB_API_KEY:
+                items.extend(fetch_finnhub_company_news(ticker))
+
+            if BOT_NEWS_YFINANCE_ENABLED:
+                items.extend(fetch_yfinance_news_for_ticker(ticker, market))
+
+            if BOT_NEWS_SENTIMENT_USE_MARKET_NEWS:
+                items.extend(market_items.get(market, []))
+
+            contexts[ticker] = summarize_news_sentiment(items)
+
+            if FINNHUB_NEWS_DELAY_SECONDS > 0 and market == "Stock" and FINNHUB_API_KEY:
+                interruptible_sleep(FINNHUB_NEWS_DELAY_SECONDS)
+
+        return contexts
+
+    except Exception as error:
+        log(f"News sentiment context build error: {error}")
+        return contexts
+
 
 # ======================================================
 # NEWS DIGEST SENDING
@@ -1324,6 +3239,16 @@ def send_startup_message():
         {"name": "Bot Version", "value": BOT_VERSION, "inline": False},
         {"name": "Scan Interval", "value": f"{SCAN_INTERVAL_MINUTES} minutes", "inline": True},
         {"name": "Minimum Confidence", "value": f"{MIN_CONFIDENCE}%", "inline": True},
+        {"name": "Multi-Timeframe", "value": "On" if BOT_MULTI_TIMEFRAME_ENABLED else "Off", "inline": True},
+        {"name": "MTF Frames", "value": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}", "inline": True},
+        {"name": "Volume Spike Detection", "value": "On" if BOT_VOLUME_SPIKE_ENABLED else "Off", "inline": True},
+        {"name": "Market Trend Filter", "value": "On" if BOT_MARKET_TREND_FILTER_ENABLED else "Off", "inline": True},
+        {"name": "Confidence Engine", "value": "On" if BOT_CONFIDENCE_ENGINE_ENABLED else "Legacy", "inline": True},
+        {"name": "Support/Resistance", "value": "On" if BOT_SUPPORT_RESISTANCE_ENABLED else "Off", "inline": True},
+        {"name": "Trade Management", "value": "On" if BOT_TRADE_MANAGEMENT_ENABLED else "Off", "inline": True},
+        {"name": "Advanced Backtesting", "value": "On" if BOT_BACKTESTING_ENABLED else "Off", "inline": True},
+        {"name": "Phase 3 Risk Suite", "value": f"Regime {'On' if BOT_MARKET_REGIME_DETECTION_ENABLED else 'Off'} | Ranking {'On' if BOT_SIGNAL_RANKING_ENABLED else 'Off'} | Sizing {'On' if BOT_POSITION_SIZING_ENABLED else 'Off'} | Trailing {'On' if BOT_TRAILING_STOP_ENABLED else 'Off'} | Exposure {'On' if BOT_EXPOSURE_CONTROLS_ENABLED else 'Off'} | WalkFwd {'On' if BOT_WALK_FORWARD_ENABLED else 'Off'} | Outcomes {'On' if BOT_OUTCOME_TRACKING_ENABLED else 'Off'} | Analytics {'On' if BOT_DASHBOARD_ANALYTICS_ENABLED else 'Off'}", "inline": False},
+        {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
         {"name": "News Interval", "value": f"{NEWS_INTERVAL_HOURS} hours", "inline": True},
@@ -1356,10 +3281,25 @@ def send_signal_alert(row):
         {"name": "Market", "value": str(row["Market"]), "inline": True},
         {"name": "Price", "value": f"${row['Price']}", "inline": True},
         {"name": "Daily Change", "value": f"{row['Daily Change %']}%", "inline": True},
+        {"name": "Volume", "value": str(row.get("Volume", "N/A")), "inline": True},
+        {"name": "Relative Volume", "value": f"{row.get('Relative Volume', 'N/A')}x", "inline": True},
+        {"name": "Volume Signal", "value": str(row.get("Volume Signal", "N/A")), "inline": True},
+        {"name": "Market Regime", "value": f"{row.get('Market Regime', 'N/A')} | Adj {row.get('Market Trend Adj', 0)}", "inline": True},
+        {"name": "Support/Resistance", "value": f"{row.get('S/R Signal', 'N/A')} | S {row.get('Support Level', 'N/A')} / R {row.get('Resistance Level', 'N/A')} | Adj {row.get('S/R Score Adj', 0)}", "inline": False},
+        {"name": "News Sentiment", "value": f"{row.get('News Sentiment', 'N/A')} | Adj {row.get('News Score Adj', 0)} | {row.get('News Headlines', 'None')}", "inline": False},
         {"name": "Signal", "value": str(row["AI Signal"]), "inline": True},
         {"name": "Confidence", "value": f"{row['AI Confidence %']}%", "inline": True},
-        {"name": "RSI", "value": str(row["RSI"]), "inline": True},
-        {"name": "MACD", "value": str(row["MACD"]), "inline": True},
+        {"name": "Confidence Grade", "value": str(row.get("Confidence Grade", "N/A")), "inline": True},
+        {"name": "Confidence Breakdown", "value": f"RSI {row.get('RSI Confidence', 'N/A')}% | MACD {row.get('MACD Confidence', 'N/A')}% | Trend {row.get('Trend Confidence', 'N/A')}% | MTF {row.get('MTF Confidence', 'N/A')}% | Vol {row.get('Volume Confidence', 'N/A')}% | S/R {row.get('S/R Confidence', 'N/A')}% | R/R {row.get('Risk/Reward Confidence', 'N/A')}%", "inline": False},
+        {"name": "Confidence Notes", "value": str(row.get("Confidence Notes", "N/A")), "inline": False},
+        {"name": "RSI / MACD", "value": f"RSI {row['RSI']} | MACD {row['MACD']}", "inline": True},
+        {"name": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} Trend", "value": str(row.get("Short TF Trend", "N/A")), "inline": True},
+        {"name": "Daily Trend", "value": str(row.get("Daily Trend", "N/A")), "inline": True},
+        {"name": f"{BOT_HIGHER_TIMEFRAME_LABEL} Trend", "value": str(row.get("Higher TF Trend", "N/A")), "inline": True},
+        {"name": "MTF Alignment", "value": str(row.get("MTF Alignment", "N/A")), "inline": False},
+        {"name": "MTF Score Adj", "value": str(row.get("MTF Score Adj", 0)), "inline": True},
+        {"name": "Volume Score Adj", "value": str(row.get("Volume Score Adj", 0)), "inline": True},
+        {"name": "Trade Plan", "value": f"Rank #{row.get('Signal Rank', 'N/A')} | Entry {row.get('Trade Entry', 'N/A')} | SL {row.get('Stop Loss', 'N/A')} | TP1 {row.get('Take Profit 1', 'N/A')} | TP2 {row.get('Take Profit 2', 'N/A')} | Trail {row.get('Trailing Stop', 'N/A')} | Qty {row.get('Position Size', 'N/A')} | R/R {row.get('Risk/Reward 2', 'N/A')}", "inline": False},
         {"name": "Final Score", "value": str(row["Final Score"]), "inline": True},
         {"name": "Time", "value": now_text(), "inline": False},
     ]
@@ -1387,7 +3327,7 @@ def build_summary_fields(rows, market):
     sell_lines = []
 
     for row in sorted(market_rows, key=lambda item: item["AI Confidence %"], reverse=True):
-        line = f"{row['Ticker']} | {row['AI Confidence %']}% | RSI {row['RSI']}"
+        line = f"#{row.get('Signal Rank', '-')} {row['Ticker']} | {row['AI Confidence %']}% ({row.get('Confidence Grade', 'N/A')}) | QS {row.get('Signal Quality Score', 0)} | RSI {row['RSI']} | RVOL {row.get('Relative Volume', 'N/A')}x | Regime {row.get('Advanced Market Regime', row.get('Market Regime', '?'))} | News {row.get('News Sentiment', '?')} | S/R {row.get('S/R Signal', '?')} | MTF {row.get('Short TF Trend', '?')}/{row.get('Higher TF Trend', '?')}"
 
         if "BUY" in row["AI Signal"]:
             buy_lines.append(line)
@@ -1457,36 +3397,535 @@ def maybe_send_summary(rows, market):
 
 
 
+
+# ======================================================
+# ADVANCED BACKTESTING ENGINE
+# ======================================================
+
+def get_backtest_key():
+    current_bucket = int(time.time() // (BOT_BACKTEST_INTERVAL_HOURS * 3600))
+    return f"backtest_{current_bucket}"
+
+
+def backtest_already_sent():
+    sent_backtests = load_log(BACKTEST_SCHEDULE_LOG_FILE)
+    return get_backtest_key() in sent_backtests
+
+
+def mark_backtest_sent():
+    sent_backtests = load_log(BACKTEST_SCHEDULE_LOG_FILE)
+    sent_backtests.add(get_backtest_key())
+    save_log(BACKTEST_SCHEDULE_LOG_FILE, sent_backtests)
+
+
+def calculate_backtest_signal_from_window(window_data):
+    if window_data is None or window_data.empty or len(window_data) < BOT_BACKTEST_LOOKBACK_DAYS:
+        return None
+
+    try:
+        scored_data = calculate_indicators(window_data.copy())
+        latest = scored_data.iloc[-1]
+        current_price = float(latest["Close"])
+        rsi_value = safe_latest_value(latest, "RSI", 50)
+        macd_value = safe_latest_value(latest, "MACD", 0)
+        macd_signal_value = safe_latest_value(latest, "MACD Signal", 0)
+
+        technical_score = calculate_technical_score_from_latest(latest, current_price)
+        daily_trend = timeframe_trend_from_score(technical_score)
+
+        short_trend = "Unavailable"
+        higher_trend = "Unknown"
+        mtf_adjustment = 0
+
+        if BOT_MULTI_TIMEFRAME_ENABLED:
+            higher_data = resample_to_higher_timeframe(scored_data)
+            higher_frame = score_price_frame(higher_data)
+            if higher_frame:
+                higher_trend = higher_frame["trend"]
+
+            mtf_adjustment, _ = calculate_mtf_adjustment(daily_trend, short_trend, higher_trend)
+
+        volume_context = calculate_volume_context(scored_data, daily_trend)
+        support_resistance_context = calculate_support_resistance_context(scored_data, daily_trend)
+        market_context = unavailable_market_context("historical market context excluded from backtest")
+        market_adjustment = 0
+        news_sentiment_context = summarize_news_sentiment([])
+
+        final_score = max(
+            0,
+            min(
+                technical_score
+                + mtf_adjustment
+                + volume_context.get("volume_score_adj", 0)
+                + support_resistance_context.get("support_resistance_score_adj", 0),
+                120
+            )
+        )
+
+        signal, legacy_confidence = calculate_signal_and_confidence(final_score)
+        trade_context = calculate_trade_management_context(scored_data, signal, current_price, support_resistance_context)
+
+        confidence_context = calculate_confidence_breakdown(
+            final_score,
+            daily_trend,
+            mtf_adjustment,
+            short_trend,
+            higher_trend,
+            volume_context,
+            market_adjustment,
+            market_context,
+            support_resistance_context,
+            news_sentiment_context,
+            trade_context,
+            rsi_value,
+            macd_value,
+            macd_signal_value
+        )
+
+        weighted_confidence = confidence_context.get("confidence_percent", legacy_confidence)
+        backtest_confidence = max(bounded_percent(weighted_confidence), bounded_percent(legacy_confidence))
+
+        return {
+            "signal": signal,
+            "confidence": backtest_confidence,
+            "final_score": final_score,
+            "daily_trend": daily_trend,
+            "higher_trend": higher_trend,
+            "trade_context": trade_context,
+        }
+
+    except Exception as error:
+        log(f"Backtest window scoring error: {error}")
+        return None
+
+
+def calculate_backtest_exit(data, index, hold_days, signal, trade_context):
+    entry_price = float(data["Close"].iloc[index])
+    default_exit_index = min(index + hold_days, len(data) - 1)
+    default_exit_price = float(data["Close"].iloc[default_exit_index])
+    stop_loss = safe_float(trade_context.get("stop_loss", 0), 0)
+    take_profit_1 = safe_float(trade_context.get("take_profit_1", 0), 0)
+    take_profit_2 = safe_float(trade_context.get("take_profit_2", 0), 0)
+
+    exit_price = default_exit_price
+    exit_reason = "time exit"
+
+    future = data.iloc[index + 1: default_exit_index + 1]
+
+    for _, candle in future.iterrows():
+        high = safe_float(candle.get("High", candle.get("Close", 0)), 0)
+        low = safe_float(candle.get("Low", candle.get("Close", 0)), 0)
+        close = safe_float(candle.get("Close", 0), 0)
+
+        if "BUY" in signal:
+            if stop_loss > 0 and low <= stop_loss:
+                return stop_loss, "stop loss"
+            if take_profit_2 > 0 and high >= take_profit_2:
+                return take_profit_2, "take profit 2"
+            if take_profit_1 > 0 and high >= take_profit_1:
+                exit_price = take_profit_1
+                exit_reason = "take profit 1"
+        elif "SELL" in signal:
+            if stop_loss > 0 and high >= stop_loss:
+                return stop_loss, "stop loss"
+            if take_profit_2 > 0 and low <= take_profit_2:
+                return take_profit_2, "take profit 2"
+            if take_profit_1 > 0 and low <= take_profit_1:
+                exit_price = take_profit_1
+                exit_reason = "take profit 1"
+
+        if close > 0:
+            default_exit_price = close
+
+    return exit_price, exit_reason
+
+
+def backtest_ticker(ticker):
+    data = get_price_data(ticker, BOT_BACKTEST_PERIOD, "1d")
+
+    default_result = {
+        "Ticker": ticker,
+        "Market": get_asset_type(ticker),
+        "Signals Tested": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win Rate %": 0,
+        "Average Return %": 0,
+        "Best Return %": 0,
+        "Worst Return %": 0,
+        "Average Confidence %": 0,
+        "Buy Signals": 0,
+        "Sell Signals": 0,
+        "Profit Factor": 0,
+        "Max Drawdown %": 0,
+        "Expectancy %": 0,
+        "Average R/R": 0,
+        "Hold Days": BOT_BACKTEST_HOLD_DAYS,
+        "Period": BOT_BACKTEST_PERIOD,
+        "Walk Forward Windows": BOT_WALK_FORWARD_WINDOWS,
+        "Walk Forward Passed Windows": 0,
+        "Walk Forward Pass Rate %": 0,
+        "Walk Forward Notes": "not enough historical data",
+        "Notes": "not enough historical data",
+    }
+
+    if data is None or data.empty:
+        return default_result
+
+    data = normalize_price_data(data)
+    required_rows = BOT_BACKTEST_LOOKBACK_DAYS + BOT_BACKTEST_HOLD_DAYS + 5
+    if len(data) < required_rows:
+        return default_result
+
+    trade_returns = []
+    confidence_values = []
+    rr_values = []
+    buy_signals = 0
+    sell_signals = 0
+    equity = BOT_BACKTEST_INITIAL_EQUITY
+    peak_equity = equity
+    max_drawdown = 0
+    returns_by_window = [[] for _ in range(BOT_WALK_FORWARD_WINDOWS)]
+
+    start_index = BOT_BACKTEST_LOOKBACK_DAYS
+    end_index = len(data) - BOT_BACKTEST_HOLD_DAYS
+
+    for index in range(start_index, end_index):
+        window = data.iloc[: index + 1]
+        signal_context = calculate_backtest_signal_from_window(window)
+
+        if not signal_context:
+            continue
+
+        signal = signal_context["signal"]
+        confidence = signal_context["confidence"]
+        trade_context = signal_context.get("trade_context", {})
+
+        if signal not in ["STRONG BUY", "BUY", "STRONG SELL", "SELL"]:
+            continue
+
+        if confidence < BOT_BACKTEST_MIN_CONFIDENCE:
+            continue
+
+        entry_price = float(data["Close"].iloc[index])
+        if entry_price <= 0:
+            continue
+
+        if BOT_BACKTEST_INCLUDE_TRADE_MANAGEMENT:
+            exit_price, exit_reason = calculate_backtest_exit(data, index, BOT_BACKTEST_HOLD_DAYS, signal, trade_context)
+        else:
+            exit_price = float(data["Close"].iloc[index + BOT_BACKTEST_HOLD_DAYS])
+            exit_reason = "time exit"
+
+        raw_return = ((exit_price - entry_price) / entry_price) * 100
+
+        if "SELL" in signal:
+            strategy_return = raw_return * -1
+            sell_signals += 1
+        else:
+            strategy_return = raw_return
+            buy_signals += 1
+
+        risk_fraction = BOT_BACKTEST_RISK_PER_TRADE_PCT / 100
+        equity *= (1 + (strategy_return / 100) * min(1, risk_fraction * 10))
+        peak_equity = max(peak_equity, equity)
+        drawdown = ((peak_equity - equity) / peak_equity) * 100 if peak_equity else 0
+        max_drawdown = max(max_drawdown, drawdown)
+
+        trade_returns.append(strategy_return)
+        if BOT_WALK_FORWARD_ENABLED and BOT_WALK_FORWARD_WINDOWS > 0:
+            window_span = max(1, end_index - start_index)
+            window_index = min(BOT_WALK_FORWARD_WINDOWS - 1, int(((index - start_index) / window_span) * BOT_WALK_FORWARD_WINDOWS))
+            returns_by_window[window_index].append(strategy_return)
+        confidence_values.append(confidence)
+        rr_values.append(safe_float(trade_context.get("risk_reward_2", 0), 0))
+
+    if not trade_returns:
+        return {**default_result, "Notes": "no qualifying historical signals"}
+
+    wins = [value for value in trade_returns if value > 0]
+    losses = [value for value in trade_returns if value < 0]
+    total = len(trade_returns)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = round(gross_win / gross_loss, 2) if gross_loss else round(gross_win, 2)
+    wf_window_results = []
+    for window_returns in returns_by_window:
+        if not window_returns:
+            continue
+        window_win_rate = len([value for value in window_returns if value > 0]) / len(window_returns) * 100
+        window_average = sum(window_returns) / len(window_returns)
+        wf_window_results.append(window_win_rate >= 50 and window_average >= 0)
+    wf_passed_windows = len([value for value in wf_window_results if value])
+    wf_total_windows = len(wf_window_results)
+    wf_pass_rate = round((wf_passed_windows / wf_total_windows) * 100, 2) if wf_total_windows else 0
+    wf_notes = f"{wf_passed_windows}/{wf_total_windows} profitable windows" if wf_total_windows else "no walk-forward windows with trades"
+
+    return {
+        "Ticker": ticker,
+        "Market": get_asset_type(ticker),
+        "Signals Tested": total,
+        "Wins": len(wins),
+        "Losses": len(losses),
+        "Win Rate %": round((len(wins) / total) * 100, 2) if total else 0,
+        "Average Return %": round(sum(trade_returns) / total, 2) if total else 0,
+        "Best Return %": round(max(trade_returns), 2),
+        "Worst Return %": round(min(trade_returns), 2),
+        "Average Confidence %": round(sum(confidence_values) / len(confidence_values), 2) if confidence_values else 0,
+        "Buy Signals": buy_signals,
+        "Sell Signals": sell_signals,
+        "Profit Factor": profit_factor,
+        "Max Drawdown %": round(max_drawdown, 2),
+        "Expectancy %": round(sum(trade_returns) / total, 2) if total else 0,
+        "Average R/R": round(sum(rr_values) / len(rr_values), 2) if rr_values else 0,
+        "Hold Days": BOT_BACKTEST_HOLD_DAYS,
+        "Period": BOT_BACKTEST_PERIOD,
+        "Walk Forward Windows": wf_total_windows,
+        "Walk Forward Passed Windows": wf_passed_windows,
+        "Walk Forward Pass Rate %": wf_pass_rate,
+        "Walk Forward Notes": wf_notes,
+        "Notes": "OK" if total >= BOT_BACKTEST_MIN_SIGNALS else "low sample size",
+    }
+
+
+def row_from_backtest_result(result):
+    return [
+        now_text(),
+        result.get("Ticker", ""),
+        result.get("Market", ""),
+        result.get("Signals Tested", 0),
+        result.get("Wins", 0),
+        result.get("Losses", 0),
+        result.get("Win Rate %", 0),
+        result.get("Average Return %", 0),
+        result.get("Best Return %", 0),
+        result.get("Worst Return %", 0),
+        result.get("Average Confidence %", 0),
+        result.get("Buy Signals", 0),
+        result.get("Sell Signals", 0),
+        result.get("Profit Factor", 0),
+        result.get("Max Drawdown %", 0),
+        result.get("Expectancy %", 0),
+        result.get("Average R/R", 0),
+        result.get("Hold Days", BOT_BACKTEST_HOLD_DAYS),
+        result.get("Period", BOT_BACKTEST_PERIOD),
+        result.get("Walk Forward Windows", 0),
+        result.get("Walk Forward Passed Windows", 0),
+        result.get("Walk Forward Pass Rate %", 0),
+        result.get("Walk Forward Notes", ""),
+        result.get("Notes", ""),
+    ]
+
+
+def sync_backtest_results_to_google_sheets(results):
+    if not GOOGLE_SHEETS_ENABLED or not results:
+        return False
+
+    spreadsheet = get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Backtesting Results", BACKTEST_RESULTS_HEADERS)
+        rows = [row_from_backtest_result(result) for result in results]
+        safe_append_rows(worksheet, rows)
+        prune_worksheet_rows(worksheet, GOOGLE_SHEETS_MAX_SCAN_HISTORY_ROWS)
+        return True
+    except Exception as error:
+        log(f"Google Sheets backtest sync error: {error}")
+        return False
+
+
+def sync_walk_forward_to_google_sheets(results):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_WALK_FORWARD_ENABLED:
+        return False
+    spreadsheet = get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+    try:
+        summary = calculate_walk_forward_summary(results)
+        worksheet = get_or_create_worksheet(spreadsheet, "Walk Forward", WALK_FORWARD_HEADERS)
+        safe_append_rows(worksheet, [[
+            now_text(),
+            summary.get("Walk Forward Windows", 0),
+            summary.get("Walk Forward Passed", "NO DATA"),
+            summary.get("Walk Forward Notes", ""),
+        ]])
+        prune_worksheet_rows(worksheet, GOOGLE_SHEETS_MAX_SCAN_HISTORY_ROWS)
+        return True
+    except Exception as error:
+        log(f"Walk-forward sync error: {error}")
+        return False
+
+
+def send_backtest_summary(results):
+    if not results:
+        return False
+
+    webhook_url = get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+    if not webhook_url:
+        log("Backtest summary skipped: no summary/trade webhook available.")
+        return False
+
+    valid_results = [result for result in results if result.get("Signals Tested", 0) > 0]
+
+    if not valid_results:
+        message = (
+            "🧪 ADVANCED BACKTESTING SUMMARY\n"
+            f"Time: {now_text()}\n"
+            f"Period: {BOT_BACKTEST_PERIOD} | Hold: {BOT_BACKTEST_HOLD_DAYS} days\n"
+            "No qualifying historical signals found at the current confidence threshold."
+        )
+        return send_discord_message(webhook_url, message)
+
+    ranked = sorted(
+        valid_results,
+        key=lambda item: (item.get("Profit Factor", 0), item.get("Win Rate %", 0), item.get("Average Return %", 0)),
+        reverse=True
+    )
+
+    total_signals = sum(result.get("Signals Tested", 0) for result in valid_results)
+    total_wins = sum(result.get("Wins", 0) for result in valid_results)
+    overall_win_rate = round((total_wins / total_signals) * 100, 2) if total_signals else 0
+    avg_return = round(sum(result.get("Average Return %", 0) for result in valid_results) / len(valid_results), 2)
+    avg_drawdown = round(sum(result.get("Max Drawdown %", 0) for result in valid_results) / len(valid_results), 2)
+
+    wf_summary = calculate_walk_forward_summary(results)
+
+    lines = [
+        "🧪 ADVANCED BACKTESTING SUMMARY",
+        f"Time: {now_text()}",
+        f"Period: {BOT_BACKTEST_PERIOD} | Hold: {BOT_BACKTEST_HOLD_DAYS} days | Min Confidence: {BOT_BACKTEST_MIN_CONFIDENCE}%",
+        f"Overall: {total_signals} signals | {overall_win_rate}% WR | Avg return {avg_return}% | Avg DD {avg_drawdown}%",
+        f"Walk Forward: {wf_summary.get('Walk Forward Passed', 'NO DATA')} | {wf_summary.get('Walk Forward Notes', '')}",
+        "",
+        "Top Results:",
+    ]
+
+    for result in ranked[:8]:
+        lines.append(
+            f"{result['Ticker']} | {result['Signals Tested']} signals | "
+            f"{result['Win Rate %']}% WR | PF {result['Profit Factor']} | "
+            f"Avg {result['Average Return %']}% | DD {result['Max Drawdown %']}%"
+        )
+
+    return send_discord_message(webhook_url, "\n".join(lines))
+
+
+def run_backtest_review():
+    if not BOT_BACKTESTING_ENABLED:
+        return []
+
+    tickers = clean_ticker_list(ALL_TICKERS)[:BOT_BACKTEST_MAX_TICKERS]
+    results = []
+
+    for ticker in tickers:
+        if SHUTDOWN_REQUESTED:
+            break
+
+        try:
+            result = backtest_ticker(ticker)
+            results.append(result)
+            log(
+                f"Backtest {ticker}: {result.get('Signals Tested', 0)} signals | "
+                f"{result.get('Win Rate %', 0)}% WR | PF {result.get('Profit Factor', 0)}"
+            )
+        except Exception as error:
+            log(f"Backtest error for {ticker}: {error}")
+
+        if YFINANCE_TICKER_DELAY_SECONDS > 0:
+            interruptible_sleep(YFINANCE_TICKER_DELAY_SECONDS)
+
+    sync_backtest_results_to_google_sheets(results)
+    sync_walk_forward_to_google_sheets(results)
+    sync_dashboard_analytics_to_google_sheets([], results)
+    send_backtest_summary(results)
+    return results
+
+
+def maybe_run_backtest_review():
+    if not BOT_BACKTESTING_ENABLED:
+        return []
+
+    if backtest_already_sent():
+        log("Backtest review skipped by interval setting.")
+        return []
+
+    results = run_backtest_review()
+    mark_backtest_sent()
+    return results
+
+
 # ======================================================
 # GOOGLE SHEETS TRACKING
 # ======================================================
 
 LIVE_SCANNER_HEADERS = [
     "Timestamp", "Ticker", "Market", "Price", "Daily Change %",
-    "RSI", "MACD", "MACD Signal", "Technical Score", "Final Score",
-    "Confidence %", "Signal"
+    "Volume", "Avg Volume", "Relative Volume", "Volume Signal", "Volume Score Adj",
+    "Market Regime", "Market Score", "Market Anchors", "Advanced Market Regime", "Regime Strength", "Risk Mode", "Regime Notes", "Market Trend Adj", "Market Alignment",
+    "Support Level", "Resistance Level", "Distance To Support %", "Distance To Resistance %",
+    "S/R Signal", "S/R Score Adj", "S/R Strength", "S/R Position", "Support Touches", "Resistance Touches", "S/R Notes",
+    "Trade Entry", "Stop Loss", "Take Profit 1", "Take Profit 2", "Risk/Reward 1", "Risk/Reward 2", "Trade Plan", "Trade Notes",
+    "Account Size", "Risk %", "Risk Dollars", "Position Size", "Position Value", "Position Notes", "Trailing Stop", "Breakeven Trigger", "Trail Distance", "Trailing Notes",
+    "Asset Category", "Signal Quality Score", "Signal Rank", "Alert Approved", "Exposure Notes",
+    "News Sentiment", "News Sentiment Score", "News Strength", "News Score Adj", "News Headlines", "News Notes",
+    "RSI Confidence", "MACD Confidence", "Trend Confidence", "Technical Confidence", "MTF Confidence",
+    "Volume Confidence", "Market Confidence", "S/R Confidence", "News Confidence", "Risk/Reward Confidence",
+    "Confidence Grade", "Confidence Engine", "Confidence Notes", "Legacy Confidence %",
+    "RSI", "MACD", "MACD Signal", "Technical Score",
+    "Short TF Score", "Short TF Trend", "Daily Trend", "Higher TF Score", "Higher TF Trend",
+    "MTF Alignment", "MTF Score Adj", "Final Score", "Confidence %", "Signal"
 ]
 
 SCAN_HISTORY_HEADERS = LIVE_SCANNER_HEADERS
 
 TRADE_ALERT_HEADERS = [
     "Timestamp", "Ticker", "Market", "Price", "Daily Change %",
-    "Signal", "Confidence %", "RSI", "MACD", "Final Score", "Alert Sent"
+    "Volume", "Avg Volume", "Relative Volume", "Volume Signal", "Volume Score Adj",
+    "Market Regime", "Market Score", "Market Anchors", "Advanced Market Regime", "Regime Strength", "Risk Mode", "Regime Notes", "Market Trend Adj", "Market Alignment",
+    "Support Level", "Resistance Level", "Distance To Support %", "Distance To Resistance %",
+    "S/R Signal", "S/R Score Adj", "S/R Strength", "S/R Position", "Support Touches", "Resistance Touches", "S/R Notes",
+    "Trade Entry", "Stop Loss", "Take Profit 1", "Take Profit 2", "Risk/Reward 1", "Risk/Reward 2", "Trade Plan", "Trade Notes",
+    "Account Size", "Risk %", "Risk Dollars", "Position Size", "Position Value", "Position Notes", "Trailing Stop", "Breakeven Trigger", "Trail Distance", "Trailing Notes",
+    "Asset Category", "Signal Quality Score", "Signal Rank", "Alert Approved", "Exposure Notes",
+    "News Sentiment", "News Sentiment Score", "News Strength", "News Score Adj", "News Headlines", "News Notes",
+    "RSI Confidence", "MACD Confidence", "Trend Confidence", "Technical Confidence", "MTF Confidence",
+    "Volume Confidence", "Market Confidence", "S/R Confidence", "News Confidence", "Risk/Reward Confidence",
+    "Confidence Grade", "Confidence Engine", "Confidence Notes", "Legacy Confidence %",
+    "Signal", "Confidence %", "RSI", "MACD",
+    "Short TF Trend", "Daily Trend", "Higher TF Trend", "MTF Alignment", "MTF Score Adj",
+    "Final Score", "Alert Sent"
 ]
 
 SIGNAL_TRACKER_HEADERS = [
     "Signal ID", "Opened At", "Last Updated", "Ticker", "Market",
-    "Signal", "Entry Price", "Current Price", "Raw Change %",
-    "Signal Performance %", "Confidence %", "RSI", "Status"
+    "Signal", "Entry Price", "Current Price", "Stop Loss", "Take Profit 1", "Take Profit 2",
+    "Raw Change %", "Signal Performance %", "Confidence %", "Risk/Reward 2", "RSI", "Status", "Outcome", "Signal Rank", "Asset Category"
 ]
 
 BOT_PERFORMANCE_HEADERS = [
     "Signal", "Count", "Average Signal Performance %", "Wins", "Losses", "Win Rate %"
 ]
 
+DASHBOARD_ANALYTICS_HEADERS = [
+    "Metric", "Value"
+]
+
+WALK_FORWARD_HEADERS = [
+    "Timestamp", "Windows", "Passed", "Notes"
+]
+
 BEST_TICKERS_HEADERS = [
     "Ticker", "Market", "Signal", "Count", "Average Signal Performance %",
     "Wins", "Losses", "Win Rate %", "Last Updated"
+]
+
+BACKTEST_RESULTS_HEADERS = [
+    "Timestamp", "Ticker", "Market", "Signals Tested", "Wins", "Losses",
+    "Win Rate %", "Average Return %", "Best Return %", "Worst Return %",
+    "Average Confidence %", "Buy Signals", "Sell Signals", "Profit Factor",
+    "Max Drawdown %", "Expectancy %", "Average R/R", "Hold Days", "Period", "Walk Forward Windows", "Walk Forward Passed Windows", "Walk Forward Pass Rate %", "Walk Forward Notes", "Notes"
 ]
 
 SYSTEM_STATUS_HEADERS = [
@@ -1500,6 +3939,9 @@ GOOGLE_SHEETS_TAB_COLORS = {
     "Signal Tracker": "#1AB359",
     "Bot Performance": "#8C59E6",
     "Best Tickers": "#F2BF26",
+    "Backtesting Results": "#00A6A6",
+    "Walk Forward": "#00A6A6",
+    "Dashboard Analytics": "#34A853",
     "System Status": "#CC3333",
 }
 
@@ -1578,6 +4020,24 @@ def safe_batch_update(worksheet, updates):
         return worksheet.batch_update(updates)
 
 
+def google_column_letter(column_number):
+    """Convert a 1-based column number to a Google Sheets column letter."""
+    try:
+        column_number = int(column_number)
+    except Exception:
+        return "Z"
+
+    if column_number <= 0:
+        return "Z"
+
+    letters = []
+    while column_number:
+        column_number, remainder = divmod(column_number - 1, 26)
+        letters.append(chr(65 + remainder))
+
+    return "".join(reversed(letters))
+
+
 def format_worksheet_for_readability(worksheet, title, headers):
     """
     Best-effort formatting only. If Google Sheets rejects a formatting call,
@@ -1616,8 +4076,9 @@ def format_worksheet_for_readability(worksheet, title, headers):
         log(f"Google Sheets header formatting skipped for {title}: {error}")
 
     try:
+        last_column = google_column_letter(max(len(headers), 1))
         worksheet.format(
-            "A:Z",
+            f"A:{last_column}",
             {
                 "verticalAlignment": "MIDDLE",
                 "wrapStrategy": "WRAP",
@@ -1742,6 +4203,73 @@ def update_system_status(spreadsheet, scanned_count, candidates, sent_count, ski
             ["Discord Dry Run", str(BOT_DISCORD_DRY_RUN)],
             ["Strict Config", str(BOT_STRICT_CONFIG)],
             ["Market Data Scan Enabled", str(BOT_SCAN_MARKET_DATA_ENABLED)],
+            ["Multi-Timeframe Enabled", str(BOT_MULTI_TIMEFRAME_ENABLED)],
+            ["Short Timeframe", f"{BOT_SHORT_TIMEFRAME_PERIOD} {BOT_SHORT_TIMEFRAME_INTERVAL}"],
+            ["Higher Timeframe", BOT_HIGHER_TIMEFRAME_LABEL],
+            ["MTF Max Adjustment", BOT_MTF_MAX_ADJUSTMENT],
+            ["MTF Short Enabled", str(BOT_MTF_SHORT_ENABLED)],
+            ["MTF Higher Enabled", str(BOT_MTF_HIGHER_ENABLED)],
+            ["MTF Short Confirm Points", BOT_MTF_SHORT_CONFIRM_POINTS],
+            ["MTF Higher Confirm Points", BOT_MTF_HIGHER_CONFIRM_POINTS],
+            ["MTF Minimum Rows", BOT_MTF_REQUIRE_MIN_ROWS],
+            ["MTF Time Guard Seconds", BOT_MTF_TIME_GUARD_SECONDS],
+            ["Higher Timeframe Resample Rule", BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE],
+            ["Volume Spike Enabled", str(BOT_VOLUME_SPIKE_ENABLED)],
+            ["Volume Average Window", BOT_VOLUME_AVG_WINDOW],
+            ["Volume Spike Threshold", BOT_VOLUME_SPIKE_THRESHOLD],
+            ["Volume Strong Spike Threshold", BOT_VOLUME_STRONG_SPIKE_THRESHOLD],
+            ["Volume Dry Up Threshold", BOT_VOLUME_DRY_UP_THRESHOLD],
+            ["Volume Max Adjustment", BOT_VOLUME_MAX_ADJUSTMENT],
+            ["Market Trend Filter Enabled", str(BOT_MARKET_TREND_FILTER_ENABLED)],
+            ["Market Trend Max Adjustment", BOT_MARKET_TREND_MAX_ADJUSTMENT],
+            ["Market Trend Min Anchors", BOT_MARKET_TREND_MIN_ANCHORS],
+            ["Crypto Market Anchors", ", ".join(clean_ticker_list(BOT_CRYPTO_MARKET_TICKERS))],
+            ["Stock Market Anchors", ", ".join(clean_ticker_list(BOT_STOCK_MARKET_TICKERS))],
+            ["Confidence Engine Enabled", str(BOT_CONFIDENCE_ENGINE_ENABLED)],
+            ["Confidence Baseline", BOT_CONFIDENCE_BASELINE],
+            ["Confidence Tech Weight", BOT_CONFIDENCE_TECH_WEIGHT],
+            ["Confidence MTF Weight", BOT_CONFIDENCE_MTF_WEIGHT],
+            ["Confidence Volume Weight", BOT_CONFIDENCE_VOLUME_WEIGHT],
+            ["Confidence Market Weight", BOT_CONFIDENCE_MARKET_WEIGHT],
+            ["Confidence S/R Weight", BOT_CONFIDENCE_SR_WEIGHT],
+            ["Support/Resistance Enabled", str(BOT_SUPPORT_RESISTANCE_ENABLED)],
+            ["Support/Resistance Lookback", BOT_SUPPORT_RESISTANCE_LOOKBACK],
+            ["Support/Resistance Near %", BOT_SUPPORT_RESISTANCE_NEAR_PCT],
+            ["Support/Resistance Breakout %", BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT],
+            ["Support/Resistance Max Adjustment", BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT],
+            ["Trade Management Enabled", str(BOT_TRADE_MANAGEMENT_ENABLED)],
+            ["ATR Window", BOT_ATR_WINDOW],
+            ["ATR Stop Multiplier", BOT_ATR_STOP_MULTIPLIER],
+            ["ATR Target 1 Multiplier", BOT_ATR_TARGET1_MULTIPLIER],
+            ["ATR Target 2 Multiplier", BOT_ATR_TARGET2_MULTIPLIER],
+            ["Minimum Risk/Reward", BOT_MIN_RISK_REWARD],
+            ["Backtesting Enabled", str(BOT_BACKTESTING_ENABLED)],
+            ["Backtesting Period", BOT_BACKTEST_PERIOD],
+            ["Backtesting Hold Days", BOT_BACKTEST_HOLD_DAYS],
+            ["Backtesting Lookback Days", BOT_BACKTEST_LOOKBACK_DAYS],
+            ["Backtesting Min Confidence", BOT_BACKTEST_MIN_CONFIDENCE],
+            ["Backtesting Max Tickers", BOT_BACKTEST_MAX_TICKERS],
+            ["Market Regime Detection Enabled", str(BOT_MARKET_REGIME_DETECTION_ENABLED)],
+            ["Signal Ranking Enabled", str(BOT_SIGNAL_RANKING_ENABLED)],
+            ["Max Alerts Per Scan", BOT_MAX_ALERTS_PER_SCAN],
+            ["Position Sizing Enabled", str(BOT_POSITION_SIZING_ENABLED)],
+            ["Account Size", BOT_ACCOUNT_SIZE],
+            ["Risk Per Trade %", BOT_RISK_PER_TRADE_PCT],
+            ["Max Position %", BOT_MAX_POSITION_PCT],
+            ["Trailing Stop Enabled", str(BOT_TRAILING_STOP_ENABLED)],
+            ["Trailing ATR Multiplier", BOT_TRAILING_ATR_MULTIPLIER],
+            ["Exposure Controls Enabled", str(BOT_EXPOSURE_CONTROLS_ENABLED)],
+            ["Max Alerts Per Market", BOT_MAX_ALERTS_PER_MARKET],
+            ["Max Alerts Per Category", BOT_MAX_ALERTS_PER_CATEGORY],
+            ["Walk Forward Enabled", str(BOT_WALK_FORWARD_ENABLED)],
+            ["Walk Forward Windows", BOT_WALK_FORWARD_WINDOWS],
+            ["Outcome Tracking Enabled", str(BOT_OUTCOME_TRACKING_ENABLED)],
+            ["Dashboard Analytics Enabled", str(BOT_DASHBOARD_ANALYTICS_ENABLED)],
+            ["News Sentiment Weighting Enabled", str(BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED)],
+            ["News Sentiment Max Adjustment", BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT],
+            ["News Sentiment Max Items Per Ticker", BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER],
+            ["News Sentiment Use Market News", str(BOT_NEWS_SENTIMENT_USE_MARKET_NEWS)],
+            ["Confidence News Weight", BOT_CONFIDENCE_NEWS_WEIGHT],
             ["YFinance News Enabled", str(BOT_NEWS_YFINANCE_ENABLED)],
             ["Max Scan Seconds", BOT_MAX_SCAN_SECONDS],
             ["Discord Message Limit", DISCORD_MESSAGE_LIMIT],
@@ -1898,6 +4426,7 @@ def get_or_create_worksheet(spreadsheet, title, headers):
     return worksheet
 
 
+
 def row_from_scan(row):
     return [
         now_text(),
@@ -1905,10 +4434,85 @@ def row_from_scan(row):
         row.get("Market", ""),
         row.get("Price", ""),
         row.get("Daily Change %", ""),
+        row.get("Volume", ""),
+        row.get("Avg Volume", ""),
+        row.get("Relative Volume", ""),
+        row.get("Volume Signal", ""),
+        row.get("Volume Score Adj", ""),
+        row.get("Market Regime", ""),
+        row.get("Market Score", ""),
+        row.get("Market Anchors", ""),
+        row.get("Advanced Market Regime", ""),
+        row.get("Regime Strength", ""),
+        row.get("Risk Mode", ""),
+        row.get("Regime Notes", ""),
+        row.get("Market Trend Adj", ""),
+        row.get("Market Alignment", ""),
+        row.get("Support Level", ""),
+        row.get("Resistance Level", ""),
+        row.get("Distance To Support %", ""),
+        row.get("Distance To Resistance %", ""),
+        row.get("S/R Signal", ""),
+        row.get("S/R Score Adj", ""),
+        row.get("S/R Strength", ""),
+        row.get("S/R Position", ""),
+        row.get("Support Touches", ""),
+        row.get("Resistance Touches", ""),
+        row.get("S/R Notes", ""),
+        row.get("Trade Entry", ""),
+        row.get("Stop Loss", ""),
+        row.get("Take Profit 1", ""),
+        row.get("Take Profit 2", ""),
+        row.get("Risk/Reward 1", ""),
+        row.get("Risk/Reward 2", ""),
+        row.get("Trade Plan", ""),
+        row.get("Trade Notes", ""),
+        row.get("Account Size", ""),
+        row.get("Risk %", ""),
+        row.get("Risk Dollars", ""),
+        row.get("Position Size", ""),
+        row.get("Position Value", ""),
+        row.get("Position Notes", ""),
+        row.get("Trailing Stop", ""),
+        row.get("Breakeven Trigger", ""),
+        row.get("Trail Distance", ""),
+        row.get("Trailing Notes", ""),
+        row.get("Asset Category", ""),
+        row.get("Signal Quality Score", ""),
+        row.get("Signal Rank", ""),
+        row.get("Alert Approved", ""),
+        row.get("Exposure Notes", ""),
+        row.get("News Sentiment", ""),
+        row.get("News Sentiment Score", ""),
+        row.get("News Strength", ""),
+        row.get("News Score Adj", ""),
+        row.get("News Headlines", ""),
+        row.get("News Notes", ""),
+        row.get("RSI Confidence", ""),
+        row.get("MACD Confidence", ""),
+        row.get("Trend Confidence", ""),
+        row.get("Technical Confidence", ""),
+        row.get("MTF Confidence", ""),
+        row.get("Volume Confidence", ""),
+        row.get("Market Confidence", ""),
+        row.get("S/R Confidence", ""),
+        row.get("News Confidence", ""),
+        row.get("Risk/Reward Confidence", ""),
+        row.get("Confidence Grade", ""),
+        row.get("Confidence Engine", ""),
+        row.get("Confidence Notes", ""),
+        row.get("Legacy Confidence %", ""),
         row.get("RSI", ""),
         row.get("MACD", ""),
         row.get("MACD Signal", ""),
         row.get("Technical Score", ""),
+        row.get("Short TF Score", ""),
+        row.get("Short TF Trend", ""),
+        row.get("Daily Trend", ""),
+        row.get("Higher TF Score", ""),
+        row.get("Higher TF Trend", ""),
+        row.get("MTF Alignment", ""),
+        row.get("MTF Score Adj", ""),
         row.get("Final Score", ""),
         row.get("AI Confidence %", ""),
         row.get("AI Signal", "")
@@ -1922,10 +4526,83 @@ def row_from_alert(row, alert_sent):
         row.get("Market", ""),
         row.get("Price", ""),
         row.get("Daily Change %", ""),
+        row.get("Volume", ""),
+        row.get("Avg Volume", ""),
+        row.get("Relative Volume", ""),
+        row.get("Volume Signal", ""),
+        row.get("Volume Score Adj", ""),
+        row.get("Market Regime", ""),
+        row.get("Market Score", ""),
+        row.get("Market Anchors", ""),
+        row.get("Advanced Market Regime", ""),
+        row.get("Regime Strength", ""),
+        row.get("Risk Mode", ""),
+        row.get("Regime Notes", ""),
+        row.get("Market Trend Adj", ""),
+        row.get("Market Alignment", ""),
+        row.get("Support Level", ""),
+        row.get("Resistance Level", ""),
+        row.get("Distance To Support %", ""),
+        row.get("Distance To Resistance %", ""),
+        row.get("S/R Signal", ""),
+        row.get("S/R Score Adj", ""),
+        row.get("S/R Strength", ""),
+        row.get("S/R Position", ""),
+        row.get("Support Touches", ""),
+        row.get("Resistance Touches", ""),
+        row.get("S/R Notes", ""),
+        row.get("Trade Entry", ""),
+        row.get("Stop Loss", ""),
+        row.get("Take Profit 1", ""),
+        row.get("Take Profit 2", ""),
+        row.get("Risk/Reward 1", ""),
+        row.get("Risk/Reward 2", ""),
+        row.get("Trade Plan", ""),
+        row.get("Trade Notes", ""),
+        row.get("Account Size", ""),
+        row.get("Risk %", ""),
+        row.get("Risk Dollars", ""),
+        row.get("Position Size", ""),
+        row.get("Position Value", ""),
+        row.get("Position Notes", ""),
+        row.get("Trailing Stop", ""),
+        row.get("Breakeven Trigger", ""),
+        row.get("Trail Distance", ""),
+        row.get("Trailing Notes", ""),
+        row.get("Asset Category", ""),
+        row.get("Signal Quality Score", ""),
+        row.get("Signal Rank", ""),
+        row.get("Alert Approved", ""),
+        row.get("Exposure Notes", ""),
+        row.get("News Sentiment", ""),
+        row.get("News Sentiment Score", ""),
+        row.get("News Strength", ""),
+        row.get("News Score Adj", ""),
+        row.get("News Headlines", ""),
+        row.get("News Notes", ""),
+        row.get("RSI Confidence", ""),
+        row.get("MACD Confidence", ""),
+        row.get("Trend Confidence", ""),
+        row.get("Technical Confidence", ""),
+        row.get("MTF Confidence", ""),
+        row.get("Volume Confidence", ""),
+        row.get("Market Confidence", ""),
+        row.get("S/R Confidence", ""),
+        row.get("News Confidence", ""),
+        row.get("Risk/Reward Confidence", ""),
+        row.get("Confidence Grade", ""),
+        row.get("Confidence Engine", ""),
+        row.get("Confidence Notes", ""),
+        row.get("Legacy Confidence %", ""),
         row.get("AI Signal", ""),
         row.get("AI Confidence %", ""),
         row.get("RSI", ""),
         row.get("MACD", ""),
+        row.get("Short TF Trend", ""),
+        row.get("Daily Trend", ""),
+        row.get("Higher TF Trend", ""),
+        row.get("MTF Alignment", ""),
+        row.get("MTF Score Adj", ""),
         row.get("Final Score", ""),
         "YES" if alert_sent else "NO"
     ]
@@ -2003,16 +4680,23 @@ def upsert_signal_tracker(worksheet, rows):
                 signal,
                 round(entry_price, 4),
                 round(current_price, 4),
+                row.get("Stop Loss", ""),
+                row.get("Take Profit 1", ""),
+                row.get("Take Profit 2", ""),
                 round(raw_change_percent, 2),
                 round(signal_performance_percent, 2),
                 row.get("AI Confidence %", ""),
+                row.get("Risk/Reward 2", ""),
                 row.get("RSI", ""),
-                status
+                status,
+                determine_signal_outcome(row, current_price),
+                row.get("Signal Rank", ""),
+                row.get("Asset Category", asset_category(row.get("Ticker", "")))
             ]
 
             if sheet_row_number:
                 updates.append({
-                    "range": f"A{sheet_row_number}:M{sheet_row_number}",
+                    "range": f"A{sheet_row_number}:T{sheet_row_number}",
                     "values": [tracker_row]
                 })
             else:
@@ -2169,6 +4853,9 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         signal_tracker = get_or_create_worksheet(spreadsheet, "Signal Tracker", SIGNAL_TRACKER_HEADERS)
         get_or_create_worksheet(spreadsheet, "Bot Performance", BOT_PERFORMANCE_HEADERS)
         get_or_create_worksheet(spreadsheet, "Best Tickers", BEST_TICKERS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Backtesting Results", BACKTEST_RESULTS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Walk Forward", WALK_FORWARD_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Dashboard Analytics", DASHBOARD_ANALYTICS_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
@@ -2190,6 +4877,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         prune_worksheet_rows(signal_tracker, GOOGLE_SHEETS_MAX_TRACKER_ROWS)
         update_bot_performance(spreadsheet)
         update_best_tickers(spreadsheet)
+        sync_dashboard_analytics_to_google_sheets(scanned_rows)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -2308,6 +4996,51 @@ def send_heartbeat(scanned_count=0, ticker_errors=0, post_scan_errors=0):
             "inline": True
         },
         {
+            "name": "Multi-Timeframe",
+            "value": "On" if BOT_MULTI_TIMEFRAME_ENABLED else "Off",
+            "inline": True
+        },
+        {
+            "name": "MTF Frames",
+            "value": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}",
+            "inline": True
+        },
+        {
+            "name": "Volume Spike Detection",
+            "value": "On" if BOT_VOLUME_SPIKE_ENABLED else "Off",
+            "inline": True
+        },
+        {
+            "name": "Market Trend Filter",
+            "value": "On" if BOT_MARKET_TREND_FILTER_ENABLED else "Off",
+            "inline": True
+        },
+        {
+            "name": "Confidence Engine",
+            "value": "On" if BOT_CONFIDENCE_ENGINE_ENABLED else "Legacy",
+            "inline": True
+        },
+        {
+            "name": "Support/Resistance",
+            "value": "On" if BOT_SUPPORT_RESISTANCE_ENABLED else "Off",
+            "inline": True
+        },
+        {
+            "name": "Trade Management",
+            "value": "On" if BOT_TRADE_MANAGEMENT_ENABLED else "Off",
+            "inline": True
+        },
+        {
+            "name": "Backtesting / Phase 3",
+            "value": f"BT {'On' if BOT_BACKTESTING_ENABLED else 'Off'} | Rank {'On' if BOT_SIGNAL_RANKING_ENABLED else 'Off'} | Size {'On' if BOT_POSITION_SIZING_ENABLED else 'Off'} | Trail {'On' if BOT_TRAILING_STOP_ENABLED else 'Off'} | Exposure {'On' if BOT_EXPOSURE_CONTROLS_ENABLED else 'Off'} | WF {'On' if BOT_WALK_FORWARD_ENABLED else 'Off'} | Outcomes {'On' if BOT_OUTCOME_TRACKING_ENABLED else 'Off'} | Analytics {'On' if BOT_DASHBOARD_ANALYTICS_ENABLED else 'Off'}",
+            "inline": True
+        },
+        {
+            "name": "News Sentiment",
+            "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off",
+            "inline": True
+        },
+        {
             "name": "Google Sheets",
             "value": google_sheets_status,
             "inline": True
@@ -2368,6 +5101,13 @@ def run_scan():
     ticker_errors = 0
     alerted_rows = []
 
+    market_contexts = safe_build_market_contexts(scan_started_at)
+    log(f"Crypto market context: {market_contexts.get('Crypto', {})}")
+    log(f"Stock market context: {market_contexts.get('Stock', {})}")
+
+    news_sentiment_contexts = build_news_sentiment_contexts(scan_started_at)
+    log(f"News sentiment weighting contexts built: {len(news_sentiment_contexts)} ticker(s)")
+
     for ticker in ALL_TICKERS:
         if time.time() - scan_started_at > BOT_MAX_SCAN_SECONDS:
             ticker_errors += 1
@@ -2379,7 +5119,7 @@ def run_scan():
             break
 
         try:
-            row = score_ticker(ticker)
+            row = score_ticker(ticker, scan_started_at, market_contexts, news_sentiment_contexts)
 
             if row is None:
                 continue
@@ -2389,31 +5129,7 @@ def run_scan():
 
             signal = row["AI Signal"]
             confidence = row["AI Confidence %"]
-
             log(f"{ticker} | {signal} | {confidence}%")
-
-            if signal not in ["STRONG BUY", "BUY", "STRONG SELL", "SELL"]:
-                continue
-
-            if confidence < MIN_CONFIDENCE:
-                continue
-
-            candidates += 1
-
-            alert_key = f"{ticker}_{signal}_{today}"
-
-            if alert_key in sent_signals:
-                skipped_duplicates += 1
-                continue
-
-            sent = send_signal_alert(row)
-
-            if sent:
-                sent_count += 1
-                alerted_rows.append(row)
-                sent_signals.add(alert_key)
-                save_log(SIGNAL_LOG_FILE, sent_signals)
-                interruptible_sleep(1)
 
         except Exception as error:
             ticker_errors += 1
@@ -2422,6 +5138,35 @@ def run_scan():
         finally:
             if YFINANCE_TICKER_DELAY_SECONDS > 0:
                 interruptible_sleep(YFINANCE_TICKER_DELAY_SECONDS)
+
+
+    assign_signal_rankings(scanned_rows)
+    raw_candidates = [
+        row for row in scanned_rows
+        if row.get("AI Signal") in ["STRONG BUY", "BUY", "STRONG SELL", "SELL"]
+        and safe_float(row.get("AI Confidence %", 0), 0) >= MIN_CONFIDENCE
+    ]
+    candidates = len(raw_candidates)
+    approved_candidates = apply_exposure_controls(raw_candidates)
+
+    for row in approved_candidates:
+        signal = row.get("AI Signal", "")
+        ticker = row.get("Ticker", "")
+        alert_key = f"{ticker}_{signal}_{today}"
+
+        if alert_key in sent_signals:
+            skipped_duplicates += 1
+            row["Exposure Notes"] = "skipped duplicate alert"
+            continue
+
+        sent = send_signal_alert(row)
+
+        if sent:
+            sent_count += 1
+            alerted_rows.append(row)
+            sent_signals.add(alert_key)
+            save_log(SIGNAL_LOG_FILE, sent_signals)
+            interruptible_sleep(1)
 
     post_scan_errors = 0
 
@@ -2458,6 +5203,10 @@ def run_scan():
     interruptible_sleep(1)
 
     _, step_error = run_safe_step("Scheduled news", maybe_send_scheduled_news)
+    post_scan_errors += int(step_error)
+    interruptible_sleep(1)
+
+    _, step_error = run_safe_step("Advanced backtest review", maybe_run_backtest_review)
     post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step(
@@ -2526,6 +5275,39 @@ def main():
     log(f"No data alerts: {BOT_SEND_NO_DATA_ALERTS}")
     log(f"Strict config: {BOT_STRICT_CONFIG}")
     log(f"Market data scan enabled: {BOT_SCAN_MARKET_DATA_ENABLED}")
+    log(f"Multi-timeframe enabled: {BOT_MULTI_TIMEFRAME_ENABLED}")
+    log(f"MTF frames: {BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}")
+    log(f"MTF enabled flags: short={BOT_MTF_SHORT_ENABLED}, higher={BOT_MTF_HIGHER_ENABLED}")
+    log(f"MTF points: short={BOT_MTF_SHORT_CONFIRM_POINTS}, higher={BOT_MTF_HIGHER_CONFIRM_POINTS}, max={BOT_MTF_MAX_ADJUSTMENT}")
+    log(f"MTF minimum rows: {BOT_MTF_REQUIRE_MIN_ROWS}")
+    log(f"MTF time guard seconds: {BOT_MTF_TIME_GUARD_SECONDS}")
+    log(f"Higher timeframe resample rule: {BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE}")
+    log(f"Volume spike enabled: {BOT_VOLUME_SPIKE_ENABLED}")
+    log(f"Volume avg window: {BOT_VOLUME_AVG_WINDOW}")
+    log(f"Volume thresholds: spike={BOT_VOLUME_SPIKE_THRESHOLD}, strong={BOT_VOLUME_STRONG_SPIKE_THRESHOLD}, dry_up={BOT_VOLUME_DRY_UP_THRESHOLD}")
+    log(f"Volume max adjustment: {BOT_VOLUME_MAX_ADJUSTMENT}")
+    log(f"Market trend filter enabled: {BOT_MARKET_TREND_FILTER_ENABLED}")
+    log(f"Market trend max adjustment: {BOT_MARKET_TREND_MAX_ADJUSTMENT}")
+    log(f"Market trend min anchors: {BOT_MARKET_TREND_MIN_ANCHORS}")
+    log(f"Crypto market anchors: {', '.join(clean_ticker_list(BOT_CRYPTO_MARKET_TICKERS))}")
+    log(f"Stock market anchors: {', '.join(clean_ticker_list(BOT_STOCK_MARKET_TICKERS))}")
+    log(f"Confidence engine enabled: {BOT_CONFIDENCE_ENGINE_ENABLED}")
+    log(f"Confidence weights: tech={BOT_CONFIDENCE_TECH_WEIGHT}, mtf={BOT_CONFIDENCE_MTF_WEIGHT}, volume={BOT_CONFIDENCE_VOLUME_WEIGHT}, market={BOT_CONFIDENCE_MARKET_WEIGHT}, support_resistance={BOT_CONFIDENCE_SR_WEIGHT}, news={BOT_CONFIDENCE_NEWS_WEIGHT}")
+    log(f"Confidence baseline: {BOT_CONFIDENCE_BASELINE}")
+    log(f"Support/resistance enabled: {BOT_SUPPORT_RESISTANCE_ENABLED}")
+    log(f"Support/resistance lookback: {BOT_SUPPORT_RESISTANCE_LOOKBACK}")
+    log(f"Support/resistance near pct: {BOT_SUPPORT_RESISTANCE_NEAR_PCT}")
+    log(f"Support/resistance breakout pct: {BOT_SUPPORT_RESISTANCE_BREAKOUT_PCT}")
+    log(f"Support/resistance max adjustment: {BOT_SUPPORT_RESISTANCE_MAX_ADJUSTMENT}")
+    log(f"News sentiment weighting enabled: {BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED}")
+    log(f"News sentiment max adjustment: {BOT_NEWS_SENTIMENT_MAX_ADJUSTMENT}")
+    log(f"News sentiment max items per ticker: {BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER}")
+    log(f"News sentiment use market news: {BOT_NEWS_SENTIMENT_USE_MARKET_NEWS}")
+    log(f"Trade management enabled: {BOT_TRADE_MANAGEMENT_ENABLED}")
+    log(f"ATR settings: window={BOT_ATR_WINDOW}, stop={BOT_ATR_STOP_MULTIPLIER}, tp1={BOT_ATR_TARGET1_MULTIPLIER}, tp2={BOT_ATR_TARGET2_MULTIPLIER}")
+    log(f"Backtesting enabled: {BOT_BACKTESTING_ENABLED}")
+    log(f"Backtesting settings: period={BOT_BACKTEST_PERIOD}, hold={BOT_BACKTEST_HOLD_DAYS}, lookback={BOT_BACKTEST_LOOKBACK_DAYS}, min_conf={BOT_BACKTEST_MIN_CONFIDENCE}, max_tickers={BOT_BACKTEST_MAX_TICKERS}")
+    log(f"Phase 3: regime={BOT_MARKET_REGIME_DETECTION_ENABLED}, ranking={BOT_SIGNAL_RANKING_ENABLED}, sizing={BOT_POSITION_SIZING_ENABLED}, trailing={BOT_TRAILING_STOP_ENABLED}, exposure={BOT_EXPOSURE_CONTROLS_ENABLED}, walk_forward={BOT_WALK_FORWARD_ENABLED}, outcomes={BOT_OUTCOME_TRACKING_ENABLED}, dashboard_analytics={BOT_DASHBOARD_ANALYTICS_ENABLED}")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
