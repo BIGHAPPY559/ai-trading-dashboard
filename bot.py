@@ -205,7 +205,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v30.6-bot-dashboard-final-triple-deep-dive"
+BOT_VERSION = "google-sheets-100-production-v31-discord-terminal-triple-deep-dive"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -218,6 +218,17 @@ BOT_NEWS_YFINANCE_ENABLED = get_env_bool("BOT_NEWS_YFINANCE_ENABLED", False)
 BOT_MAX_SCAN_SECONDS = max(60, get_env_int("BOT_MAX_SCAN_SECONDS", 600))
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
 SUMMARY_MAX_LINES_PER_SECTION = max(3, get_env_int("SUMMARY_MAX_LINES_PER_SECTION", 15))
+
+# Discord terminal upgrades. Existing webhooks are used by default.
+BOT_DISCORD_ELITE_ALERTS_ENABLED = get_env_bool("BOT_DISCORD_ELITE_ALERTS_ENABLED", True)
+BOT_SEND_TOP_SIGNALS_SUMMARY = get_env_bool("BOT_SEND_TOP_SIGNALS_SUMMARY", True)
+BOT_TOP_SIGNALS_COUNT = max(3, get_env_int("BOT_TOP_SIGNALS_COUNT", 5))
+BOT_SEND_DAILY_PERFORMANCE_REPORT = get_env_bool("BOT_SEND_DAILY_PERFORMANCE_REPORT", True)
+BOT_DAILY_REPORT_HOUR = max(0, min(get_env_int("BOT_DAILY_REPORT_HOUR", 18), 23))
+BOT_SEND_BACKTEST_SCORECARD = get_env_bool("BOT_SEND_BACKTEST_SCORECARD", True)
+TOP_SIGNALS_WEBHOOK_URL = os.getenv("TOP_SIGNALS_WEBHOOK_URL", "")
+DAILY_REPORT_WEBHOOK_URL = os.getenv("DAILY_REPORT_WEBHOOK_URL", "")
+BACKTEST_WEBHOOK_URL = os.getenv("BACKTEST_WEBHOOK_URL", "")
 
 SCAN_INTERVAL_MINUTES = max(1, get_env_int("BOT_SCAN_INTERVAL_MINUTES", 15))
 MIN_CONFIDENCE = max(
@@ -388,6 +399,7 @@ BACKTEST_SCHEDULE_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_backtest_sched
 BOT_HEARTBEAT_ENABLED = get_env_bool("BOT_HEARTBEAT_ENABLED", True)
 BOT_HEARTBEAT_INTERVAL_HOURS = max(1, get_env_float("BOT_HEARTBEAT_INTERVAL_HOURS", 12))
 HEARTBEAT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_heartbeat_log.txt")
+DAILY_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_daily_report_log.txt")
 
 YFINANCE_TICKER_DELAY_SECONDS = max(0, get_env_float("YFINANCE_TICKER_DELAY_SECONDS", 0.25))
 YFINANCE_HISTORY_RETRIES = max(0, get_env_int("YFINANCE_HISTORY_RETRIES", 2))
@@ -520,31 +532,26 @@ def get_heartbeat_webhook():
 
 def send_error_alert(message):
     global LAST_ERROR_ALERT_TIME
-
     if not BOT_SEND_ERROR_ALERTS:
         return False
-
     webhook_url = get_error_webhook()
-
     if not webhook_url:
         log("Error alert skipped: no error webhook available.")
         return False
-
     elapsed = seconds_since(LAST_ERROR_ALERT_TIME)
     required = BOT_ERROR_ALERT_COOLDOWN_MINUTES * 60
-
     if LAST_ERROR_ALERT_TIME and elapsed < required:
         log("Error alert skipped by cooldown.")
         return False
-
-    sent = send_discord_message(
-        webhook_url,
-        f"⚠️ AI Trading Bot Error\nVersion: {BOT_VERSION}\nTime: {now_text()}\n{message}"
-    )
-
+    fields = [
+        {"name": "Status", "value": "Bot is still running unless Railway shows a crash.", "inline": False},
+        {"name": "Error", "value": compact_text(message, 1000), "inline": False},
+        {"name": "Version", "value": BOT_VERSION, "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🚨 AI Trading Bot Error Alert", 16711680, fields)
     if sent:
         LAST_ERROR_ALERT_TIME = time.time()
-
     return sent
 
 
@@ -782,6 +789,171 @@ def signal_embed_color(signal):
 # ======================================================
 # RUNTIME VALIDATION
 # ======================================================
+
+
+def format_money(value):
+    try:
+        value = float(value)
+        if abs(value) >= 100:
+            return f"${value:,.2f}"
+        return f"${value:,.4f}"
+    except Exception:
+        return "N/A"
+
+
+def get_top_signals_webhook(market=None):
+    if TOP_SIGNALS_WEBHOOK_URL:
+        return TOP_SIGNALS_WEBHOOK_URL
+    if market in ["Crypto", "Stock"]:
+        return get_summary_webhook(market)
+    return get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+
+
+def get_daily_report_webhook():
+    if DAILY_REPORT_WEBHOOK_URL:
+        return DAILY_REPORT_WEBHOOK_URL
+    return get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+
+
+def get_backtest_webhook():
+    if BACKTEST_WEBHOOK_URL:
+        return BACKTEST_WEBHOOK_URL
+    return get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+
+
+def compact_text(value, limit=900):
+    text = str(value or "N/A")
+    return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+
+def signal_emoji(signal):
+    signal = str(signal or "")
+    if "STRONG BUY" in signal:
+        return "🚀"
+    if "BUY" in signal:
+        return "🟢"
+    if "STRONG SELL" in signal:
+        return "🔻"
+    if "SELL" in signal:
+        return "🔴"
+    return "🟡"
+
+
+def build_signal_reason_text(row):
+    checks = []
+    if safe_float(row.get("MTF Confidence", 0), 0) >= 70:
+        checks.append("✅ MTF confirms")
+    if safe_float(row.get("Volume Confidence", 0), 0) >= 70:
+        checks.append(f"✅ Volume {row.get('Volume Signal', 'confirms')}")
+    if safe_float(row.get("Trend Confidence", 0), 0) >= 70:
+        checks.append(f"✅ Trend {row.get('Daily Trend', 'confirms')}")
+    if safe_float(row.get("Market Confidence", 0), 0) >= 70:
+        checks.append(f"✅ Market {row.get('Advanced Market Regime', row.get('Market Regime', 'confirms'))}")
+    if safe_float(row.get("S/R Confidence", 0), 0) >= 70:
+        checks.append(f"✅ S/R {row.get('S/R Signal', 'confirms')}")
+    if safe_float(row.get("Risk/Reward Confidence", 0), 0) >= 70:
+        checks.append(f"✅ R/R {row.get('Risk/Reward 2', 'N/A')}:1")
+    if safe_float(row.get("News Confidence", 0), 0) >= 70:
+        checks.append(f"✅ News {row.get('News Sentiment', 'confirms')}")
+    if row.get("Exposure Notes"):
+        checks.append(f"📌 {row.get('Exposure Notes')}")
+    if not checks:
+        checks.append("Signal passed minimum confidence and exposure checks.")
+    return "\n".join(checks[:8])
+
+
+def build_backtest_quality_line(result):
+    pf = safe_float(result.get("Profit Factor", 0), 0)
+    wr = safe_float(result.get("Win Rate %", 0), 0)
+    if pf >= 2 and wr >= 55:
+        badge = "🟢 Strong"
+    elif pf >= 1 and wr >= 50:
+        badge = "🟡 Watch"
+    else:
+        badge = "🔴 Weak"
+    return f"{badge} | {result.get('Ticker', '')} | {result.get('Signals Tested', 0)} signals | WR {result.get('Win Rate %', 0)}% | PF {result.get('Profit Factor', 0)} | DD {result.get('Max Drawdown %', 0)}%"
+
+
+def get_daily_report_key():
+    return f"daily_report_{now_dt().strftime('%Y-%m-%d')}"
+
+
+def daily_report_already_sent():
+    return get_daily_report_key() in load_log(DAILY_REPORT_LOG_FILE)
+
+
+def mark_daily_report_sent():
+    items = load_log(DAILY_REPORT_LOG_FILE)
+    items.add(get_daily_report_key())
+    save_log(DAILY_REPORT_LOG_FILE, items)
+
+
+def should_send_daily_report():
+    if not BOT_SEND_DAILY_PERFORMANCE_REPORT:
+        return False
+    if now_dt().hour < BOT_DAILY_REPORT_HOUR:
+        return False
+    return not daily_report_already_sent()
+
+
+def build_top_signal_lines(rows, limit=None):
+    limit = limit or BOT_TOP_SIGNALS_COUNT
+    directional = [row for row in rows if is_directional_signal(row.get("AI Signal", ""))]
+    ranked = sorted(directional, key=lambda item: safe_float(item.get("Signal Quality Score", item.get("AI Confidence %", 0)), 0), reverse=True)
+    lines = []
+    for row in ranked[:limit]:
+        lines.append(f"#{row.get('Signal Rank', '-')} {row.get('Ticker', '')} | {row.get('AI Signal', '')} | {row.get('AI Confidence %', 0)}% | QS {row.get('Signal Quality Score', 0)} | R/R {row.get('Risk/Reward 2', 0)} | {row.get('Risk Mode', 'N/A')}")
+    return lines
+
+
+def send_top_signals_summary(rows, candidates=0, sent_count=0):
+    if not BOT_SEND_TOP_SIGNALS_SUMMARY or not rows:
+        return False
+    webhook_url = get_top_signals_webhook()
+    if not webhook_url:
+        log("Top signals summary skipped: no summary/trade webhook available.")
+        return False
+    crypto_context = next((row for row in rows if row.get("Market") == "Crypto"), {})
+    stock_context = next((row for row in rows if row.get("Market") == "Stock"), {})
+    fields = [
+        {"name": "Scan Stats", "value": f"Scanned {len(rows)} | Candidates {candidates} | Sent {sent_count}", "inline": False},
+        {"name": "Crypto Market", "value": f"{crypto_context.get('Advanced Market Regime', crypto_context.get('Market Regime', 'N/A'))} | {crypto_context.get('Risk Mode', 'N/A')}", "inline": True},
+        {"name": "Stock Market", "value": f"{stock_context.get('Advanced Market Regime', stock_context.get('Market Regime', 'N/A'))} | {stock_context.get('Risk Mode', 'N/A')}", "inline": True},
+        {"name": f"Top {BOT_TOP_SIGNALS_COUNT} Signals", "value": compact_text("\n".join(build_top_signal_lines(rows)) or "No directional signals passed ranking.", 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    return send_discord_embed(webhook_url, "🏆 Top Ranked Signals", 15844367, fields)
+
+
+def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
+    if not should_send_daily_report():
+        return False
+    webhook_url = get_daily_report_webhook()
+    if not webhook_url:
+        log("Daily performance report skipped: no summary/trade webhook available.")
+        return False
+    directional = [row for row in scanned_rows if is_directional_signal(row.get("AI Signal", ""))]
+    avg_conf = round(sum(safe_float(row.get("AI Confidence %", 0), 0) for row in scanned_rows) / len(scanned_rows), 2) if scanned_rows else 0
+    best = max(directional, key=lambda row: safe_float(row.get("Signal Quality Score", row.get("AI Confidence %", 0)), 0), default=None)
+    weakest = min(directional, key=lambda row: safe_float(row.get("Signal Quality Score", row.get("AI Confidence %", 0)), 0), default=None)
+    valid_bt = [r for r in (backtest_results or []) if r.get("Signals Tested", 0) > 0]
+    avg_pf = round(sum(safe_float(r.get("Profit Factor", 0), 0) for r in valid_bt) / len(valid_bt), 2) if valid_bt else 0
+    avg_wr = round(sum(safe_float(r.get("Win Rate %", 0), 0) for r in valid_bt) / len(valid_bt), 2) if valid_bt else 0
+    worst_dd = max([safe_float(r.get("Max Drawdown %", 0), 0) for r in valid_bt], default=0)
+    fields = [
+        {"name": "Daily Scan", "value": f"Signals {len(directional)} | Candidates {candidates} | Sent {sent_count} | Duplicates {skipped_duplicates}", "inline": False},
+        {"name": "Average Confidence", "value": f"{avg_conf}%", "inline": True},
+        {"name": "Errors", "value": f"Ticker {ticker_errors} | Post-scan {post_scan_errors}", "inline": True},
+        {"name": "Top Setup", "value": f"{best.get('Ticker', 'None')} {best.get('AI Signal', '')} | QS {best.get('Signal Quality Score', 0)} | R/R {best.get('Risk/Reward 2', 0)}" if best else "None", "inline": False},
+        {"name": "Weakest Setup", "value": f"{weakest.get('Ticker', 'None')} {weakest.get('AI Signal', '')} | QS {weakest.get('Signal Quality Score', 0)}" if weakest else "None", "inline": False},
+        {"name": "Backtest Snapshot", "value": f"Avg WR {avg_wr}% | Avg PF {avg_pf} | Worst DD {worst_dd}%" if valid_bt else "No new backtest results this cycle", "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "📊 Daily Trading Bot Performance Report", 3447003, fields)
+    if sent:
+        mark_daily_report_sent()
+    return sent
+
 
 def validate_runtime_config():
     warnings = []
@@ -3276,45 +3448,67 @@ def send_startup_message():
 
 
 def send_signal_alert(row):
+    if not BOT_DISCORD_ELITE_ALERTS_ENABLED:
+        fields = [
+            {"name": "Ticker", "value": str(row["Ticker"]), "inline": True},
+            {"name": "Market", "value": str(row["Market"]), "inline": True},
+            {"name": "Price", "value": f"${row['Price']}", "inline": True},
+            {"name": "Signal", "value": str(row["AI Signal"]), "inline": True},
+            {"name": "Confidence", "value": f"{row['AI Confidence %']}%", "inline": True},
+            {"name": "Time", "value": now_text(), "inline": False},
+        ]
+        return send_discord_embed(get_trade_webhook(row["Ticker"]), f"{row['Market']} Market | {row['AI Signal']}", signal_embed_color(row["AI Signal"]), fields)
+
+    signal = str(row.get("AI Signal", ""))
+    title = f"{signal_emoji(signal)} {signal} | {row.get('Ticker', '')} | Rank #{row.get('Signal Rank', 'N/A')}"
+    trade_plan = (
+        f"Entry: {format_money(row.get('Trade Entry'))}\n"
+        f"Stop: {format_money(row.get('Stop Loss'))}\n"
+        f"TP1: {format_money(row.get('Take Profit 1'))}\n"
+        f"TP2: {format_money(row.get('Take Profit 2'))}\n"
+        f"Trailing Stop: {format_money(row.get('Trailing Stop'))}\n"
+        f"Risk/Reward: {row.get('Risk/Reward 2', 'N/A')}:1"
+    )
+    position_text = (
+        f"Account: {format_money(row.get('Account Size'))}\n"
+        f"Risk: {row.get('Risk %', 'N/A')}% / {format_money(row.get('Risk Dollars'))}\n"
+        f"Qty: {row.get('Position Size', 'N/A')}\n"
+        f"Position Value: {format_money(row.get('Position Value'))}"
+    )
+    market_text = (
+        f"Regime: {row.get('Advanced Market Regime', row.get('Market Regime', 'N/A'))}\n"
+        f"Risk Mode: {row.get('Risk Mode', 'N/A')}\n"
+        f"Market Adj: {row.get('Market Trend Adj', 0)}\n"
+        f"Anchors: {compact_text(row.get('Market Anchors', 'N/A'), 180)}"
+    )
+    technical_text = (
+        f"RSI: {row.get('RSI', 'N/A')} | MACD: {row.get('MACD', 'N/A')}\n"
+        f"Daily: {row.get('Daily Trend', 'N/A')} | Short: {row.get('Short TF Trend', 'N/A')} | Higher: {row.get('Higher TF Trend', 'N/A')}\n"
+        f"Volume: {row.get('Volume Signal', 'N/A')} ({row.get('Relative Volume', 'N/A')}x)\n"
+        f"S/R: {row.get('S/R Signal', 'N/A')} | S {row.get('Support Level', 'N/A')} / R {row.get('Resistance Level', 'N/A')}"
+    )
+    confidence_text = (
+        f"Grade: {row.get('Confidence Grade', 'N/A')}\n"
+        f"Quality Score: {row.get('Signal Quality Score', 0)}\n"
+        f"RSI {row.get('RSI Confidence', 'N/A')}% | MACD {row.get('MACD Confidence', 'N/A')}% | Trend {row.get('Trend Confidence', 'N/A')}%\n"
+        f"MTF {row.get('MTF Confidence', 'N/A')}% | Vol {row.get('Volume Confidence', 'N/A')}% | Market {row.get('Market Confidence', 'N/A')}% | S/R {row.get('S/R Confidence', 'N/A')}% | R/R {row.get('Risk/Reward Confidence', 'N/A')}%"
+    )
     fields = [
-        {"name": "Ticker", "value": str(row["Ticker"]), "inline": True},
-        {"name": "Market", "value": str(row["Market"]), "inline": True},
-        {"name": "Price", "value": f"${row['Price']}", "inline": True},
-        {"name": "Daily Change", "value": f"{row['Daily Change %']}%", "inline": True},
-        {"name": "Volume", "value": str(row.get("Volume", "N/A")), "inline": True},
-        {"name": "Relative Volume", "value": f"{row.get('Relative Volume', 'N/A')}x", "inline": True},
-        {"name": "Volume Signal", "value": str(row.get("Volume Signal", "N/A")), "inline": True},
-        {"name": "Market Regime", "value": f"{row.get('Market Regime', 'N/A')} | Adj {row.get('Market Trend Adj', 0)}", "inline": True},
-        {"name": "Support/Resistance", "value": f"{row.get('S/R Signal', 'N/A')} | S {row.get('Support Level', 'N/A')} / R {row.get('Resistance Level', 'N/A')} | Adj {row.get('S/R Score Adj', 0)}", "inline": False},
-        {"name": "News Sentiment", "value": f"{row.get('News Sentiment', 'N/A')} | Adj {row.get('News Score Adj', 0)} | {row.get('News Headlines', 'None')}", "inline": False},
-        {"name": "Signal", "value": str(row["AI Signal"]), "inline": True},
-        {"name": "Confidence", "value": f"{row['AI Confidence %']}%", "inline": True},
-        {"name": "Confidence Grade", "value": str(row.get("Confidence Grade", "N/A")), "inline": True},
-        {"name": "Confidence Breakdown", "value": f"RSI {row.get('RSI Confidence', 'N/A')}% | MACD {row.get('MACD Confidence', 'N/A')}% | Trend {row.get('Trend Confidence', 'N/A')}% | MTF {row.get('MTF Confidence', 'N/A')}% | Vol {row.get('Volume Confidence', 'N/A')}% | S/R {row.get('S/R Confidence', 'N/A')}% | R/R {row.get('Risk/Reward Confidence', 'N/A')}%", "inline": False},
-        {"name": "Confidence Notes", "value": str(row.get("Confidence Notes", "N/A")), "inline": False},
-        {"name": "RSI / MACD", "value": f"RSI {row['RSI']} | MACD {row['MACD']}", "inline": True},
-        {"name": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} Trend", "value": str(row.get("Short TF Trend", "N/A")), "inline": True},
-        {"name": "Daily Trend", "value": str(row.get("Daily Trend", "N/A")), "inline": True},
-        {"name": f"{BOT_HIGHER_TIMEFRAME_LABEL} Trend", "value": str(row.get("Higher TF Trend", "N/A")), "inline": True},
-        {"name": "MTF Alignment", "value": str(row.get("MTF Alignment", "N/A")), "inline": False},
-        {"name": "MTF Score Adj", "value": str(row.get("MTF Score Adj", 0)), "inline": True},
-        {"name": "Volume Score Adj", "value": str(row.get("Volume Score Adj", 0)), "inline": True},
-        {"name": "Trade Plan", "value": f"Rank #{row.get('Signal Rank', 'N/A')} | Entry {row.get('Trade Entry', 'N/A')} | SL {row.get('Stop Loss', 'N/A')} | TP1 {row.get('Take Profit 1', 'N/A')} | TP2 {row.get('Take Profit 2', 'N/A')} | Trail {row.get('Trailing Stop', 'N/A')} | Qty {row.get('Position Size', 'N/A')} | R/R {row.get('Risk/Reward 2', 'N/A')}", "inline": False},
-        {"name": "Final Score", "value": str(row["Final Score"]), "inline": True},
+        {"name": "Ticker / Market", "value": f"{row.get('Ticker', '')} | {row.get('Market', '')}", "inline": True},
+        {"name": "Price", "value": format_money(row.get("Price")), "inline": True},
+        {"name": "Confidence", "value": f"{row.get('AI Confidence %', 0)}%", "inline": True},
+        {"name": "Market Regime", "value": market_text, "inline": False},
+        {"name": "Trade Plan", "value": trade_plan, "inline": False},
+        {"name": "Position Sizing", "value": position_text, "inline": False},
+        {"name": "Why This Alert", "value": compact_text(build_signal_reason_text(row), 1000), "inline": False},
+        {"name": "Technical Snapshot", "value": compact_text(technical_text, 1000), "inline": False},
+        {"name": "Confidence Breakdown", "value": compact_text(confidence_text, 1000), "inline": False},
+        {"name": "News Sentiment", "value": compact_text(f"{row.get('News Sentiment', 'N/A')} | Adj {row.get('News Score Adj', 0)} | {row.get('News Headlines', 'None')}", 1000), "inline": False},
+        {"name": "Approval", "value": f"{row.get('Alert Approved', 'N/A')} | {row.get('Exposure Notes', 'N/A')}", "inline": False},
         {"name": "Time", "value": now_text(), "inline": False},
     ]
+    return send_discord_embed(get_trade_webhook(row["Ticker"]), title, signal_embed_color(row["AI Signal"]), fields)
 
-    return send_discord_embed(
-        get_trade_webhook(row["Ticker"]),
-        f"{row['Market']} Market | {row['AI Signal']}",
-        signal_embed_color(row["AI Signal"]),
-        fields
-    )
-
-
-# ======================================================
-# SUMMARY FUNCTIONS
-# ======================================================
 
 def build_summary_fields(rows, market):
     market_rows = [row for row in rows if row["Market"] == market]
@@ -3759,57 +3953,38 @@ def sync_walk_forward_to_google_sheets(results):
 
 
 def send_backtest_summary(results):
-    if not results:
+    if not results or not BOT_SEND_BACKTEST_SCORECARD:
         return False
-
-    webhook_url = get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+    webhook_url = get_backtest_webhook()
     if not webhook_url:
         log("Backtest summary skipped: no summary/trade webhook available.")
         return False
-
     valid_results = [result for result in results if result.get("Signals Tested", 0) > 0]
-
     if not valid_results:
-        message = (
-            "🧪 ADVANCED BACKTESTING SUMMARY\n"
-            f"Time: {now_text()}\n"
-            f"Period: {BOT_BACKTEST_PERIOD} | Hold: {BOT_BACKTEST_HOLD_DAYS} days\n"
-            "No qualifying historical signals found at the current confidence threshold."
-        )
-        return send_discord_message(webhook_url, message)
-
-    ranked = sorted(
-        valid_results,
-        key=lambda item: (item.get("Profit Factor", 0), item.get("Win Rate %", 0), item.get("Average Return %", 0)),
-        reverse=True
-    )
-
+        fields = [
+            {"name": "Status", "value": "No qualifying historical signals found at the current confidence threshold.", "inline": False},
+            {"name": "Period", "value": f"{BOT_BACKTEST_PERIOD} | Hold {BOT_BACKTEST_HOLD_DAYS} days", "inline": True},
+            {"name": "Time", "value": now_text(), "inline": False},
+        ]
+        return send_discord_embed(webhook_url, "📈 Backtest Scorecard", 10181046, fields)
+    ranked = sorted(valid_results, key=lambda item: (item.get("Profit Factor", 0), item.get("Win Rate %", 0), item.get("Average Return %", 0)), reverse=True)
+    weakest = sorted(valid_results, key=lambda item: (item.get("Profit Factor", 0), item.get("Win Rate %", 0), item.get("Average Return %", 0)))
     total_signals = sum(result.get("Signals Tested", 0) for result in valid_results)
     total_wins = sum(result.get("Wins", 0) for result in valid_results)
     overall_win_rate = round((total_wins / total_signals) * 100, 2) if total_signals else 0
     avg_return = round(sum(result.get("Average Return %", 0) for result in valid_results) / len(valid_results), 2)
     avg_drawdown = round(sum(result.get("Max Drawdown %", 0) for result in valid_results) / len(valid_results), 2)
-
+    avg_pf = round(sum(safe_float(result.get("Profit Factor", 0), 0) for result in valid_results) / len(valid_results), 2)
     wf_summary = calculate_walk_forward_summary(results)
-
-    lines = [
-        "🧪 ADVANCED BACKTESTING SUMMARY",
-        f"Time: {now_text()}",
-        f"Period: {BOT_BACKTEST_PERIOD} | Hold: {BOT_BACKTEST_HOLD_DAYS} days | Min Confidence: {BOT_BACKTEST_MIN_CONFIDENCE}%",
-        f"Overall: {total_signals} signals | {overall_win_rate}% WR | Avg return {avg_return}% | Avg DD {avg_drawdown}%",
-        f"Walk Forward: {wf_summary.get('Walk Forward Passed', 'NO DATA')} | {wf_summary.get('Walk Forward Notes', '')}",
-        "",
-        "Top Results:",
+    fields = [
+        {"name": "Overall", "value": f"{total_signals} signals | WR {overall_win_rate}% | Avg Return {avg_return}% | Avg PF {avg_pf} | Avg DD {avg_drawdown}%", "inline": False},
+        {"name": "Walk Forward", "value": f"{wf_summary.get('Walk Forward Passed', 'NO DATA')} | {wf_summary.get('Walk Forward Notes', '')}", "inline": False},
+        {"name": "Top Backtests", "value": compact_text("\n".join(build_backtest_quality_line(result) for result in ranked[:8]), 1000), "inline": False},
+        {"name": "Weak / Avoid List", "value": compact_text("\n".join(build_backtest_quality_line(result) for result in weakest[:5]), 1000), "inline": False},
+        {"name": "Settings", "value": f"Period {BOT_BACKTEST_PERIOD} | Hold {BOT_BACKTEST_HOLD_DAYS} days | Min Conf {BOT_BACKTEST_MIN_CONFIDENCE}%", "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
     ]
-
-    for result in ranked[:8]:
-        lines.append(
-            f"{result['Ticker']} | {result['Signals Tested']} signals | "
-            f"{result['Win Rate %']}% WR | PF {result['Profit Factor']} | "
-            f"Avg {result['Average Return %']}% | DD {result['Max Drawdown %']}%"
-        )
-
-    return send_discord_message(webhook_url, "\n".join(lines))
+    return send_discord_embed(webhook_url, "📈 Backtest Scorecard", 10181046, fields)
 
 
 def run_backtest_review():
@@ -5206,8 +5381,28 @@ def run_scan():
     post_scan_errors += int(step_error)
     interruptible_sleep(1)
 
-    _, step_error = run_safe_step("Advanced backtest review", maybe_run_backtest_review)
+    backtest_results, step_error = run_safe_step("Advanced backtest review", maybe_run_backtest_review)
     post_scan_errors += int(step_error)
+    backtest_results = backtest_results or []
+
+    _, step_error = run_safe_step("Top signals Discord summary", send_top_signals_summary, scanned_rows, candidates, sent_count)
+    post_scan_errors += int(step_error)
+    interruptible_sleep(1)
+
+    _, step_error = run_safe_step(
+        "Daily performance Discord report",
+        send_daily_performance_report,
+        scanned_rows,
+        alerted_rows,
+        candidates,
+        sent_count,
+        skipped_duplicates,
+        ticker_errors,
+        post_scan_errors,
+        backtest_results,
+    )
+    post_scan_errors += int(step_error)
+    interruptible_sleep(1)
 
     _, step_error = run_safe_step(
         "Google Sheets sync",
@@ -5311,6 +5506,10 @@ def main():
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
+    log(f"Discord elite alerts enabled: {BOT_DISCORD_ELITE_ALERTS_ENABLED}")
+    log(f"Top signals summary enabled: {BOT_SEND_TOP_SIGNALS_SUMMARY} | count={BOT_TOP_SIGNALS_COUNT}")
+    log(f"Daily performance report enabled: {BOT_SEND_DAILY_PERFORMANCE_REPORT} | hour={BOT_DAILY_REPORT_HOUR}")
+    log(f"Backtest scorecard enabled: {BOT_SEND_BACKTEST_SCORECARD}")
     log(f"Summary max lines per section: {SUMMARY_MAX_LINES_PER_SECTION}")
     log(f"Crypto tickers: {', '.join(CRYPTO_TICKERS)}")
     log(f"Stock tickers: {', '.join(STOCK_TICKERS)}")
