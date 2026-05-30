@@ -205,7 +205,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v31-discord-terminal-triple-deep-dive"
+BOT_VERSION = "google-sheets-100-production-v31-discord-scorecards-webhook-routing"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -802,11 +802,20 @@ def format_money(value):
 
 
 def get_top_signals_webhook(market=None):
+    """
+    Top Ranked Signals are decision-support/scorecard messages, not market summaries.
+    They should go to a dedicated scorecards channel when TOP_SIGNALS_WEBHOOK_URL is set.
+    If TOP_SIGNALS_WEBHOOK_URL is missing, use BACKTEST_WEBHOOK_URL only when provided
+    because the recommended setup is one shared scorecards channel/webhook for both.
+    Do not fall back to stock/crypto daily-summary channels.
+    """
     if TOP_SIGNALS_WEBHOOK_URL:
         return TOP_SIGNALS_WEBHOOK_URL
-    if market in ["Crypto", "Stock"]:
-        return get_summary_webhook(market)
-    return get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+
+    if BACKTEST_WEBHOOK_URL:
+        return BACKTEST_WEBHOOK_URL
+
+    return ""
 
 
 def get_daily_report_webhook():
@@ -816,9 +825,19 @@ def get_daily_report_webhook():
 
 
 def get_backtest_webhook():
+    """
+    Backtest Scorecard should go to its own scorecards channel/webhook.
+    If BACKTEST_WEBHOOK_URL is missing, use TOP_SIGNALS_WEBHOOK_URL only when provided
+    because both scorecard-style messages can share the same channel.
+    Do not fall back to stock/crypto daily-summary channels.
+    """
     if BACKTEST_WEBHOOK_URL:
         return BACKTEST_WEBHOOK_URL
-    return get_summary_webhook("Stock") or get_summary_webhook("Crypto")
+
+    if TOP_SIGNALS_WEBHOOK_URL:
+        return TOP_SIGNALS_WEBHOOK_URL
+
+    return ""
 
 
 def compact_text(value, limit=900):
@@ -911,7 +930,7 @@ def send_top_signals_summary(rows, candidates=0, sent_count=0):
         return False
     webhook_url = get_top_signals_webhook()
     if not webhook_url:
-        log("Top signals summary skipped: no summary/trade webhook available.")
+        log("Top signals summary skipped: TOP_SIGNALS_WEBHOOK_URL or BACKTEST_WEBHOOK_URL is missing.")
         return False
     crypto_context = next((row for row in rows if row.get("Market") == "Crypto"), {})
     stock_context = next((row for row in rows if row.get("Market") == "Stock"), {})
@@ -981,6 +1000,12 @@ def validate_runtime_config():
 
     if SEND_NEWS and not NEWSAPI_KEY and not FINNHUB_API_KEY and not BOT_NEWS_YFINANCE_ENABLED:
         warnings.append("News is enabled, but NewsAPI/Finnhub keys are missing and Yahoo/yfinance news is disabled. News digests will likely be empty.")
+
+    if BOT_SEND_TOP_SIGNALS_SUMMARY and not TOP_SIGNALS_WEBHOOK_URL and not BACKTEST_WEBHOOK_URL:
+        warnings.append("Top Signals summary is enabled but TOP_SIGNALS_WEBHOOK_URL/BACKTEST_WEBHOOK_URL is missing. It will be skipped instead of posting to daily-summary channels.")
+
+    if BOT_SEND_BACKTEST_SCORECARD and not BACKTEST_WEBHOOK_URL and not TOP_SIGNALS_WEBHOOK_URL:
+        warnings.append("Backtest Scorecard is enabled but BACKTEST_WEBHOOK_URL/TOP_SIGNALS_WEBHOOK_URL is missing. It will be skipped instead of posting to daily-summary channels.")
 
     if BOT_MARKET_TREND_FILTER_ENABLED:
         if not BOT_CRYPTO_MARKET_TICKERS:
@@ -3393,7 +3418,7 @@ def maybe_send_scheduled_news():
 
 def send_startup_message():
     if not SEND_STARTUP_MESSAGE:
-        return
+        return False
 
     enabled_sources = []
 
@@ -3409,6 +3434,7 @@ def send_startup_message():
     fields = [
         {"name": "Status", "value": "Railway worker is online.", "inline": False},
         {"name": "Bot Version", "value": BOT_VERSION, "inline": False},
+        {"name": "Routing", "value": "Startup/status messages route to System Check only.", "inline": False},
         {"name": "Scan Interval", "value": f"{SCAN_INTERVAL_MINUTES} minutes", "inline": True},
         {"name": "Minimum Confidence", "value": f"{MIN_CONFIDENCE}%", "inline": True},
         {"name": "Multi-Timeframe", "value": "On" if BOT_MULTI_TIMEFRAME_ENABLED else "Off", "inline": True},
@@ -3420,6 +3446,7 @@ def send_startup_message():
         {"name": "Trade Management", "value": "On" if BOT_TRADE_MANAGEMENT_ENABLED else "Off", "inline": True},
         {"name": "Advanced Backtesting", "value": "On" if BOT_BACKTESTING_ENABLED else "Off", "inline": True},
         {"name": "Phase 3 Risk Suite", "value": f"Regime {'On' if BOT_MARKET_REGIME_DETECTION_ENABLED else 'Off'} | Ranking {'On' if BOT_SIGNAL_RANKING_ENABLED else 'Off'} | Sizing {'On' if BOT_POSITION_SIZING_ENABLED else 'Off'} | Trailing {'On' if BOT_TRAILING_STOP_ENABLED else 'Off'} | Exposure {'On' if BOT_EXPOSURE_CONTROLS_ENABLED else 'Off'} | WalkFwd {'On' if BOT_WALK_FORWARD_ENABLED else 'Off'} | Outcomes {'On' if BOT_OUTCOME_TRACKING_ENABLED else 'Off'} | Analytics {'On' if BOT_DASHBOARD_ANALYTICS_ENABLED else 'Off'}", "inline": False},
+        {"name": "Discord Terminal", "value": f"Elite Alerts {'On' if BOT_DISCORD_ELITE_ALERTS_ENABLED else 'Off'} | Top Signals {'On' if BOT_SEND_TOP_SIGNALS_SUMMARY else 'Off'} | Daily Report {'On' if BOT_SEND_DAILY_PERFORMANCE_REPORT else 'Off'} | Backtest Scorecard {'On' if BOT_SEND_BACKTEST_SCORECARD else 'Off'}", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -3430,22 +3457,18 @@ def send_startup_message():
         {"name": "Time", "value": now_text(), "inline": False},
     ]
 
-    if CRYPTO_TRADE_WEBHOOK_URL:
-        send_discord_embed(
-            CRYPTO_TRADE_WEBHOOK_URL,
-            "🤖 AI Trading Bot Started",
-            3447003,
-            fields
-        )
+    webhook_url = get_heartbeat_webhook()
 
-    if STOCK_TRADE_WEBHOOK_URL and STOCK_TRADE_WEBHOOK_URL != CRYPTO_TRADE_WEBHOOK_URL:
-        send_discord_embed(
-            STOCK_TRADE_WEBHOOK_URL,
-            "🤖 AI Trading Bot Started",
-            3447003,
-            fields
-        )
+    if not webhook_url:
+        log("Startup message skipped: no heartbeat/error/trade webhook available.")
+        return False
 
+    return send_discord_embed(
+        webhook_url,
+        "🤖 AI Trading Bot Started",
+        3447003,
+        fields
+    )
 
 def send_signal_alert(row):
     if not BOT_DISCORD_ELITE_ALERTS_ENABLED:
@@ -3516,12 +3539,60 @@ def build_summary_fields(rows, market):
     if not market_rows:
         return []
 
+    def short_trend_label(value):
+        value = str(value or "N/A")
+        if value == "Bullish":
+            return "Bull"
+        if value == "Bearish":
+            return "Bear"
+        if value == "Neutral":
+            return "Neut"
+        if value == "Unknown":
+            return "Unk"
+        return value[:8]
+
+    def compact_number(value, digits=1):
+        number = safe_float(value, 0)
+        if number == 0:
+            return "0"
+        if abs(number) >= 100:
+            return str(round(number))
+        return str(round(number, digits))
+
+    def rank_text(row):
+        rank = row.get("Signal Rank", "-")
+        return f"#{rank}" if str(rank).strip() else "#-"
+
+    def compact_summary_line(row):
+        confidence = compact_number(row.get("AI Confidence %", 0), 1)
+        grade = row.get("Confidence Grade", "N/A")
+        quality = compact_number(row.get("Signal Quality Score", 0), 1)
+        rsi = compact_number(row.get("RSI", 0), 0)
+        rvol = compact_number(row.get("Relative Volume", 0), 2)
+        regime = str(row.get("Advanced Market Regime", row.get("Market Regime", "N/A"))).replace("/Constructive", "").replace("/Defensive", "")
+        short_tf = short_trend_label(row.get("Short TF Trend", "N/A"))
+        higher_tf = short_trend_label(row.get("Higher TF Trend", "N/A"))
+        sr_signal = str(row.get("S/R Signal", "N/A")).replace("Near ", "Near ")
+        news = str(row.get("News Sentiment", "N/A"))
+
+        return (
+            f"{rank_text(row)} {row.get('Ticker', '')} | {confidence}% {grade} | "
+            f"QS {quality} | RSI {rsi} | RVOL {rvol}x | "
+            f"{regime} | {sr_signal} | News {news} | MTF {short_tf}/{higher_tf}"
+        )
+
     buy_lines = []
     hold_lines = []
     sell_lines = []
 
-    for row in sorted(market_rows, key=lambda item: item["AI Confidence %"], reverse=True):
-        line = f"#{row.get('Signal Rank', '-')} {row['Ticker']} | {row['AI Confidence %']}% ({row.get('Confidence Grade', 'N/A')}) | QS {row.get('Signal Quality Score', 0)} | RSI {row['RSI']} | RVOL {row.get('Relative Volume', 'N/A')}x | Regime {row.get('Advanced Market Regime', row.get('Market Regime', '?'))} | News {row.get('News Sentiment', '?')} | S/R {row.get('S/R Signal', '?')} | MTF {row.get('Short TF Trend', '?')}/{row.get('Higher TF Trend', '?')}"
+    sorted_rows = sorted(
+        market_rows,
+        key=lambda item: safe_float(item.get("Signal Quality Score", item.get("AI Confidence %", 0)), 0),
+        reverse=True
+    )
+
+    for row in sorted_rows:
+        line = compact_summary_line(row)
 
         if "BUY" in row["AI Signal"]:
             buy_lines.append(line)
@@ -3530,19 +3601,26 @@ def build_summary_fields(rows, market):
         else:
             hold_lines.append(line)
 
-    summary_text = (
-        "🟢 BUY SIGNALS\n"
-        f"{chr(10).join(buy_lines[:SUMMARY_MAX_LINES_PER_SECTION]) if buy_lines else 'None'}\n\n"
-        "🟡 HOLD SIGNALS\n"
-        f"{chr(10).join(hold_lines[:SUMMARY_MAX_LINES_PER_SECTION]) if hold_lines else 'None'}\n\n"
-        "🔴 SELL SIGNALS\n"
-        f"{chr(10).join(sell_lines[:SUMMARY_MAX_LINES_PER_SECTION]) if sell_lines else 'None'}\n\n"
-        "Time\n"
-        f"{now_text()}"
-    )
+    def section_value(lines):
+        if not lines:
+            return "None"
 
-    return [{"name": " ", "value": summary_text, "inline": False}]
+        selected = lines[:SUMMARY_MAX_LINES_PER_SECTION]
+        value = "\n".join(selected)
 
+        if len(lines) > len(selected):
+            value += f"\n+{len(lines) - len(selected)} more"
+
+        return compact_text(value, 1000)
+
+    fields = [
+        {"name": "🟢 BUY SIGNALS", "value": section_value(buy_lines), "inline": False},
+        {"name": "🟡 HOLD SIGNALS", "value": section_value(hold_lines), "inline": False},
+        {"name": "🔴 SELL SIGNALS", "value": section_value(sell_lines), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+
+    return fields
 
 def send_market_summary(rows, market):
     fields = build_summary_fields(rows, market)
@@ -3957,7 +4035,7 @@ def send_backtest_summary(results):
         return False
     webhook_url = get_backtest_webhook()
     if not webhook_url:
-        log("Backtest summary skipped: no summary/trade webhook available.")
+        log("Backtest scorecard skipped: BACKTEST_WEBHOOK_URL or TOP_SIGNALS_WEBHOOK_URL is missing.")
         return False
     valid_results = [result for result in results if result.get("Signals Tested", 0) > 0]
     if not valid_results:
