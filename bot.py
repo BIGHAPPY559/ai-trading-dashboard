@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.1-paper-trade-webhook-routing"
+BOT_VERSION = "google-sheets-100-production-v32.2-paper-trade-quality-upgrade"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -447,9 +447,22 @@ BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
 BOT_PAPER_TRADING_ENABLED = get_env_bool("BOT_PAPER_TRADING_ENABLED", True)
 BOT_PAPER_TRADE_MONITOR_ENABLED = get_env_bool("BOT_PAPER_TRADE_MONITOR_ENABLED", True)
 BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER", 1))
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10))
 BOT_PAPER_TRADE_STARTING_EQUITY = max(100, get_env_float("BOT_PAPER_TRADE_STARTING_EQUITY", BOT_ACCOUNT_SIZE))
+
+# v32.2 quality gate: paper trades should collect useful data without opening
+# unrealistic or historically weak setups. This gate uses the backtest-quality
+# values already calculated during alert filtering when available.
+BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED = get_env_bool("BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED", True)
+BOT_PAPER_TRADE_MIN_BACKTEST_PF = max(0, get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_PF", 1.0))
+BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE = max(0, min(get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE", 50), 100))
+BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS = max(1, get_env_int("BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS", 20))
+BOT_PAPER_TRADE_AVOID_TICKERS = clean_ticker_list(get_env_list("BOT_PAPER_TRADE_AVOID_TICKERS", []))
+BOT_SEND_PAPER_TRADE_SUMMARY = get_env_bool("BOT_SEND_PAPER_TRADE_SUMMARY", True)
+BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS = max(1, get_env_float("BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS", 6))
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
+PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -3076,6 +3089,42 @@ def has_open_paper_trade(df, ticker, signal):
     return len(open_df) >= BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER
 
 
+def count_open_paper_trades(df):
+    if df is None or df.empty or "status" not in df.columns:
+        return 0
+    return len(df[df["status"].astype(str).isin(["OPEN", "TP1_HIT"])])
+
+
+def paper_trade_quality_check(row):
+    if not BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED:
+        return True, "paper trade quality filter disabled"
+
+    ticker = str(row.get("Ticker", "")).upper().strip()
+    if ticker in BOT_PAPER_TRADE_AVOID_TICKERS:
+        return False, f"blocked: {ticker} is on BOT_PAPER_TRADE_AVOID_TICKERS"
+
+    pf = safe_float(row.get("Backtest Quality PF", 0), 0)
+    wr = safe_float(row.get("Backtest Quality WR", 0), 0)
+    signals = int(safe_float(row.get("Backtest Quality Signals", 0), 0))
+
+    # If the row was created before backtest-quality fields were added, do a
+    # best-effort check here rather than opening a low-quality paper trade.
+    if signals <= 0 and ticker:
+        quality = backtest_quality_for_ticker(ticker)
+        pf = safe_float(quality.get("pf", pf), pf)
+        wr = safe_float(quality.get("wr", wr), wr)
+        signals = int(safe_float(quality.get("signals", signals), signals))
+
+    if signals < BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS:
+        return False, f"blocked: paper trade low backtest sample ({signals})"
+    if pf < BOT_PAPER_TRADE_MIN_BACKTEST_PF:
+        return False, f"blocked: paper trade PF {pf} below {BOT_PAPER_TRADE_MIN_BACKTEST_PF}"
+    if wr < BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE:
+        return False, f"blocked: paper trade WR {wr}% below {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}%"
+
+    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals}"
+
+
 def create_paper_trade_from_signal(row):
     if not BOT_PAPER_TRADING_ENABLED or not is_directional_signal(row.get("AI Signal", "")):
         return False
@@ -3083,8 +3132,15 @@ def create_paper_trade_from_signal(row):
         df = load_paper_trades_df()
         ticker = str(row.get("Ticker", ""))
         signal = str(row.get("AI Signal", ""))
+        if count_open_paper_trades(df) >= BOT_PAPER_TRADE_MAX_OPEN_TOTAL:
+            log(f"Paper trade not opened for {ticker}: max total open paper trades reached ({BOT_PAPER_TRADE_MAX_OPEN_TOTAL}).")
+            return False
         if has_open_paper_trade(df, ticker, signal):
             log(f"Paper trade not opened for {ticker}: open {signal} trade already exists.")
+            return False
+        quality_ok, quality_note = paper_trade_quality_check(row)
+        if not quality_ok:
+            log(f"Paper trade not opened for {ticker}: {quality_note}")
             return False
         entry = safe_float(row.get("Trade Entry", row.get("Price", 0)), 0)
         if entry <= 0:
@@ -3112,7 +3168,7 @@ def create_paper_trade_from_signal(row):
             "risk_reward_2": safe_float(row.get("Risk/Reward 2", 0), 0),
             "signal_rank": row.get("Signal Rank", ""),
             "quality_score": safe_float(row.get("Signal Quality Score", 0), 0),
-            "notes": compact_text(row.get("Exposure Notes", ""), 500),
+            "notes": compact_text(f"{row.get('Exposure Notes', '')} | {quality_note}", 500),
             "tp1_notified": False,
             "tp2_notified": False,
             "stop_notified": False,
@@ -3261,6 +3317,97 @@ def update_paper_equity_curve(df=None):
     except Exception as error:
         log(f"Paper equity update error: {error}")
         return False
+
+
+def get_paper_trade_summary_key():
+    current_bucket = int(time.time() // (BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS * 3600))
+    return f"paper_trade_summary_{current_bucket}"
+
+
+def paper_trade_summary_already_sent():
+    return get_paper_trade_summary_key() in load_log(PAPER_TRADE_SUMMARY_LOG_FILE)
+
+
+def mark_paper_trade_summary_sent():
+    items = load_log(PAPER_TRADE_SUMMARY_LOG_FILE)
+    items.add(get_paper_trade_summary_key())
+    save_log(PAPER_TRADE_SUMMARY_LOG_FILE, items)
+
+
+def calculate_paper_trade_metrics(df, market=None):
+    if df is None or df.empty:
+        return {
+            "open": 0, "closed": 0, "win_rate": 0, "profit_factor": 0,
+            "total_pnl": 0, "best_ticker": "N/A", "worst_ticker": "N/A",
+            "tp1_open": 0,
+        }
+    working = df.copy()
+    if market and "market" in working.columns:
+        working = working[working["market"].astype(str) == str(market)]
+    if working.empty:
+        return {
+            "open": 0, "closed": 0, "win_rate": 0, "profit_factor": 0,
+            "total_pnl": 0, "best_ticker": "N/A", "worst_ticker": "N/A",
+            "tp1_open": 0,
+        }
+    status = working.get("status", pd.Series(dtype=str)).astype(str)
+    open_df = working[status.isin(["OPEN", "TP1_HIT"])]
+    closed_df = working[status.isin(["TP2_HIT", "STOPPED", "CLOSED"])]
+    pnl = pd.to_numeric(closed_df.get("pnl_dollars", 0), errors="coerce").fillna(0) if not closed_df.empty else pd.Series(dtype=float)
+    wins = pnl[pnl > 0]
+    losses = pnl[pnl < 0]
+    gross_wins = wins.sum()
+    gross_losses = abs(losses.sum())
+    by_ticker = closed_df.assign(_pnl=pnl).groupby("ticker")["_pnl"].sum() if not closed_df.empty and "ticker" in closed_df.columns else pd.Series(dtype=float)
+    return {
+        "open": len(open_df),
+        "closed": len(closed_df),
+        "win_rate": round((len(wins) / len(closed_df)) * 100, 2) if len(closed_df) else 0,
+        "profit_factor": round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0),
+        "total_pnl": round(pnl.sum(), 2) if len(pnl) else 0,
+        "best_ticker": by_ticker.idxmax() if not by_ticker.empty else "N/A",
+        "worst_ticker": by_ticker.idxmin() if not by_ticker.empty else "N/A",
+        "tp1_open": len(open_df[open_df["status"].astype(str) == "TP1_HIT"]) if not open_df.empty and "status" in open_df.columns else 0,
+    }
+
+
+def send_paper_trade_summary_if_due():
+    if not BOT_SEND_PAPER_TRADE_SUMMARY:
+        return False
+    if paper_trade_summary_already_sent():
+        return False
+    df = load_paper_trades_df()
+    overall = calculate_paper_trade_metrics(df)
+    if overall["open"] == 0 and overall["closed"] == 0:
+        return False
+
+    sent_any = False
+    for market, sample_ticker in [("Crypto", "BTC-USD"), ("Stock", "AAPL")]:
+        metrics = calculate_paper_trade_metrics(df, market)
+        if metrics["open"] == 0 and metrics["closed"] == 0:
+            continue
+        fields = [
+            {"name": "Open Trades", "value": f"{metrics['open']} open | {metrics['tp1_open']} at TP1", "inline": True},
+            {"name": "Closed Trades", "value": str(metrics["closed"]), "inline": True},
+            {"name": "Win Rate", "value": f"{metrics['win_rate']}%", "inline": True},
+            {"name": "Profit Factor", "value": str(metrics["profit_factor"]), "inline": True},
+            {"name": "Total P/L", "value": format_money(metrics["total_pnl"]), "inline": True},
+            {"name": "Best / Worst", "value": f"Best: {metrics['best_ticker']} | Worst: {metrics['worst_ticker']}", "inline": False},
+            {"name": "Quality Gate", "value": f"Max open total {BOT_PAPER_TRADE_MAX_OPEN_TOTAL} | Min PF {BOT_PAPER_TRADE_MIN_BACKTEST_PF} | Min WR {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}% | Avoid: {', '.join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else 'None'}", "inline": False},
+            {"name": "Time", "value": now_text(), "inline": False},
+        ]
+        sent = send_discord_embed(
+            get_paper_trade_webhook(sample_ticker),
+            f"📊 {market} Paper Trade Summary",
+            10181046,
+            fields,
+        )
+        sent_any = sent_any or sent
+        interruptible_sleep(1)
+    if sent_any:
+        mark_paper_trade_summary_sent()
+    return sent_any
+
 
 # ======================================================
 # NEWS NORMALIZATION
@@ -3916,6 +4063,7 @@ def send_startup_message():
         {"name": "Phase 3 Risk Suite", "value": f"Regime {'On' if BOT_MARKET_REGIME_DETECTION_ENABLED else 'Off'} | Ranking {'On' if BOT_SIGNAL_RANKING_ENABLED else 'Off'} | Sizing {'On' if BOT_POSITION_SIZING_ENABLED else 'Off'} | Trailing {'On' if BOT_TRAILING_STOP_ENABLED else 'Off'} | Exposure {'On' if BOT_EXPOSURE_CONTROLS_ENABLED else 'Off'} | WalkFwd {'On' if BOT_WALK_FORWARD_ENABLED else 'Off'} | Outcomes {'On' if BOT_OUTCOME_TRACKING_ENABLED else 'Off'} | Analytics {'On' if BOT_DASHBOARD_ANALYTICS_ENABLED else 'Off'}", "inline": False},
         {"name": "Discord Terminal", "value": f"Elite Alerts {'On' if BOT_DISCORD_ELITE_ALERTS_ENABLED else 'Off'} | Top Signals {'On' if BOT_SEND_TOP_SIGNALS_SUMMARY else 'Off'} | Daily Report {'On' if BOT_SEND_DAILY_PERFORMANCE_REPORT else 'Off'} | Backtest Scorecard {'On' if BOT_SEND_BACKTEST_SCORECARD else 'Off'}", "inline": False},
         {"name": "Paper Trade Routing", "value": f"Crypto {'Dedicated' if CRYPTO_PAPER_TRADE_WEBHOOK_URL != CRYPTO_TRADE_WEBHOOK_URL else 'Trade fallback'} | Stock {'Dedicated' if STOCK_PAPER_TRADE_WEBHOOK_URL != STOCK_TRADE_WEBHOOK_URL else 'Trade fallback'}", "inline": False},
+        {"name": "Paper Trade Quality Gate", "value": f"Max Open {BOT_PAPER_TRADE_MAX_OPEN_TOTAL} | Min PF {BOT_PAPER_TRADE_MIN_BACKTEST_PF} | Min WR {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}% | Min Signals {BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS} | Avoid {', '.join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else 'None'}", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -5848,6 +5996,7 @@ def run_scan():
 
     paper_monitor_result = monitor_open_paper_trades()
     log(f"Paper trade monitor: {paper_monitor_result}")
+    run_safe_step("Paper trade summary", send_paper_trade_summary_if_due)
 
     for ticker in ALL_TICKERS:
         if time.time() - scan_started_at > BOT_MAX_SCAN_SECONDS:
