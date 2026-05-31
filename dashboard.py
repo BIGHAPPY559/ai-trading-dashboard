@@ -91,7 +91,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.5_performance_gate"
+APP_VERSION = "v32.6_trade_intelligence_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -148,6 +148,12 @@ BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR = get_env_float("BOT_PERFORMANCE_GATE_MIN
 BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY = get_env_bool("BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY", True)
 BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT = get_env_float("BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT", 20)
 BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY = get_env_float("BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY", 70)
+
+# v32.6 Trade Intelligence settings.
+# These controls prevent weak sample sizes from creating fake "best ticker" conclusions.
+BOT_TRADE_INTELLIGENCE_MIN_SAMPLE = get_env_int("BOT_TRADE_INTELLIGENCE_MIN_SAMPLE", 5)
+BOT_TRADE_INTELLIGENCE_STRONG_PF = get_env_float("BOT_TRADE_INTELLIGENCE_STRONG_PF", 1.5)
+BOT_TRADE_INTELLIGENCE_STRONG_WR = get_env_float("BOT_TRADE_INTELLIGENCE_STRONG_WR", 50)
 
 
 def now_dt():
@@ -737,6 +743,202 @@ def performance_gate_color(readiness_pct):
     if readiness_pct >= 70:
         return "🟡"
     return "🔴"
+
+
+def closed_paper_trades(df):
+    trades = normalize_paper_trade_df(df)
+    if trades.empty or "status" not in trades.columns:
+        return pd.DataFrame()
+    return trades[trades["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+
+
+def profit_factor_from_pnl(pnl_series):
+    pnl = pd.to_numeric(pnl_series, errors="coerce").fillna(0)
+    gross_wins = pnl[pnl > 0].sum()
+    gross_losses = abs(pnl[pnl < 0].sum())
+    if gross_losses > 0:
+        return round(gross_wins / gross_losses, 2)
+    if gross_wins > 0:
+        return round(gross_wins, 2)
+    return 0
+
+
+def win_rate_from_pnl(pnl_series):
+    pnl = pd.to_numeric(pnl_series, errors="coerce").fillna(0)
+    if len(pnl) == 0:
+        return 0
+    return round((len(pnl[pnl > 0]) / len(pnl)) * 100, 2)
+
+
+def build_group_performance(df, group_col, min_sample=1):
+    closed = closed_paper_trades(df)
+    if closed.empty or group_col not in closed.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for key, group in closed.groupby(group_col):
+        pnl = pd.to_numeric(group.get("pnl_dollars", 0), errors="coerce").fillna(0)
+        pnl_pct = pd.to_numeric(group.get("pnl_percent", 0), errors="coerce").fillna(0)
+        trade_count = len(group)
+        rows.append({
+            "Group": key,
+            "Trades": trade_count,
+            "Win Rate %": win_rate_from_pnl(pnl),
+            "Profit Factor": profit_factor_from_pnl(pnl),
+            "Total P/L $": round(pnl.sum(), 2),
+            "Avg P/L $": round(pnl.mean(), 2) if trade_count else 0,
+            "Avg Return %": round(pnl_pct.mean(), 2) if trade_count else 0,
+            "Avg Confidence": round(pd.to_numeric(group.get("confidence", 0), errors="coerce").fillna(0).mean(), 2),
+            "Avg Quality": round(pd.to_numeric(group.get("quality_score", 0), errors="coerce").fillna(0).mean(), 2),
+            "Sample Status": "Reliable" if trade_count >= min_sample else "Needs More Data",
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return result.sort_values(by=["Profit Factor", "Win Rate %", "Total P/L $"], ascending=False)
+
+
+def direction_from_signal(signal):
+    signal = str(signal or "").upper()
+    if "BUY" in signal:
+        return "LONG"
+    if "SELL" in signal:
+        return "SHORT"
+    return "UNKNOWN"
+
+
+def confidence_bucket(value):
+    confidence = float(value or 0)
+    if confidence >= 90:
+        return "90-100%"
+    if confidence >= 80:
+        return "80-89%"
+    if confidence >= 70:
+        return "70-79%"
+    if confidence >= 60:
+        return "60-69%"
+    return "<60%"
+
+
+def classify_market_condition(row):
+    text = " ".join([
+        str(row.get("notes", "")),
+        str(row.get("market_regime", "")) if "market_regime" in row else "",
+        str(row.get("risk_mode", "")) if "risk_mode" in row else "",
+    ]).lower()
+    if any(word in text for word in ["bull", "risk-on", "constructive"]):
+        return "Bull / Risk-On"
+    if any(word in text for word in ["bear", "risk-off", "defensive"]):
+        return "Bear / Risk-Off"
+    if any(word in text for word in ["sideways", "neutral", "mixed", "volatile"]):
+        return "Sideways / Neutral"
+    return "Unknown"
+
+
+def enrich_trade_intelligence_df(df):
+    trades = normalize_paper_trade_df(df)
+    if trades.empty:
+        return trades
+    if "signal" in trades.columns:
+        trades["direction"] = trades["signal"].apply(direction_from_signal)
+    else:
+        trades["direction"] = "UNKNOWN"
+    if "confidence" in trades.columns:
+        trades["confidence_bucket"] = trades["confidence"].apply(confidence_bucket)
+    else:
+        trades["confidence_bucket"] = "Unknown"
+    trades["market_condition"] = trades.apply(classify_market_condition, axis=1)
+    return trades
+
+
+def build_trade_intelligence_tables(df):
+    trades = enrich_trade_intelligence_df(df)
+    closed = closed_paper_trades(trades)
+
+    ticker_perf = build_group_performance(trades, "ticker", BOT_TRADE_INTELLIGENCE_MIN_SAMPLE)
+    direction_perf = build_group_performance(trades, "direction", 1)
+    confidence_perf = build_group_performance(trades, "confidence_bucket", 1)
+    market_perf = build_group_performance(trades, "market_condition", 1)
+
+    if not ticker_perf.empty:
+        best_tickers = ticker_perf[ticker_perf["Sample Status"] == "Reliable"].head(10)
+        worst_tickers = ticker_perf[ticker_perf["Sample Status"] == "Reliable"].sort_values(
+            by=["Profit Factor", "Win Rate %", "Total P/L $"],
+            ascending=True
+        ).head(10)
+        needs_more_data = ticker_perf[ticker_perf["Sample Status"] != "Reliable"].head(10)
+    else:
+        best_tickers = pd.DataFrame()
+        worst_tickers = pd.DataFrame()
+        needs_more_data = pd.DataFrame()
+
+    if not closed.empty:
+        scorecard_cols = [
+            "ticker", "market", "signal", "direction", "confidence_bucket",
+            "pnl_percent", "pnl_dollars", "confidence", "risk_reward_2",
+            "quality_score", "status", "date_opened", "date_closed"
+        ]
+        scorecard_cols = [col for col in scorecard_cols if col in closed.columns]
+        top_trades = closed.sort_values(by="pnl_dollars", ascending=False).head(10)[scorecard_cols]
+        worst_trades = closed.sort_values(by="pnl_dollars", ascending=True).head(10)[scorecard_cols]
+    else:
+        top_trades = pd.DataFrame()
+        worst_trades = pd.DataFrame()
+
+    return {
+        "trades": trades,
+        "closed": closed,
+        "ticker_perf": ticker_perf,
+        "best_tickers": best_tickers,
+        "worst_tickers": worst_tickers,
+        "needs_more_data": needs_more_data,
+        "direction_perf": direction_perf,
+        "confidence_perf": confidence_perf,
+        "market_perf": market_perf,
+        "top_trades": top_trades,
+        "worst_trades": worst_trades,
+    }
+
+
+def build_trade_intelligence_recommendations(tables):
+    recs = []
+    best = tables.get("best_tickers", pd.DataFrame())
+    worst = tables.get("worst_tickers", pd.DataFrame())
+    confidence = tables.get("confidence_perf", pd.DataFrame())
+    direction = tables.get("direction_perf", pd.DataFrame())
+
+    if not best.empty:
+        leaders = best[
+            (best["Profit Factor"] >= BOT_TRADE_INTELLIGENCE_STRONG_PF)
+            & (best["Win Rate %"] >= BOT_TRADE_INTELLIGENCE_STRONG_WR)
+        ].head(3)
+        for _, row in leaders.iterrows():
+            recs.append(f"✅ Trade {row['Group']} more cautiously when it matches quality filters: PF {row['Profit Factor']} | WR {row['Win Rate %']}%.")
+
+    if not worst.empty:
+        laggards = worst[
+            (worst["Profit Factor"] < 1)
+            | (worst["Win Rate %"] < BOT_TRADE_INTELLIGENCE_STRONG_WR)
+        ].head(3)
+        for _, row in laggards.iterrows():
+            recs.append(f"⚠️ Reduce or avoid {row['Group']} until performance improves: PF {row['Profit Factor']} | WR {row['Win Rate %']}%.")
+
+    if not confidence.empty:
+        conf_sorted = confidence.sort_values(by="Group", ascending=False)
+        weak_conf = conf_sorted[(conf_sorted["Profit Factor"] < 1) & (conf_sorted["Trades"] >= BOT_TRADE_INTELLIGENCE_MIN_SAMPLE)]
+        if not weak_conf.empty:
+            row = weak_conf.iloc[0]
+            recs.append(f"⚠️ Confidence bucket {row['Group']} is underperforming with PF {row['Profit Factor']}; consider raising minimum confidence.")
+
+    if not direction.empty and "Group" in direction.columns:
+        for _, row in direction.iterrows():
+            if row["Trades"] >= BOT_TRADE_INTELLIGENCE_MIN_SAMPLE and row["Profit Factor"] < 1:
+                recs.append(f"⚠️ {row['Group']} trades are weak right now: PF {row['Profit Factor']} | WR {row['Win Rate %']}%.")
+
+    if not recs:
+        recs.append("Collect more closed paper trades before making major strategy changes.")
+    return recs[:8]
 
 
 
@@ -1822,13 +2024,14 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
     "Paper Quality",
     "Decision Dashboard",
     "Performance Gate",
+    "Trade Intelligence",
     "Crypto",
     "Stocks",
     "AI Scanner",
@@ -2275,6 +2478,110 @@ with performance_gate_tab:
         file_name="performance_gate_report.csv",
         mime="text/csv"
     )
+
+
+# ======================================================
+# v32.6 TRADE INTELLIGENCE TAB
+# ======================================================
+
+with trade_intelligence_tab:
+    st.header("v32.6 Trade Intelligence Dashboard")
+    st.caption("This turns closed paper trades into strategy intelligence: what to trade more, what to avoid, and whether confidence is actually predictive.")
+
+    paper_trades_df = load_paper_trades_df()
+    equity_curve_df = load_paper_equity_df()
+    tables = build_trade_intelligence_tables(paper_trades_df)
+    closed_df = tables["closed"]
+    metrics = paper_trade_metrics(paper_trades_df)
+    checks_df, gate_summary = build_performance_gate_report(paper_trades_df, equity_curve_df)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Closed Trades", metrics["total_closed"])
+    col2.metric("Win Rate", f"{metrics['win_rate']}%")
+    col3.metric("Profit Factor", metrics["profit_factor"])
+    col4.metric("Readiness", f"{gate_summary['readiness_pct']}%")
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Best Ticker", metrics["best_ticker"])
+    col6.metric("Worst Ticker", metrics["worst_ticker"])
+    col7.metric("Min Sample", BOT_TRADE_INTELLIGENCE_MIN_SAMPLE)
+    col8.metric("Recommendation", gate_summary["recommendation"])
+
+    if closed_df.empty:
+        st.info("Trade Intelligence will become useful after closed paper trades are recorded. Keep the bot running until paper trades hit TP2 or stop loss.")
+    else:
+        st.subheader("AI Recommendations")
+        for rec in build_trade_intelligence_recommendations(tables):
+            st.write(rec)
+
+        st.subheader("Best Performing Tickers")
+        if tables["best_tickers"].empty:
+            st.info(f"No ticker has reached the minimum sample size of {BOT_TRADE_INTELLIGENCE_MIN_SAMPLE} closed trades yet.")
+        else:
+            st.dataframe(tables["best_tickers"], width="stretch")
+
+        st.subheader("Worst Performing Tickers")
+        if tables["worst_tickers"].empty:
+            st.info(f"No reliable worst-ticker ranking yet. Need {BOT_TRADE_INTELLIGENCE_MIN_SAMPLE}+ closed trades per ticker.")
+        else:
+            st.dataframe(tables["worst_tickers"], width="stretch")
+
+        st.subheader("Tickers That Need More Data")
+        if tables["needs_more_data"].empty:
+            st.success("All ranked tickers meet the minimum sample size.")
+        else:
+            st.dataframe(tables["needs_more_data"], width="stretch")
+
+        st.subheader("Confidence Score Validation")
+        if tables["confidence_perf"].empty:
+            st.info("No confidence bucket data yet.")
+        else:
+            st.dataframe(tables["confidence_perf"], width="stretch")
+            chart_conf = tables["confidence_perf"].set_index("Group")[["Win Rate %", "Profit Factor"]]
+            st.bar_chart(chart_conf)
+
+        st.subheader("Long vs Short Performance")
+        if tables["direction_perf"].empty:
+            st.info("No long/short performance data yet.")
+        else:
+            st.dataframe(tables["direction_perf"], width="stretch")
+            st.bar_chart(tables["direction_perf"].set_index("Group")[["Win Rate %", "Profit Factor"]])
+
+        st.subheader("Market Condition Performance")
+        if tables["market_perf"].empty:
+            st.info("No market-condition performance data yet.")
+        else:
+            st.dataframe(tables["market_perf"], width="stretch")
+
+        st.subheader("Top 10 Closed Trade Scorecards")
+        if tables["top_trades"].empty:
+            st.info("No closed trade scorecards yet.")
+        else:
+            st.dataframe(tables["top_trades"], width="stretch")
+
+        st.subheader("Worst 10 Closed Trade Scorecards")
+        if tables["worst_trades"].empty:
+            st.info("No losing trade scorecards yet.")
+        else:
+            st.dataframe(tables["worst_trades"], width="stretch")
+
+        export_df = tables["trades"]
+        st.download_button(
+            "Download Trade Intelligence CSV",
+            export_df.to_csv(index=False),
+            "trade_intelligence_dashboard.csv",
+            "text/csv"
+        )
+
+    st.subheader("v33 Automation Readiness Reminder")
+    readiness_notes = pd.DataFrame([
+        {"Gate": "Closed Trades", "Target": BOT_PERFORMANCE_GATE_MIN_TRADES, "Current": metrics["total_closed"]},
+        {"Gate": "Win Rate", "Target": f">= {BOT_PERFORMANCE_GATE_MIN_WIN_RATE}%", "Current": f"{metrics['win_rate']}%"},
+        {"Gate": "Profit Factor", "Target": f">= {BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR}", "Current": metrics["profit_factor"]},
+        {"Gate": "Positive Equity", "Target": "Required", "Current": "Yes" if gate_summary["positive_equity"] else "No"},
+    ])
+    st.dataframe(readiness_notes, width="stretch")
+
 
 # ======================================================
 # CRYPTO TAB
@@ -2900,6 +3207,11 @@ with settings_tab:
     st.write("Require positive equity curve:", BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY)
     st.write("Maximum drawdown:", f"{BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT}%")
     st.write("Minimum average quality score:", BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY)
+
+    st.subheader("Trade Intelligence Settings")
+    st.write("Minimum sample size per ticker:", BOT_TRADE_INTELLIGENCE_MIN_SAMPLE)
+    st.write("Strong ticker profit factor:", BOT_TRADE_INTELLIGENCE_STRONG_PF)
+    st.write("Strong ticker win rate:", f"{BOT_TRADE_INTELLIGENCE_STRONG_WR}%")
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
