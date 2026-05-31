@@ -91,7 +91,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.4_paper_trade_decision_dashboard"
+APP_VERSION = "v32.5_performance_gate"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -139,6 +139,15 @@ BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS = get_env_int("BOT_PAPER_TRADE_MIN_BACKTEST
 BOT_PAPER_TRADE_AVOID_TICKERS = get_env_list("BOT_PAPER_TRADE_AVOID_TICKERS", [])
 BOT_SEND_PAPER_TRADE_SUMMARY = get_env_bool("BOT_SEND_PAPER_TRADE_SUMMARY", True)
 BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS = get_env_float("BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS", 6)
+
+# v32.5 Performance Gate settings.
+# These are the pass/fail rules before moving to v33 3Commas paper automation.
+BOT_PERFORMANCE_GATE_MIN_TRADES = get_env_int("BOT_PERFORMANCE_GATE_MIN_TRADES", 100)
+BOT_PERFORMANCE_GATE_MIN_WIN_RATE = get_env_float("BOT_PERFORMANCE_GATE_MIN_WIN_RATE", 50)
+BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR = get_env_float("BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR", 1.5)
+BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY = get_env_bool("BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY", True)
+BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT = get_env_float("BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT", 20)
+BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY = get_env_float("BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY", 70)
 
 
 def now_dt():
@@ -601,6 +610,133 @@ def build_decision_dashboard_df(trades_df):
     return decision_df.sort_values(by="decision_score", ascending=False)
 
 
+def calculate_equity_curve_stats(equity_df):
+    if equity_df is None or equity_df.empty or "equity" not in equity_df.columns:
+        return {
+            "starting_equity": 0,
+            "current_equity": 0,
+            "equity_return_pct": 0,
+            "max_drawdown_pct": 0,
+            "positive_equity": False,
+        }
+    clean = equity_df.copy()
+    clean["equity"] = pd.to_numeric(clean["equity"], errors="coerce")
+    clean = clean.dropna(subset=["equity"])
+    if clean.empty:
+        return {
+            "starting_equity": 0,
+            "current_equity": 0,
+            "equity_return_pct": 0,
+            "max_drawdown_pct": 0,
+            "positive_equity": False,
+        }
+    starting = float(clean["equity"].iloc[0])
+    current = float(clean["equity"].iloc[-1])
+    equity_return = ((current - starting) / starting * 100) if starting else 0
+    rolling_high = clean["equity"].cummax()
+    drawdown = ((clean["equity"] - rolling_high) / rolling_high * 100).fillna(0)
+    max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0
+    return {
+        "starting_equity": round(starting, 2),
+        "current_equity": round(current, 2),
+        "equity_return_pct": round(equity_return, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "positive_equity": current > starting,
+    }
+
+
+def build_performance_gate_report(trades_df, equity_df):
+    metrics = paper_trade_metrics(trades_df)
+    quality = paper_quality_summary(trades_df)
+    equity = calculate_equity_curve_stats(equity_df)
+
+    checks = [
+        {
+            "Gate": "Minimum Closed Trades",
+            "Required": BOT_PERFORMANCE_GATE_MIN_TRADES,
+            "Current": metrics.get("total_closed", 0),
+            "Passed": metrics.get("total_closed", 0) >= BOT_PERFORMANCE_GATE_MIN_TRADES,
+            "Why It Matters": "Enough sample size before automation decisions.",
+        },
+        {
+            "Gate": "Win Rate",
+            "Required": f">= {BOT_PERFORMANCE_GATE_MIN_WIN_RATE}%",
+            "Current": f"{metrics.get('win_rate', 0)}%",
+            "Passed": metrics.get("win_rate", 0) >= BOT_PERFORMANCE_GATE_MIN_WIN_RATE,
+            "Why It Matters": "Strategy must win more often than the minimum threshold.",
+        },
+        {
+            "Gate": "Profit Factor",
+            "Required": f">= {BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR}",
+            "Current": metrics.get("profit_factor", 0),
+            "Passed": metrics.get("profit_factor", 0) >= BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR,
+            "Why It Matters": "Gross winners must meaningfully exceed gross losers.",
+        },
+        {
+            "Gate": "Positive Equity Curve",
+            "Required": "Yes" if BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY else "Optional",
+            "Current": "Yes" if equity.get("positive_equity") else "No",
+            "Passed": equity.get("positive_equity") if BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY else True,
+            "Why It Matters": "The tracked strategy should be making money overall.",
+        },
+        {
+            "Gate": "Max Drawdown",
+            "Required": f"<= {BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT}%",
+            "Current": f"{equity.get('max_drawdown_pct', 0)}%",
+            "Passed": equity.get("max_drawdown_pct", 0) <= BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT,
+            "Why It Matters": "Keeps risk controlled before automation.",
+        },
+        {
+            "Gate": "Average Quality Score",
+            "Required": f">= {BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY}",
+            "Current": quality.get("avg_quality", 0),
+            "Passed": quality.get("avg_quality", 0) >= BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY,
+            "Why It Matters": "Confirms the bot is selecting higher-quality setups.",
+        },
+    ]
+
+    checks_df = pd.DataFrame(checks)
+    passed = int(checks_df["Passed"].sum()) if not checks_df.empty else 0
+    total = len(checks_df)
+    readiness_pct = round((passed / total) * 100, 2) if total else 0
+    automation_ready = passed == total
+
+    if automation_ready:
+        recommendation = "READY FOR v33 3COMMAS PAPER AUTOMATION"
+    elif metrics.get("total_closed", 0) < BOT_PERFORMANCE_GATE_MIN_TRADES:
+        recommendation = "KEEP COLLECTING PAPER TRADES"
+    elif metrics.get("profit_factor", 0) < BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR:
+        recommendation = "IMPROVE FILTERS BEFORE AUTOMATION"
+    elif not equity.get("positive_equity"):
+        recommendation = "WAIT FOR POSITIVE EQUITY CURVE"
+    else:
+        recommendation = "CLOSE, BUT NOT READY YET"
+
+    summary = {
+        "readiness_pct": readiness_pct,
+        "passed_checks": passed,
+        "total_checks": total,
+        "automation_ready": automation_ready,
+        "recommendation": recommendation,
+        **metrics,
+        **equity,
+        "avg_quality": quality.get("avg_quality", 0),
+        "avg_rr": quality.get("avg_rr", 0),
+        "avg_confidence": quality.get("avg_confidence", 0),
+    }
+    return checks_df, summary
+
+
+def performance_gate_color(readiness_pct):
+    try:
+        readiness_pct = float(readiness_pct)
+    except Exception:
+        readiness_pct = 0
+    if readiness_pct >= 100:
+        return "🟢"
+    if readiness_pct >= 70:
+        return "🟡"
+    return "🔴"
 
 
 
@@ -1686,12 +1822,13 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
     "Paper Quality",
     "Decision Dashboard",
+    "Performance Gate",
     "Crypto",
     "Stocks",
     "AI Scanner",
@@ -2065,6 +2202,79 @@ with decision_tab:
         st.subheader("All Decision Rows")
         st.dataframe(decision_df[best_cols], width="stretch")
         st.download_button("Download Decision Dashboard CSV", decision_df.to_csv(index=False), "paper_trade_decision_dashboard.csv", "text/csv")
+
+
+# ======================================================
+# v32.5 PERFORMANCE GATE TAB
+# ======================================================
+
+with performance_gate_tab:
+    st.header("v32.5 Performance Gate")
+    st.caption("This is the go/no-go checklist before v33 3Commas paper automation.")
+
+    paper_trades_df = load_paper_trades_df()
+    equity_curve_df = load_paper_equity_df()
+    checks_df, gate_summary = build_performance_gate_report(paper_trades_df, equity_curve_df)
+
+    gate_icon = performance_gate_color(gate_summary["readiness_pct"])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Automation Readiness", f"{gate_icon} {gate_summary['readiness_pct']}%")
+    col2.metric("Passed Checks", f"{gate_summary['passed_checks']} / {gate_summary['total_checks']}")
+    col3.metric("Closed Trades", gate_summary["total_closed"])
+    col4.metric("Recommendation", gate_summary["recommendation"])
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Win Rate", f"{gate_summary['win_rate']}%")
+    col6.metric("Profit Factor", gate_summary["profit_factor"])
+    col7.metric("Equity Return", f"{gate_summary['equity_return_pct']}%")
+    col8.metric("Max Drawdown", f"{gate_summary['max_drawdown_pct']}%")
+
+    if gate_summary["automation_ready"]:
+        st.success("All performance gates passed. The system is ready to begin v33 3Commas PAPER automation testing.")
+    else:
+        st.warning("Do not move to v33 yet. Keep collecting paper-trade data or improve filters until all gates pass.")
+
+    st.subheader("Gate Checklist")
+    display_checks = checks_df.copy()
+    if not display_checks.empty:
+        display_checks["Status"] = display_checks["Passed"].apply(lambda value: "PASS" if value else "FAIL")
+        st.dataframe(display_checks[["Status", "Gate", "Required", "Current", "Why It Matters"]], width="stretch")
+
+    st.subheader("Success Criteria")
+    criteria_df = pd.DataFrame([
+        {"Metric": "Closed Paper Trades", "Target": BOT_PERFORMANCE_GATE_MIN_TRADES, "Current": gate_summary["total_closed"]},
+        {"Metric": "Win Rate", "Target": f"> {BOT_PERFORMANCE_GATE_MIN_WIN_RATE}%", "Current": f"{gate_summary['win_rate']}%"},
+        {"Metric": "Profit Factor", "Target": f"> {BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR}", "Current": gate_summary["profit_factor"]},
+        {"Metric": "Positive Equity Curve", "Target": "Required", "Current": "Yes" if gate_summary["positive_equity"] else "No"},
+        {"Metric": "Max Drawdown", "Target": f"< {BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT}%", "Current": f"{gate_summary['max_drawdown_pct']}%"},
+        {"Metric": "Average Quality Score", "Target": f"> {BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY}", "Current": gate_summary["avg_quality"]},
+    ])
+    st.dataframe(criteria_df, width="stretch")
+
+    st.subheader("Equity Curve Gate")
+    if not equity_curve_df.empty and "equity" in equity_curve_df.columns:
+        chart_df = equity_curve_df.copy()
+        chart_df["equity"] = pd.to_numeric(chart_df["equity"], errors="coerce")
+        chart_df = chart_df.dropna(subset=["equity"])
+        if "timestamp" in chart_df.columns:
+            st.line_chart(chart_df.set_index("timestamp")["equity"])
+        else:
+            st.line_chart(chart_df["equity"])
+    else:
+        st.info("Equity curve will appear after closed paper trades are recorded.")
+
+    st.subheader("Final Deploy Decision")
+    if gate_summary["automation_ready"]:
+        st.success("Deploy recommendation: Start v33 3Commas paper automation only, not live trading.")
+    else:
+        st.info("Deploy recommendation: Stay on v32.x and keep tracking paper trades until the gate passes.")
+
+    st.download_button(
+        label="Download Performance Gate Report CSV",
+        data=checks_df.to_csv(index=False),
+        file_name="performance_gate_report.csv",
+        mime="text/csv"
+    )
 
 # ======================================================
 # CRYPTO TAB
@@ -2682,6 +2892,14 @@ with settings_tab:
     st.write("Avoid tickers:", BOT_PAPER_TRADE_AVOID_TICKERS if BOT_PAPER_TRADE_AVOID_TICKERS else "None")
     st.write("Paper trade summary enabled:", BOT_SEND_PAPER_TRADE_SUMMARY)
     st.write("Paper trade summary interval hours:", BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS)
+
+    st.subheader("Performance Gate Settings")
+    st.write("Minimum closed paper trades:", BOT_PERFORMANCE_GATE_MIN_TRADES)
+    st.write("Minimum win rate:", f"{BOT_PERFORMANCE_GATE_MIN_WIN_RATE}%")
+    st.write("Minimum profit factor:", BOT_PERFORMANCE_GATE_MIN_PROFIT_FACTOR)
+    st.write("Require positive equity curve:", BOT_PERFORMANCE_GATE_REQUIRE_POSITIVE_EQUITY)
+    st.write("Maximum drawdown:", f"{BOT_PERFORMANCE_GATE_MAX_DRAWDOWN_PCT}%")
+    st.write("Minimum average quality score:", BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY)
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
