@@ -91,7 +91,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.6_trade_intelligence_dashboard"
+APP_VERSION = "v32.7_adaptive_trade_filters"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -154,6 +154,16 @@ BOT_PERFORMANCE_GATE_MIN_AVG_QUALITY = get_env_float("BOT_PERFORMANCE_GATE_MIN_A
 BOT_TRADE_INTELLIGENCE_MIN_SAMPLE = get_env_int("BOT_TRADE_INTELLIGENCE_MIN_SAMPLE", 5)
 BOT_TRADE_INTELLIGENCE_STRONG_PF = get_env_float("BOT_TRADE_INTELLIGENCE_STRONG_PF", 1.5)
 BOT_TRADE_INTELLIGENCE_STRONG_WR = get_env_float("BOT_TRADE_INTELLIGENCE_STRONG_WR", 50)
+
+# v32.7 Adaptive Trade Filter settings.
+# Dashboard-only intelligence layer. These do not execute trades; they recommend filters.
+BOT_ADAPTIVE_FILTERS_MIN_SAMPLE = get_env_int("BOT_ADAPTIVE_FILTERS_MIN_SAMPLE", 5)
+BOT_ADAPTIVE_AVOID_MAX_PF = get_env_float("BOT_ADAPTIVE_AVOID_MAX_PF", 1.0)
+BOT_ADAPTIVE_AVOID_MAX_WR = get_env_float("BOT_ADAPTIVE_AVOID_MAX_WR", 45)
+BOT_ADAPTIVE_FAVORITE_MIN_PF = get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_PF", 1.5)
+BOT_ADAPTIVE_FAVORITE_MIN_WR = get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_WR", 55)
+BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE = get_env_int("BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE", 5)
+BOT_ADAPTIVE_REGIME_MIN_SAMPLE = get_env_int("BOT_ADAPTIVE_REGIME_MIN_SAMPLE", 5)
 
 
 def now_dt():
@@ -939,6 +949,163 @@ def build_trade_intelligence_recommendations(tables):
     if not recs:
         recs.append("Collect more closed paper trades before making major strategy changes.")
     return recs[:8]
+
+
+
+
+
+def adaptive_action_from_perf(row):
+    """Classify a ticker/setup based on actual closed paper-trade performance."""
+    trades = int(row.get("Trades", 0) or 0)
+    pf = float(row.get("Profit Factor", 0) or 0)
+    wr = float(row.get("Win Rate %", 0) or 0)
+
+    if trades < BOT_ADAPTIVE_FILTERS_MIN_SAMPLE:
+        return "NEEDS MORE DATA"
+    if pf <= BOT_ADAPTIVE_AVOID_MAX_PF or wr <= BOT_ADAPTIVE_AVOID_MAX_WR:
+        return "AUTO-AVOID"
+    if pf >= BOT_ADAPTIVE_FAVORITE_MIN_PF and wr >= BOT_ADAPTIVE_FAVORITE_MIN_WR:
+        return "AUTO-FAVORITE"
+    return "NEUTRAL"
+
+
+def build_adaptive_ticker_filters(df):
+    """Build auto-avoid and auto-favorite recommendations from closed paper trades."""
+    tables = build_trade_intelligence_tables(df)
+    ticker_perf = tables.get("ticker_perf", pd.DataFrame())
+
+    if ticker_perf is None or ticker_perf.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    adaptive = ticker_perf.copy()
+    adaptive["Adaptive Action"] = adaptive.apply(adaptive_action_from_perf, axis=1)
+    adaptive["Suggested Variable"] = adaptive.apply(
+        lambda row: (
+            "Add to BOT_PAPER_TRADE_AVOID_TICKERS"
+            if row["Adaptive Action"] == "AUTO-AVOID"
+            else "Consider priority watchlist"
+            if row["Adaptive Action"] == "AUTO-FAVORITE"
+            else "No variable change yet"
+        ),
+        axis=1
+    )
+
+    avoid_df = adaptive[adaptive["Adaptive Action"] == "AUTO-AVOID"].copy()
+    favorite_df = adaptive[adaptive["Adaptive Action"] == "AUTO-FAVORITE"].copy()
+
+    return adaptive, avoid_df, favorite_df
+
+
+def build_confidence_optimization(df):
+    tables = build_trade_intelligence_tables(df)
+    confidence = tables.get("confidence_perf", pd.DataFrame())
+
+    if confidence is None or confidence.empty:
+        return pd.DataFrame(), "Collect more confidence-bucket data before changing confidence thresholds."
+
+    out = confidence.copy()
+    out["Adaptive Action"] = out.apply(
+        lambda row: (
+            "WEAK - CONSIDER RAISING MIN CONFIDENCE"
+            if int(row.get("Trades", 0) or 0) >= BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE
+            and float(row.get("Profit Factor", 0) or 0) < BOT_ADAPTIVE_AVOID_MAX_PF
+            else "STRONG BUCKET"
+            if int(row.get("Trades", 0) or 0) >= BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE
+            and float(row.get("Profit Factor", 0) or 0) >= BOT_ADAPTIVE_FAVORITE_MIN_PF
+            and float(row.get("Win Rate %", 0) or 0) >= BOT_ADAPTIVE_FAVORITE_MIN_WR
+            else "NEEDS MORE DATA / NEUTRAL"
+        ),
+        axis=1
+    )
+
+    reliable = out[out["Trades"] >= BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE].copy()
+    if reliable.empty:
+        recommendation = f"Need at least {BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE} closed trades per confidence bucket before changing thresholds."
+    else:
+        strong = reliable[reliable["Adaptive Action"] == "STRONG BUCKET"]
+        weak = reliable[reliable["Adaptive Action"].str.contains("WEAK", na=False)]
+        if not strong.empty:
+            best_bucket = strong.sort_values(by=["Profit Factor", "Win Rate %"], ascending=False).iloc[0]
+            recommendation = f"Best confidence bucket so far: {best_bucket['Group']} | PF {best_bucket['Profit Factor']} | WR {best_bucket['Win Rate %']}%."
+        elif not weak.empty:
+            recommendation = "Lower-confidence buckets are weak. Consider raising BOT_SIGNAL_MIN_CONFIDENCE after more data confirms this."
+        else:
+            recommendation = "Confidence buckets are mixed. Keep current confidence settings until more data comes in."
+
+    return out, recommendation
+
+
+def build_market_regime_optimization(df):
+    tables = build_trade_intelligence_tables(df)
+    market_perf = tables.get("market_perf", pd.DataFrame())
+
+    if market_perf is None or market_perf.empty:
+        return pd.DataFrame(), "No market-regime performance data yet."
+
+    out = market_perf.copy()
+    out["Adaptive Action"] = out.apply(
+        lambda row: (
+            "REDUCE EXPOSURE"
+            if int(row.get("Trades", 0) or 0) >= BOT_ADAPTIVE_REGIME_MIN_SAMPLE
+            and float(row.get("Profit Factor", 0) or 0) < BOT_ADAPTIVE_AVOID_MAX_PF
+            else "FAVORABLE REGIME"
+            if int(row.get("Trades", 0) or 0) >= BOT_ADAPTIVE_REGIME_MIN_SAMPLE
+            and float(row.get("Profit Factor", 0) or 0) >= BOT_ADAPTIVE_FAVORITE_MIN_PF
+            else "NEEDS MORE DATA / NEUTRAL"
+        ),
+        axis=1
+    )
+
+    weak = out[out["Adaptive Action"] == "REDUCE EXPOSURE"]
+    strong = out[out["Adaptive Action"] == "FAVORABLE REGIME"]
+
+    if not strong.empty:
+        top = strong.sort_values(by="Profit Factor", ascending=False).iloc[0]
+        recommendation = f"Best market condition so far: {top['Group']} | PF {top['Profit Factor']}."
+    elif not weak.empty:
+        low = weak.sort_values(by="Profit Factor", ascending=True).iloc[0]
+        recommendation = f"Weak market condition detected: {low['Group']} | PF {low['Profit Factor']}. Consider lower exposure in that regime after more confirmation."
+    else:
+        recommendation = "Market-regime data is not decisive yet. Keep collecting paper trades."
+
+    return out, recommendation
+
+
+def build_adaptive_filter_report(df):
+    adaptive, avoid_df, favorite_df = build_adaptive_ticker_filters(df)
+    confidence_df, confidence_recommendation = build_confidence_optimization(df)
+    regime_df, regime_recommendation = build_market_regime_optimization(df)
+
+    avoid_tickers = avoid_df["Group"].astype(str).tolist() if not avoid_df.empty and "Group" in avoid_df.columns else []
+    favorite_tickers = favorite_df["Group"].astype(str).tolist() if not favorite_df.empty and "Group" in favorite_df.columns else []
+
+    recommendations = []
+    if avoid_tickers:
+        recommendations.append("AUTO-AVOID candidates: " + ", ".join(avoid_tickers))
+    else:
+        recommendations.append("No auto-avoid ticker candidates yet.")
+
+    if favorite_tickers:
+        recommendations.append("AUTO-FAVORITE candidates: " + ", ".join(favorite_tickers))
+    else:
+        recommendations.append("No auto-favorite ticker candidates yet.")
+
+    recommendations.append(confidence_recommendation)
+    recommendations.append(regime_recommendation)
+
+    avoid_variable = "BOT_PAPER_TRADE_AVOID_TICKERS=" + ",".join(avoid_tickers) if avoid_tickers else "BOT_PAPER_TRADE_AVOID_TICKERS="
+    favorite_note = ",".join(favorite_tickers) if favorite_tickers else "None yet"
+
+    return {
+        "adaptive": adaptive,
+        "avoid_df": avoid_df,
+        "favorite_df": favorite_df,
+        "confidence_df": confidence_df,
+        "regime_df": regime_df,
+        "recommendations": recommendations,
+        "avoid_variable": avoid_variable,
+        "favorite_note": favorite_note,
+    }
 
 
 
@@ -2024,7 +2191,7 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, adaptive_filters_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -2032,6 +2199,7 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Decision Dashboard",
     "Performance Gate",
     "Trade Intelligence",
+    "Adaptive Filters",
     "Crypto",
     "Stocks",
     "AI Scanner",
@@ -2581,6 +2749,97 @@ with trade_intelligence_tab:
         {"Gate": "Positive Equity", "Target": "Required", "Current": "Yes" if gate_summary["positive_equity"] else "No"},
     ])
     st.dataframe(readiness_notes, width="stretch")
+
+
+
+# ======================================================
+# v32.7 ADAPTIVE FILTERS TAB
+# ======================================================
+
+with adaptive_filters_tab:
+    st.header("v32.7 Adaptive Trade Filters")
+    st.caption("Dashboard-only recommendations. This tab does not place trades or change bot behavior automatically.")
+
+    paper_trades_df = load_paper_trades_df()
+    report = build_adaptive_filter_report(paper_trades_df)
+    adaptive_df = report["adaptive"]
+    avoid_df = report["avoid_df"]
+    favorite_df = report["favorite_df"]
+
+    closed_count = len(closed_paper_trades(paper_trades_df))
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Closed Trades Analyzed", closed_count)
+    col2.metric("Auto-Avoid Candidates", len(avoid_df))
+    col3.metric("Auto-Favorite Candidates", len(favorite_df))
+    col4.metric("Min Sample", BOT_ADAPTIVE_FILTERS_MIN_SAMPLE)
+
+    st.subheader("Adaptive Recommendations")
+    for recommendation in report["recommendations"]:
+        st.write(recommendation)
+
+    st.subheader("Suggested Avoid Variable")
+    st.code(report["avoid_variable"], language="bash")
+    st.caption("Use this only after enough paper-trade data confirms the ticker is weak. This is a recommendation, not an automatic bot change.")
+
+    st.subheader("Auto-Avoid Candidates")
+    if avoid_df.empty:
+        st.success("No reliable auto-avoid candidates yet.")
+    else:
+        st.dataframe(avoid_df, width="stretch")
+
+    st.subheader("Auto-Favorite Candidates")
+    if favorite_df.empty:
+        st.info("No reliable auto-favorite candidates yet.")
+    else:
+        st.dataframe(favorite_df, width="stretch")
+        st.write("Favorite note:", report["favorite_note"])
+
+    st.subheader("All Adaptive Ticker Scores")
+    if adaptive_df.empty:
+        st.info("No adaptive ticker data yet. Closed paper trades are required.")
+    else:
+        st.dataframe(adaptive_df, width="stretch")
+        st.download_button(
+            "Download Adaptive Ticker Scores CSV",
+            adaptive_df.to_csv(index=False),
+            "adaptive_ticker_scores.csv",
+            "text/csv"
+        )
+
+    st.subheader("Confidence Optimization")
+    confidence_df = report["confidence_df"]
+    if confidence_df.empty:
+        st.info("No confidence optimization data yet.")
+    else:
+        st.dataframe(confidence_df, width="stretch")
+        if "Group" in confidence_df.columns:
+            st.bar_chart(confidence_df.set_index("Group")[["Win Rate %", "Profit Factor"]])
+
+    st.subheader("Market Regime Optimization")
+    regime_df = report["regime_df"]
+    if regime_df.empty:
+        st.info("No market regime optimization data yet.")
+    else:
+        st.dataframe(regime_df, width="stretch")
+
+    st.subheader("Guardrails")
+    guardrail_df = pd.DataFrame([
+        {"Setting": "Minimum sample per ticker", "Value": BOT_ADAPTIVE_FILTERS_MIN_SAMPLE},
+        {"Setting": "Auto-avoid if PF <=", "Value": BOT_ADAPTIVE_AVOID_MAX_PF},
+        {"Setting": "Auto-avoid if WR <=", "Value": f"{BOT_ADAPTIVE_AVOID_MAX_WR}%"},
+        {"Setting": "Auto-favorite if PF >=", "Value": BOT_ADAPTIVE_FAVORITE_MIN_PF},
+        {"Setting": "Auto-favorite if WR >=", "Value": f"{BOT_ADAPTIVE_FAVORITE_MIN_WR}%"},
+        {"Setting": "Confidence bucket min sample", "Value": BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE},
+        {"Setting": "Market regime min sample", "Value": BOT_ADAPTIVE_REGIME_MIN_SAMPLE},
+    ])
+    st.dataframe(guardrail_df, width="stretch")
+
+    st.info(
+        "Deploy recommendation: keep these adaptive filters as dashboard recommendations until you have 100+ closed paper trades. "
+        "After that, we can promote the strongest rules into bot.py."
+    )
+
 
 
 # ======================================================
@@ -3212,6 +3471,15 @@ with settings_tab:
     st.write("Minimum sample size per ticker:", BOT_TRADE_INTELLIGENCE_MIN_SAMPLE)
     st.write("Strong ticker profit factor:", BOT_TRADE_INTELLIGENCE_STRONG_PF)
     st.write("Strong ticker win rate:", f"{BOT_TRADE_INTELLIGENCE_STRONG_WR}%")
+
+    st.subheader("Adaptive Filter Settings")
+    st.write("Adaptive minimum sample:", BOT_ADAPTIVE_FILTERS_MIN_SAMPLE)
+    st.write("Auto-avoid max PF:", BOT_ADAPTIVE_AVOID_MAX_PF)
+    st.write("Auto-avoid max win rate:", f"{BOT_ADAPTIVE_AVOID_MAX_WR}%")
+    st.write("Auto-favorite min PF:", BOT_ADAPTIVE_FAVORITE_MIN_PF)
+    st.write("Auto-favorite min win rate:", f"{BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
+    st.write("Confidence optimization min sample:", BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE)
+    st.write("Market regime optimization min sample:", BOT_ADAPTIVE_REGIME_MIN_SAMPLE)
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
