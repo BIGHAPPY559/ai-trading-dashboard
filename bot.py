@@ -161,6 +161,21 @@ STOCK_TRADE_WEBHOOK_URL = os.getenv(
     os.getenv("STOCK_WEBHOOK_URL", TRADE_WEBHOOK_URL)
 )
 
+# v32.1 dedicated paper-trade lifecycle webhooks.
+# These keep normal signal alerts in trade-alert channels while routing
+# paper trade opened/TP1/TP2/stop/closed updates to separate tracker channels.
+# If either paper webhook is missing, the bot safely falls back to the matching
+# trade alert webhook so paper-trade notifications are not lost.
+CRYPTO_PAPER_TRADE_WEBHOOK_URL = os.getenv(
+    "CRYPTO_PAPER_TRADE_WEBHOOK_URL",
+    CRYPTO_TRADE_WEBHOOK_URL
+)
+
+STOCK_PAPER_TRADE_WEBHOOK_URL = os.getenv(
+    "STOCK_PAPER_TRADE_WEBHOOK_URL",
+    STOCK_TRADE_WEBHOOK_URL
+)
+
 CRYPTO_SUMMARY_WEBHOOK_URL = os.getenv(
     "CRYPTO_SUMMARY_WEBHOOK_URL",
     os.getenv("SUMMARY_WEBHOOK_URL", "")
@@ -205,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32-paper-trade-tracking"
+BOT_VERSION = "google-sheets-100-production-v32.1-paper-trade-webhook-routing"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -534,6 +549,17 @@ def get_trade_webhook(ticker):
     if get_asset_type(ticker) == "Crypto":
         return CRYPTO_TRADE_WEBHOOK_URL
     return STOCK_TRADE_WEBHOOK_URL
+
+
+def get_paper_trade_webhook(ticker):
+    """
+    Paper trade lifecycle alerts route to dedicated paper-trade tracker
+    channels when configured. Normal buy/sell trade alerts still use
+    get_trade_webhook().
+    """
+    if get_asset_type(ticker) == "Crypto":
+        return CRYPTO_PAPER_TRADE_WEBHOOK_URL or CRYPTO_TRADE_WEBHOOK_URL
+    return STOCK_PAPER_TRADE_WEBHOOK_URL or STOCK_TRADE_WEBHOOK_URL
 
 
 def get_summary_webhook(market):
@@ -3145,7 +3171,7 @@ def classify_paper_trade_status(trade, current_price):
 
 def send_paper_trade_event(trade, event_type):
     ticker = str(trade.get("ticker", ""))
-    webhook_url = get_trade_webhook(ticker)
+    webhook_url = get_paper_trade_webhook(ticker)
     titles = {
         "opened": "📈 PAPER TRADE OPENED",
         "tp1": "🎯 TP1 HIT",
@@ -3889,6 +3915,7 @@ def send_startup_message():
         {"name": "Advanced Backtesting", "value": "On" if BOT_BACKTESTING_ENABLED else "Off", "inline": True},
         {"name": "Phase 3 Risk Suite", "value": f"Regime {'On' if BOT_MARKET_REGIME_DETECTION_ENABLED else 'Off'} | Ranking {'On' if BOT_SIGNAL_RANKING_ENABLED else 'Off'} | Sizing {'On' if BOT_POSITION_SIZING_ENABLED else 'Off'} | Trailing {'On' if BOT_TRAILING_STOP_ENABLED else 'Off'} | Exposure {'On' if BOT_EXPOSURE_CONTROLS_ENABLED else 'Off'} | WalkFwd {'On' if BOT_WALK_FORWARD_ENABLED else 'Off'} | Outcomes {'On' if BOT_OUTCOME_TRACKING_ENABLED else 'Off'} | Analytics {'On' if BOT_DASHBOARD_ANALYTICS_ENABLED else 'Off'}", "inline": False},
         {"name": "Discord Terminal", "value": f"Elite Alerts {'On' if BOT_DISCORD_ELITE_ALERTS_ENABLED else 'Off'} | Top Signals {'On' if BOT_SEND_TOP_SIGNALS_SUMMARY else 'Off'} | Daily Report {'On' if BOT_SEND_DAILY_PERFORMANCE_REPORT else 'Off'} | Backtest Scorecard {'On' if BOT_SEND_BACKTEST_SCORECARD else 'Off'}", "inline": False},
+        {"name": "Paper Trade Routing", "value": f"Crypto {'Dedicated' if CRYPTO_PAPER_TRADE_WEBHOOK_URL != CRYPTO_TRADE_WEBHOOK_URL else 'Trade fallback'} | Stock {'Dedicated' if STOCK_PAPER_TRADE_WEBHOOK_URL != STOCK_TRADE_WEBHOOK_URL else 'Trade fallback'}", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
