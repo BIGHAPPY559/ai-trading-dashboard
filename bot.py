@@ -205,7 +205,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v31-discord-scorecards-webhook-routing"
+BOT_VERSION = "google-sheets-100-production-v31.1-quality-upgrade-10of10-triple-deep-dive"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -247,7 +247,7 @@ MIN_CONFIDENCE = max(
 # to the original single-timeframe scoring behavior without changing the rest of the bot.
 BOT_MULTI_TIMEFRAME_ENABLED = get_env_bool("BOT_MULTI_TIMEFRAME_ENABLED", True)
 BOT_SHORT_TIMEFRAME_PERIOD = os.getenv("BOT_SHORT_TIMEFRAME_PERIOD", "60d")
-BOT_SHORT_TIMEFRAME_INTERVAL = os.getenv("BOT_SHORT_TIMEFRAME_INTERVAL", "1h")
+BOT_SHORT_TIMEFRAME_INTERVAL = os.getenv("BOT_SHORT_TIMEFRAME_INTERVAL", "4h")
 BOT_PRIMARY_TIMEFRAME_LABEL = os.getenv("BOT_PRIMARY_TIMEFRAME_LABEL", "1D")
 BOT_HIGHER_TIMEFRAME_LABEL = os.getenv("BOT_HIGHER_TIMEFRAME_LABEL", "1W")
 BOT_MTF_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_MTF_MAX_ADJUSTMENT", 20), 30))
@@ -257,6 +257,12 @@ BOT_MTF_REQUIRE_MIN_ROWS = max(35, get_env_int("BOT_MTF_REQUIRE_MIN_ROWS", 35))
 BOT_MTF_SHORT_ENABLED = get_env_bool("BOT_MTF_SHORT_ENABLED", True)
 BOT_MTF_HIGHER_ENABLED = get_env_bool("BOT_MTF_HIGHER_ENABLED", True)
 BOT_MTF_TIME_GUARD_SECONDS = max(10, get_env_int("BOT_MTF_TIME_GUARD_SECONDS", 45))
+BOT_MTF_ALIGNMENT_REQUIRED = get_env_bool("BOT_MTF_ALIGNMENT_REQUIRED", True)
+BOT_MTF_ALIGNMENT_MIN_CONFIDENCE = max(0, min(get_env_float("BOT_MTF_ALIGNMENT_MIN_CONFIDENCE", MIN_CONFIDENCE), 100))
+BOT_MTF_ALIGNMENT_ALLOW_NEUTRAL = get_env_bool("BOT_MTF_ALIGNMENT_ALLOW_NEUTRAL", True)
+BOT_MTF_ALIGNMENT_MIN_MATCHES = max(1, min(get_env_int("BOT_MTF_ALIGNMENT_MIN_MATCHES", 2), 3))
+BOT_MOMENTUM_TIMEFRAME_PERIOD = os.getenv("BOT_MOMENTUM_TIMEFRAME_PERIOD", "30d")
+BOT_MOMENTUM_TIMEFRAME_INTERVAL = os.getenv("BOT_MOMENTUM_TIMEFRAME_INTERVAL", "1h")
 BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE = os.getenv("BOT_HIGHER_TIMEFRAME_RESAMPLE_RULE", "W-FRI")
 
 # Volume spike detection helps confirm whether a move has real participation behind it.
@@ -273,8 +279,8 @@ BOT_VOLUME_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_VOLUME_MAX_ADJUSTMENT", 
 BOT_MARKET_TREND_FILTER_ENABLED = get_env_bool("BOT_MARKET_TREND_FILTER_ENABLED", True)
 BOT_MARKET_TREND_MAX_ADJUSTMENT = max(0, min(get_env_int("BOT_MARKET_TREND_MAX_ADJUSTMENT", 12), 20))
 BOT_MARKET_TREND_MIN_ANCHORS = max(1, get_env_int("BOT_MARKET_TREND_MIN_ANCHORS", 1))
-BOT_CRYPTO_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_CRYPTO_MARKET_TICKERS", ["BTC-USD", "ETH-USD"]))
-BOT_STOCK_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_STOCK_MARKET_TICKERS", ["SPY", "QQQ"]))
+BOT_CRYPTO_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_CRYPTO_MARKET_TICKERS", ["BTC-USD"]))
+BOT_STOCK_MARKET_TICKERS = clean_ticker_list(get_env_list("BOT_STOCK_MARKET_TICKERS", ["SPY"]))
 
 # Better confidence scoring combines technicals, MTF, volume, and market context.
 # Set BOT_CONFIDENCE_ENGINE_ENABLED=false to fall back to the older final-score confidence.
@@ -333,6 +339,12 @@ BOT_BACKTEST_MIN_SIGNALS = max(1, get_env_int("BOT_BACKTEST_MIN_SIGNALS", 3))
 BOT_BACKTEST_INITIAL_EQUITY = max(100, get_env_float("BOT_BACKTEST_INITIAL_EQUITY", 10000))
 BOT_BACKTEST_RISK_PER_TRADE_PCT = max(0.1, min(get_env_float("BOT_BACKTEST_RISK_PER_TRADE_PCT", 1.0), 10))
 BOT_BACKTEST_INCLUDE_TRADE_MANAGEMENT = get_env_bool("BOT_BACKTEST_INCLUDE_TRADE_MANAGEMENT", True)
+BOT_BACKTEST_QUALITY_FILTER_ENABLED = get_env_bool("BOT_BACKTEST_QUALITY_FILTER_ENABLED", True)
+BOT_BACKTEST_QUALITY_MIN_PF = max(0, get_env_float("BOT_BACKTEST_QUALITY_MIN_PF", 1.0))
+BOT_BACKTEST_QUALITY_STRONG_PF = max(BOT_BACKTEST_QUALITY_MIN_PF, get_env_float("BOT_BACKTEST_QUALITY_STRONG_PF", 1.25))
+BOT_BACKTEST_QUALITY_MIN_WIN_RATE = max(0, min(get_env_float("BOT_BACKTEST_QUALITY_MIN_WIN_RATE", 50), 100))
+BOT_BACKTEST_QUALITY_MIN_SIGNALS = max(1, get_env_int("BOT_BACKTEST_QUALITY_MIN_SIGNALS", 20))
+BOT_BACKTEST_QUALITY_CONFIDENCE_PENALTY = max(0, min(get_env_float("BOT_BACKTEST_QUALITY_CONFIDENCE_PENALTY", 12), 50))
 
 # Phase 3 upgrades: regime detection, ranking, sizing, trailing stops, exposure controls,
 # walk-forward validation, outcome tracking, and dashboard analytics.
@@ -1718,7 +1730,7 @@ def is_known_trend(trend):
 
 
 def trend_pair_text(short_trend, higher_trend):
-    return f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} {short_trend} / {BOT_HIGHER_TIMEFRAME_LABEL} {higher_trend}"
+    return f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} {short_trend} / {BOT_MOMENTUM_TIMEFRAME_INTERVAL.upper()} momentum / {BOT_HIGHER_TIMEFRAME_LABEL} {higher_trend}"
 
 
 def score_price_frame(data):
@@ -2048,12 +2060,12 @@ def component_confidence_from_news(news_sentiment_context, signal_direction):
     )
 
 
-def component_confidence_from_mtf(mtf_adjustment, short_trend, higher_trend, signal_direction):
+def component_confidence_from_mtf(mtf_adjustment, short_trend, higher_trend, signal_direction, momentum_trend="Unknown"):
     if not BOT_MULTI_TIMEFRAME_ENABLED:
         return BOT_CONFIDENCE_BASELINE
 
     known_count = len([
-        trend for trend in [short_trend, higher_trend]
+        trend for trend in [short_trend, momentum_trend, higher_trend]
         if is_known_trend(trend)
     ])
 
@@ -2098,6 +2110,7 @@ def calculate_confidence_breakdown(
     rsi_value=50,
     macd_value=0,
     macd_signal_value=0,
+    momentum_trend="Unknown",
 ):
     legacy_signal, legacy_confidence = calculate_signal_and_confidence(final_score)
     signal_direction = signal_direction_from_score(final_score)
@@ -2130,7 +2143,8 @@ def calculate_confidence_breakdown(
         mtf_adjustment,
         short_trend,
         higher_trend,
-        signal_direction
+        signal_direction,
+        momentum_trend
     )
     volume_confidence = component_confidence_from_volume(volume_context, signal_direction)
     market_confidence = component_confidence_from_market(
@@ -2208,7 +2222,7 @@ def calculate_confidence_breakdown(
         "sr_confidence": bounded_percent(sr_confidence),
         "news_confidence": bounded_percent(news_confidence),
         "risk_reward_confidence": bounded_percent(risk_reward_confidence),
-        "confidence_engine": "v30.6 Phase 3 Professional Weighted",
+        "confidence_engine": "v31.1 Quality Weighted",
         "confidence_notes": confidence_notes,
     }
 
@@ -2232,7 +2246,7 @@ def calculate_signal_and_confidence(final_score):
         return "SELL", bearish_confidence
 
     hold_confidence = 100 - abs(60 - final_score)
-    hold_confidence = max(0, min(hold_confidence, 100))
+    hold_confidence = max(0, min(hold_confidence, 50))
     return "HOLD", hold_confidence
 
 
@@ -2262,17 +2276,24 @@ def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentim
 
     short_score = 0
     short_trend = "Unknown"
+    momentum_score = 0
+    momentum_trend = "Unknown"
 
     if BOT_MULTI_TIMEFRAME_ENABLED and BOT_MTF_SHORT_ENABLED:
         if mtf_time_guard_allows(scan_started_at):
             short_data = get_price_data(ticker, BOT_SHORT_TIMEFRAME_PERIOD, BOT_SHORT_TIMEFRAME_INTERVAL)
             short_frame = score_price_frame(short_data)
-
             if short_frame:
                 short_score = short_frame["score"]
                 short_trend = short_frame["trend"]
+            momentum_data = get_price_data(ticker, BOT_MOMENTUM_TIMEFRAME_PERIOD, BOT_MOMENTUM_TIMEFRAME_INTERVAL)
+            momentum_frame = score_price_frame(momentum_data)
+            if momentum_frame:
+                momentum_score = momentum_frame["score"]
+                momentum_trend = momentum_frame["trend"]
         else:
             short_trend = "Skipped"
+            momentum_trend = "Skipped"
 
     weekly_score = 0
     weekly_trend = "Unknown"
@@ -2288,11 +2309,19 @@ def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentim
         else:
             weekly_trend = "Skipped"
 
+    # v31.1 MTF stack: 1D trend + 4H trend + 1H momentum.
+    combined_short_trend = short_trend
+    if momentum_trend in ["Bullish", "Bearish"] and short_trend in ["Bullish", "Bearish"] and momentum_trend != short_trend:
+        combined_short_trend = "Neutral"
+    elif momentum_trend in ["Bullish", "Bearish"] and short_trend not in ["Bullish", "Bearish"]:
+        combined_short_trend = momentum_trend
+
     mtf_adjustment, mtf_alignment = calculate_mtf_adjustment(
         daily_trend,
-        short_trend,
+        combined_short_trend,
         weekly_trend
     )
+    mtf_alignment = f"1D {daily_trend} | 4H {short_trend} | 1H {momentum_trend} | Higher {weekly_trend} | {mtf_alignment}"
 
     volume_context = calculate_volume_context(daily_data, daily_trend)
     volume_adjustment = volume_context["volume_score_adj"]
@@ -2335,7 +2364,8 @@ def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentim
         trade_context,
         rsi_value,
         macd_value,
-        macd_signal_value
+        macd_signal_value,
+        momentum_trend
     )
 
     confidence_percent = confidence_context["confidence_percent"]
@@ -2419,6 +2449,8 @@ def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentim
         "Technical Score": technical_score,
         "Short TF Score": short_score,
         "Short TF Trend": short_trend,
+        "Momentum TF Score": momentum_score,
+        "Momentum TF Trend": momentum_trend,
         "Daily Trend": daily_trend,
         "Higher TF Score": weekly_score,
         "Higher TF Trend": weekly_trend,
@@ -2614,6 +2646,93 @@ def calculate_signal_quality_score(row):
     except Exception:
         return safe_float(row.get("AI Confidence %", 0), 0)
 
+
+def mtf_alignment_passes(row):
+    if not BOT_MTF_ALIGNMENT_REQUIRED:
+        return True, "MTF alignment filter disabled"
+
+    signal = str(row.get("AI Signal", ""))
+    if not is_directional_signal(signal):
+        return True, "non-directional signal"
+
+    confidence = safe_float(row.get("AI Confidence %", 0), 0)
+    if confidence < BOT_MTF_ALIGNMENT_MIN_CONFIDENCE:
+        return True, "below MTF alignment confidence gate"
+
+    direction = "Bullish" if "BUY" in signal else "Bearish"
+    trends = [
+        row.get("Daily Trend", "Unknown"),
+        row.get("Short TF Trend", "Unknown"),
+        row.get("Momentum TF Trend", "Unknown"),
+        row.get("Higher TF Trend", "Unknown"),
+    ]
+    labels = ["1D", BOT_SHORT_TIMEFRAME_INTERVAL.upper(), BOT_MOMENTUM_TIMEFRAME_INTERVAL.upper(), BOT_HIGHER_TIMEFRAME_LABEL]
+
+    if BOT_MTF_ALIGNMENT_ALLOW_NEUTRAL:
+        supportive = len([trend for trend in trends if trend in [direction, "Neutral"]])
+        conflicting = len([trend for trend in trends if trend in ["Bullish", "Bearish"] and trend != direction])
+    else:
+        supportive = len([trend for trend in trends if trend == direction])
+        conflicting = len([trend for trend in trends if trend != direction])
+
+    minimum_matches = max(BOT_MTF_ALIGNMENT_MIN_MATCHES, 3)
+    known_directional = len([trend for trend in trends if trend in ["Bullish", "Bearish", "Neutral"]])
+    alignment_text = "/".join(f"{label}:{trend}" for label, trend in zip(labels, trends))
+
+    if known_directional < minimum_matches:
+        return False, f"blocked: not enough MTF data ({alignment_text})"
+
+    if supportive >= minimum_matches and conflicting == 0:
+        return True, f"MTF aligned: {alignment_text}"
+
+    return False, f"blocked: MTF not aligned ({alignment_text})"
+
+def backtest_quality_for_ticker(ticker):
+    try:
+        if not BOT_BACKTEST_QUALITY_FILTER_ENABLED:
+            return {"approved": True, "notes": "backtest quality filter disabled", "pf": 0, "wr": 0, "signals": 0}
+        result = backtest_ticker(ticker)
+        pf = safe_float(result.get("Profit Factor", 0), 0)
+        wr = safe_float(result.get("Win Rate %", 0), 0)
+        signals = int(safe_float(result.get("Signals Tested", 0), 0))
+        if signals < BOT_BACKTEST_QUALITY_MIN_SIGNALS:
+            return {"approved": False, "notes": f"blocked: low backtest sample ({signals})", "pf": pf, "wr": wr, "signals": signals}
+        if pf < BOT_BACKTEST_QUALITY_MIN_PF or wr < BOT_BACKTEST_QUALITY_MIN_WIN_RATE:
+            return {"approved": False, "notes": f"blocked: weak backtest PF {pf} WR {wr}%", "pf": pf, "wr": wr, "signals": signals}
+        if pf < BOT_BACKTEST_QUALITY_STRONG_PF:
+            return {"approved": True, "notes": f"watch: modest backtest PF {pf} WR {wr}%", "pf": pf, "wr": wr, "signals": signals, "penalty": BOT_BACKTEST_QUALITY_CONFIDENCE_PENALTY}
+        return {"approved": True, "notes": f"backtest passed PF {pf} WR {wr}%", "pf": pf, "wr": wr, "signals": signals, "penalty": 0}
+    except Exception as error:
+        log(f"Backtest quality filter error for {ticker}: {error}")
+        return {"approved": True, "notes": "backtest quality unavailable; allowed", "pf": 0, "wr": 0, "signals": 0, "penalty": 0}
+
+
+def apply_quality_filters(candidate_rows):
+    filtered = []
+    for row in candidate_rows:
+        mtf_ok, mtf_note = mtf_alignment_passes(row)
+        notes = [str(row.get("Exposure Notes", "not evaluated")), mtf_note]
+        if not mtf_ok:
+            row["Alert Approved"] = "NO"
+            row["Exposure Notes"] = " | ".join(notes)
+            continue
+        bt = backtest_quality_for_ticker(row.get("Ticker", ""))
+        row["Backtest Quality PF"] = bt.get("pf", 0)
+        row["Backtest Quality WR"] = bt.get("wr", 0)
+        row["Backtest Quality Signals"] = bt.get("signals", 0)
+        notes.append(bt.get("notes", "backtest quality checked"))
+        if not bt.get("approved", True):
+            row["Alert Approved"] = "NO"
+            row["Exposure Notes"] = " | ".join(notes)
+            continue
+        penalty = safe_float(bt.get("penalty", 0), 0)
+        if penalty > 0:
+            row["AI Confidence %"] = round(max(0, safe_float(row.get("AI Confidence %", 0), 0) - penalty), 2)
+            row["Signal Quality Score"] = calculate_signal_quality_score(row)
+            notes.append(f"confidence reduced {penalty} by backtest filter")
+        row["Exposure Notes"] = " | ".join(notes)
+        filtered.append(row)
+    return filtered
 
 def assign_signal_rankings(rows):
     if not rows:
@@ -3438,7 +3557,7 @@ def send_startup_message():
         {"name": "Scan Interval", "value": f"{SCAN_INTERVAL_MINUTES} minutes", "inline": True},
         {"name": "Minimum Confidence", "value": f"{MIN_CONFIDENCE}%", "inline": True},
         {"name": "Multi-Timeframe", "value": "On" if BOT_MULTI_TIMEFRAME_ENABLED else "Off", "inline": True},
-        {"name": "MTF Frames", "value": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}", "inline": True},
+        {"name": "MTF Frames", "value": f"{BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_MOMENTUM_TIMEFRAME_INTERVAL.upper()} / {BOT_HIGHER_TIMEFRAME_LABEL}", "inline": True},
         {"name": "Volume Spike Detection", "value": "On" if BOT_VOLUME_SPIKE_ENABLED else "Off", "inline": True},
         {"name": "Market Trend Filter", "value": "On" if BOT_MARKET_TREND_FILTER_ENABLED else "Off", "inline": True},
         {"name": "Confidence Engine", "value": "On" if BOT_CONFIDENCE_ENGINE_ENABLED else "Legacy", "inline": True},
@@ -3506,7 +3625,7 @@ def send_signal_alert(row):
     )
     technical_text = (
         f"RSI: {row.get('RSI', 'N/A')} | MACD: {row.get('MACD', 'N/A')}\n"
-        f"Daily: {row.get('Daily Trend', 'N/A')} | Short: {row.get('Short TF Trend', 'N/A')} | Higher: {row.get('Higher TF Trend', 'N/A')}\n"
+        f"Daily: {row.get('Daily Trend', 'N/A')} | 4H: {row.get('Short TF Trend', 'N/A')} | 1H: {row.get('Momentum TF Trend', 'N/A')} | Higher: {row.get('Higher TF Trend', 'N/A')}\n"
         f"Volume: {row.get('Volume Signal', 'N/A')} ({row.get('Relative Volume', 'N/A')}x)\n"
         f"S/R: {row.get('S/R Signal', 'N/A')} | S {row.get('Support Level', 'N/A')} / R {row.get('Resistance Level', 'N/A')}"
     )
@@ -3571,6 +3690,7 @@ def build_summary_fields(rows, market):
         rvol = compact_number(row.get("Relative Volume", 0), 2)
         regime = str(row.get("Advanced Market Regime", row.get("Market Regime", "N/A"))).replace("/Constructive", "").replace("/Defensive", "")
         short_tf = short_trend_label(row.get("Short TF Trend", "N/A"))
+        momentum_tf = short_trend_label(row.get("Momentum TF Trend", "N/A"))
         higher_tf = short_trend_label(row.get("Higher TF Trend", "N/A"))
         sr_signal = str(row.get("S/R Signal", "N/A")).replace("Near ", "Near ")
         news = str(row.get("News Sentiment", "N/A"))
@@ -3578,7 +3698,7 @@ def build_summary_fields(rows, market):
         return (
             f"{rank_text(row)} {row.get('Ticker', '')} | {confidence}% {grade} | "
             f"QS {quality} | RSI {rsi} | RVOL {rvol}x | "
-            f"{regime} | {sr_signal} | News {news} | MTF {short_tf}/{higher_tf}"
+            f"{regime} | {sr_signal} | News {news} | MTF {short_tf}/{momentum_tf}/{higher_tf}"
         )
 
     buy_lines = []
@@ -4127,7 +4247,7 @@ LIVE_SCANNER_HEADERS = [
     "Volume Confidence", "Market Confidence", "S/R Confidence", "News Confidence", "Risk/Reward Confidence",
     "Confidence Grade", "Confidence Engine", "Confidence Notes", "Legacy Confidence %",
     "RSI", "MACD", "MACD Signal", "Technical Score",
-    "Short TF Score", "Short TF Trend", "Daily Trend", "Higher TF Score", "Higher TF Trend",
+    "Short TF Score", "Short TF Trend", "Momentum TF Score", "Momentum TF Trend", "Daily Trend", "Higher TF Score", "Higher TF Trend",
     "MTF Alignment", "MTF Score Adj", "Final Score", "Confidence %", "Signal"
 ]
 
@@ -4147,7 +4267,7 @@ TRADE_ALERT_HEADERS = [
     "Volume Confidence", "Market Confidence", "S/R Confidence", "News Confidence", "Risk/Reward Confidence",
     "Confidence Grade", "Confidence Engine", "Confidence Notes", "Legacy Confidence %",
     "Signal", "Confidence %", "RSI", "MACD",
-    "Short TF Trend", "Daily Trend", "Higher TF Trend", "MTF Alignment", "MTF Score Adj",
+    "Short TF Trend", "Momentum TF Trend", "Daily Trend", "Higher TF Trend", "MTF Alignment", "MTF Score Adj",
     "Final Score", "Alert Sent"
 ]
 
@@ -4459,6 +4579,9 @@ def update_system_status(spreadsheet, scanned_count, candidates, sent_count, ski
             ["Multi-Timeframe Enabled", str(BOT_MULTI_TIMEFRAME_ENABLED)],
             ["Short Timeframe", f"{BOT_SHORT_TIMEFRAME_PERIOD} {BOT_SHORT_TIMEFRAME_INTERVAL}"],
             ["Higher Timeframe", BOT_HIGHER_TIMEFRAME_LABEL],
+            ["MTF Alignment Required", str(BOT_MTF_ALIGNMENT_REQUIRED)],
+            ["MTF Alignment Min Matches", BOT_MTF_ALIGNMENT_MIN_MATCHES],
+            ["Momentum Timeframe", f"{BOT_MOMENTUM_TIMEFRAME_PERIOD} {BOT_MOMENTUM_TIMEFRAME_INTERVAL}"],
             ["MTF Max Adjustment", BOT_MTF_MAX_ADJUSTMENT],
             ["MTF Short Enabled", str(BOT_MTF_SHORT_ENABLED)],
             ["MTF Higher Enabled", str(BOT_MTF_HIGHER_ENABLED)],
@@ -4502,6 +4625,9 @@ def update_system_status(spreadsheet, scanned_count, candidates, sent_count, ski
             ["Backtesting Lookback Days", BOT_BACKTEST_LOOKBACK_DAYS],
             ["Backtesting Min Confidence", BOT_BACKTEST_MIN_CONFIDENCE],
             ["Backtesting Max Tickers", BOT_BACKTEST_MAX_TICKERS],
+            ["Backtest Quality Filter Enabled", str(BOT_BACKTEST_QUALITY_FILTER_ENABLED)],
+            ["Backtest Quality Min PF", BOT_BACKTEST_QUALITY_MIN_PF],
+            ["Backtest Quality Min Win Rate", BOT_BACKTEST_QUALITY_MIN_WIN_RATE],
             ["Market Regime Detection Enabled", str(BOT_MARKET_REGIME_DETECTION_ENABLED)],
             ["Signal Ranking Enabled", str(BOT_SIGNAL_RANKING_ENABLED)],
             ["Max Alerts Per Scan", BOT_MAX_ALERTS_PER_SCAN],
@@ -4761,6 +4887,8 @@ def row_from_scan(row):
         row.get("Technical Score", ""),
         row.get("Short TF Score", ""),
         row.get("Short TF Trend", ""),
+        row.get("Momentum TF Score", ""),
+        row.get("Momentum TF Trend", ""),
         row.get("Daily Trend", ""),
         row.get("Higher TF Score", ""),
         row.get("Higher TF Trend", ""),
@@ -4852,6 +4980,7 @@ def row_from_alert(row, alert_sent):
         row.get("RSI", ""),
         row.get("MACD", ""),
         row.get("Short TF Trend", ""),
+        row.get("Momentum TF Trend", ""),
         row.get("Daily Trend", ""),
         row.get("Higher TF Trend", ""),
         row.get("MTF Alignment", ""),
@@ -5255,7 +5384,7 @@ def send_heartbeat(scanned_count=0, ticker_errors=0, post_scan_errors=0):
         },
         {
             "name": "MTF Frames",
-            "value": f"{BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}",
+            "value": f"{BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_MOMENTUM_TIMEFRAME_INTERVAL.upper()} / {BOT_HIGHER_TIMEFRAME_LABEL}",
             "inline": True
         },
         {
@@ -5400,7 +5529,8 @@ def run_scan():
         and safe_float(row.get("AI Confidence %", 0), 0) >= MIN_CONFIDENCE
     ]
     candidates = len(raw_candidates)
-    approved_candidates = apply_exposure_controls(raw_candidates)
+    quality_candidates = apply_quality_filters(raw_candidates)
+    approved_candidates = apply_exposure_controls(quality_candidates)
 
     for row in approved_candidates:
         signal = row.get("AI Signal", "")
@@ -5549,8 +5679,8 @@ def main():
     log(f"Strict config: {BOT_STRICT_CONFIG}")
     log(f"Market data scan enabled: {BOT_SCAN_MARKET_DATA_ENABLED}")
     log(f"Multi-timeframe enabled: {BOT_MULTI_TIMEFRAME_ENABLED}")
-    log(f"MTF frames: {BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_HIGHER_TIMEFRAME_LABEL}")
-    log(f"MTF enabled flags: short={BOT_MTF_SHORT_ENABLED}, higher={BOT_MTF_HIGHER_ENABLED}")
+    log(f"MTF frames: {BOT_PRIMARY_TIMEFRAME_LABEL} / {BOT_SHORT_TIMEFRAME_INTERVAL.upper()} / {BOT_MOMENTUM_TIMEFRAME_INTERVAL.upper()} / {BOT_HIGHER_TIMEFRAME_LABEL}")
+    log(f"MTF enabled flags: short={BOT_MTF_SHORT_ENABLED}, momentum=True, higher={BOT_MTF_HIGHER_ENABLED}")
     log(f"MTF points: short={BOT_MTF_SHORT_CONFIRM_POINTS}, higher={BOT_MTF_HIGHER_CONFIRM_POINTS}, max={BOT_MTF_MAX_ADJUSTMENT}")
     log(f"MTF minimum rows: {BOT_MTF_REQUIRE_MIN_ROWS}")
     log(f"MTF time guard seconds: {BOT_MTF_TIME_GUARD_SECONDS}")
