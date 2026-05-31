@@ -82,17 +82,13 @@ SIGNAL_LOG_FILE = os.path.join(DATA_DIR, "bot_sent_signal_log.txt")  # shared wi
 NEWS_SCHEDULE_FILE = os.path.join(DATA_DIR, "news_schedule_log.txt")
 SIGNAL_SCHEDULE_FILE = os.path.join(DATA_DIR, "signal_schedule_log.txt")
 ALERT_HISTORY_FILE = os.path.join(DATA_DIR, "alert_history.csv")
-SIGNAL_HISTORY_FILE = os.path.join(DATA_DIR, "signal_history.csv")
 BOT_STATUS_FILE = os.path.join(DATA_DIR, "bot_last_status.json")
-
-PAPER_TRADES_FILE = os.path.join(DATA_DIR, "paper_trades.csv")
-PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 
 # ======================================================
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32_paper_trade_tracking"
+APP_VERSION = "v30.6_bot_compatibility_final_triple_deep_dive"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -129,6 +125,17 @@ DASHBOARD_YFINANCE_NEWS_ENABLED = get_env_bool("DASHBOARD_YFINANCE_NEWS_ENABLED"
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
+
+# v32.3 Paper Trade Quality dashboard settings.
+# These mirror the v32.2 bot variables so the dashboard can show the active guardrails.
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10)
+BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED = get_env_bool("BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED", True)
+BOT_PAPER_TRADE_MIN_BACKTEST_PF = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_PF", 1.0)
+BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE", 50)
+BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS = get_env_int("BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS", 20)
+BOT_PAPER_TRADE_AVOID_TICKERS = get_env_list("BOT_PAPER_TRADE_AVOID_TICKERS", [])
+BOT_SEND_PAPER_TRADE_SUMMARY = get_env_bool("BOT_SEND_PAPER_TRADE_SUMMARY", True)
+BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS = get_env_float("BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS", 6)
 
 
 def now_dt():
@@ -480,65 +487,97 @@ def load_csv_records(file_path):
 def save_records(file_path, records):
     pd.DataFrame(records).to_csv(file_path, index=False)
 
-def load_paper_trades_df():
-    try:
-        if os.path.exists(PAPER_TRADES_FILE) and os.path.getsize(PAPER_TRADES_FILE) > 0:
-            return pd.read_csv(PAPER_TRADES_FILE)
-    except Exception as error:
-        st.warning(f"Could not load paper_trades.csv: {error}")
-    return pd.DataFrame()
 
 
-def load_paper_equity_df():
-    try:
-        if os.path.exists(PAPER_EQUITY_FILE) and os.path.getsize(PAPER_EQUITY_FILE) > 0:
-            return pd.read_csv(PAPER_EQUITY_FILE)
-    except Exception as error:
-        st.warning(f"Could not load paper_trade_equity_curve.csv: {error}")
-    return pd.DataFrame()
+
+def normalize_paper_trade_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    clean_df = df.copy()
+    numeric_columns = [
+        "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
+        "position_size", "position_value", "pnl_percent", "pnl_dollars",
+        "risk_reward_2", "signal_rank", "quality_score"
+    ]
+    for column in numeric_columns:
+        if column in clean_df.columns:
+            clean_df[column] = pd.to_numeric(clean_df[column], errors="coerce")
+    for column in ["ticker", "market", "signal", "status", "result", "notes"]:
+        if column in clean_df.columns:
+            clean_df[column] = clean_df[column].astype(str)
+    return clean_df
 
 
-def paper_trade_metrics(trades_df):
-    if trades_df.empty:
+def filter_paper_trades(df, statuses=None, market="ALL", ticker_search=""):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    filtered = df.copy()
+    if statuses and "status" in filtered.columns:
+        filtered = filtered[filtered["status"].astype(str).isin(statuses)]
+    if market != "ALL" and "market" in filtered.columns:
+        filtered = filtered[filtered["market"].astype(str) == market]
+    if ticker_search and "ticker" in filtered.columns:
+        filtered = filtered[filtered["ticker"].astype(str).str.contains(ticker_search.upper(), na=False)]
+    return filtered
+
+
+def quality_badge(row):
+    quality = float(row.get("quality_score", 0) or 0)
+    rr = float(row.get("risk_reward_2", 0) or 0)
+    confidence = float(row.get("confidence", 0) or 0)
+    if quality >= 90 and rr >= 2 and confidence >= 80:
+        return "Elite"
+    if quality >= 75 and rr >= 1.5:
+        return "Strong"
+    if quality >= 60:
+        return "Watch"
+    return "Weak"
+
+
+def paper_quality_summary(df):
+    if df is None or df.empty:
         return {
-            "total_closed": 0,
-            "win_rate": 0,
-            "profit_factor": 0,
-            "total_pnl": 0,
-            "best_ticker": "N/A",
-            "worst_ticker": "N/A",
-            "average_winner": 0,
-            "average_loser": 0,
+            "total": 0, "open": 0, "closed": 0, "blocked_like": 0,
+            "avg_quality": 0, "avg_rr": 0, "avg_confidence": 0,
+            "best_setup": "N/A", "weakest_setup": "N/A",
+            "avoid_open_count": 0, "max_open_used_pct": 0,
         }
-    closed = trades_df[trades_df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])] if "status" in trades_df.columns else pd.DataFrame()
-    if closed.empty:
-        return {
-            "total_closed": 0,
-            "win_rate": 0,
-            "profit_factor": 0,
-            "total_pnl": 0,
-            "best_ticker": "N/A",
-            "worst_ticker": "N/A",
-            "average_winner": 0,
-            "average_loser": 0,
-        }
-    pnl = pd.to_numeric(closed.get("pnl_dollars", 0), errors="coerce").fillna(0)
-    wins = pnl[pnl > 0]
-    losses = pnl[pnl < 0]
-    gross_wins = wins.sum()
-    gross_losses = abs(losses.sum())
-    by_ticker = closed.assign(_pnl=pnl).groupby("ticker")["_pnl"].sum() if "ticker" in closed.columns else pd.Series(dtype=float)
+    trades = normalize_paper_trade_df(df)
+    open_df = filter_paper_trades(trades, ["OPEN", "TP1_HIT"])
+    closed_df = filter_paper_trades(trades, ["TP2_HIT", "STOPPED", "CLOSED"])
+    blocked_like = trades[
+        trades.get("status", pd.Series(dtype=str)).astype(str).str.contains("BLOCK|SKIP|REJECT|AVOID", case=False, na=False)
+        | trades.get("notes", pd.Series(dtype=str)).astype(str).str.contains("blocked|avoid|weak", case=False, na=False)
+    ] if not trades.empty else pd.DataFrame()
+    avoid_set = set(BOT_PAPER_TRADE_AVOID_TICKERS)
+    avoid_open = open_df[open_df["ticker"].astype(str).isin(avoid_set)] if not open_df.empty and avoid_set else pd.DataFrame()
+    ranked = trades.copy()
+    if "quality_score" in ranked.columns:
+        ranked = ranked.sort_values(by="quality_score", ascending=False)
+    best = ranked.iloc[0] if not ranked.empty else {}
+    weakest = ranked.iloc[-1] if not ranked.empty else {}
+    max_open_used_pct = (len(open_df) / BOT_PAPER_TRADE_MAX_OPEN_TOTAL) * 100 if BOT_PAPER_TRADE_MAX_OPEN_TOTAL else 0
     return {
-        "total_closed": len(closed),
-        "win_rate": round((len(wins) / len(closed)) * 100, 2) if len(closed) else 0,
-        "profit_factor": round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0),
-        "total_pnl": round(pnl.sum(), 2),
-        "best_ticker": by_ticker.idxmax() if not by_ticker.empty else "N/A",
-        "worst_ticker": by_ticker.idxmin() if not by_ticker.empty else "N/A",
-        "average_winner": round(wins.mean(), 2) if not wins.empty else 0,
-        "average_loser": round(losses.mean(), 2) if not losses.empty else 0,
+        "total": len(trades),
+        "open": len(open_df),
+        "closed": len(closed_df),
+        "blocked_like": len(blocked_like),
+        "avg_quality": round(pd.to_numeric(trades.get("quality_score", 0), errors="coerce").fillna(0).mean(), 2),
+        "avg_rr": round(pd.to_numeric(trades.get("risk_reward_2", 0), errors="coerce").fillna(0).mean(), 2),
+        "avg_confidence": round(pd.to_numeric(trades.get("confidence", 0), errors="coerce").fillna(0).mean(), 2),
+        "best_setup": f"{best.get('ticker', 'N/A')} | QS {best.get('quality_score', 0)} | R/R {best.get('risk_reward_2', 0)}" if len(trades) else "N/A",
+        "weakest_setup": f"{weakest.get('ticker', 'N/A')} | QS {weakest.get('quality_score', 0)} | R/R {weakest.get('risk_reward_2', 0)}" if len(trades) else "N/A",
+        "avoid_open_count": len(avoid_open),
+        "max_open_used_pct": round(max_open_used_pct, 2),
     }
 
+
+def add_quality_badges(df):
+    if df is None or df.empty:
+        return df
+    out = normalize_paper_trade_df(df)
+    out["quality_badge"] = out.apply(quality_badge, axis=1)
+    return out
 
 def load_bot_status():
     try:
@@ -1156,9 +1195,7 @@ def score_ticker(ticker):
         confidence_percent = bearish_confidence
     else:
         ai_signal = "HOLD"
-        # HOLD is neutral, so keep the displayed confidence realistic instead of showing 90-100%.
         confidence_percent = 100 - abs(60 - final_score)
-        confidence_percent = min(confidence_percent, 50)
 
     confidence_percent = max(0, min(confidence_percent, 100))
 
@@ -1297,56 +1334,6 @@ def create_ai_summary(row):
         f"The AI signal is {row['AI Signal']} with {row['AI Confidence %']}% confidence. "
         f"RSI is {row['RSI']}, MACD is {row['MACD']}, and the final score is {row['Final Score']}."
     )
-
-def confidence_display_text(row):
-    signal = str(row.get("AI Signal", ""))
-    confidence = float(row.get("AI Confidence %", 0) or 0)
-    level = row.get("Confidence Level", "")
-    if signal == "HOLD":
-        level = "NEUTRAL"
-    return f"{confidence:.2f}% ({level})" if level else f"{confidence:.2f}%"
-
-
-def clean_watchlist_for_display(df):
-    if df is None or df.empty:
-        return df
-    display_df = df.copy()
-    display_df["Confidence Display"] = display_df.apply(confidence_display_text, axis=1)
-    preferred = [
-        "Ticker", "Market", "Price", "Daily Change %", "AI Signal", "Confidence Display",
-        "RSI", "MACD", "Final Score", "Technical Score", "News Score"
-    ]
-    existing = [column for column in preferred if column in display_df.columns]
-    remaining = [column for column in display_df.columns if column not in existing and column != "AI Confidence %"]
-    return display_df[existing + remaining]
-
-
-def load_signal_history():
-    try:
-        if os.path.exists(SIGNAL_HISTORY_FILE) and os.path.getsize(SIGNAL_HISTORY_FILE) > 0:
-            return pd.read_csv(SIGNAL_HISTORY_FILE)
-    except Exception as error:
-        print("Signal history load error:", error)
-    return pd.DataFrame()
-
-
-def log_signal_history_from_row(row, alert_status):
-    try:
-        history = load_signal_history()
-        record = {
-            "Time": now_text(include_seconds=True),
-            "Ticker": row.get("Ticker", ""),
-            "Market": row.get("Market", ""),
-            "Signal": row.get("AI Signal", ""),
-            "Confidence %": row.get("AI Confidence %", 0),
-            "Price": row.get("Price", 0),
-            "Final Score": row.get("Final Score", 0),
-            "Alert Status": alert_status,
-        }
-        history = pd.concat([history, pd.DataFrame([record])], ignore_index=True).tail(1000)
-        history.to_csv(SIGNAL_HISTORY_FILE, index=False)
-    except Exception as error:
-        print("Signal history save error:", error)
 
 
 def create_price_chart(ticker, data):
@@ -1584,10 +1571,8 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
-    "Open Trades",
-    "Closed Trades",
     "Crypto",
     "Stocks",
     "AI Scanner",
@@ -1811,93 +1796,6 @@ with account_tab:
                 col3.metric("Total P/L", f"${total_profit:.2f}")
                 col4.metric("Average P/L", f"${average_profit:.2f}")
 
-
-# ======================================================
-# v32 OPEN TRADES TAB
-# ======================================================
-
-with open_trades_tab:
-    st.header("v32 Open Paper Trades")
-    paper_trades_df = load_paper_trades_df()
-
-    if paper_trades_df.empty:
-        st.info("No v32 paper trades have been opened yet. New bot alerts will populate paper_trades.csv automatically.")
-    else:
-        open_df = paper_trades_df[paper_trades_df["status"].astype(str).isin(["OPEN", "TP1_HIT"])] if "status" in paper_trades_df.columns else pd.DataFrame()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Open Trades", len(open_df))
-        col2.metric("TP1 Hit / Still Open", len(open_df[open_df["status"].astype(str) == "TP1_HIT"]) if not open_df.empty else 0)
-        unrealized_pnl = pd.to_numeric(open_df.get("pnl_dollars", 0), errors="coerce").fillna(0).sum() if not open_df.empty else 0
-        col3.metric("Open P/L", f"${unrealized_pnl:.2f}")
-
-        if open_df.empty:
-            st.info("No trades are currently open.")
-        else:
-            display_cols = [
-                "ticker", "market", "signal", "entry_price", "current_price", "stop_loss",
-                "tp1", "tp2", "confidence", "position_size", "status", "date_opened",
-                "last_updated", "pnl_percent", "pnl_dollars", "risk_reward_2", "signal_rank", "quality_score"
-            ]
-            display_cols = [col for col in display_cols if col in open_df.columns]
-            st.dataframe(open_df[display_cols], width="stretch")
-            st.download_button(
-                label="Download Open Trades CSV",
-                data=open_df.to_csv(index=False),
-                file_name="open_paper_trades.csv",
-                mime="text/csv"
-            )
-
-# ======================================================
-# v32 CLOSED TRADES TAB
-# ======================================================
-
-with closed_trades_tab:
-    st.header("v32 Closed Paper Trades & Performance")
-    paper_trades_df = load_paper_trades_df()
-    equity_curve_df = load_paper_equity_df()
-
-    if paper_trades_df.empty:
-        st.info("No closed paper trades yet. Let the bot open and monitor trades first.")
-    else:
-        closed_df = paper_trades_df[paper_trades_df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])] if "status" in paper_trades_df.columns else pd.DataFrame()
-        metrics = paper_trade_metrics(paper_trades_df)
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Closed Trades", metrics["total_closed"])
-        col2.metric("Win Rate", f"{metrics['win_rate']}%")
-        col3.metric("Profit Factor", metrics["profit_factor"])
-        col4.metric("Total P/L", f"${metrics['total_pnl']:.2f}")
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Avg Winner", f"${metrics['average_winner']:.2f}")
-        col2.metric("Avg Loser", f"${metrics['average_loser']:.2f}")
-        col3.metric("Best Ticker", metrics["best_ticker"])
-        col4.metric("Worst Ticker", metrics["worst_ticker"])
-
-        st.subheader("Equity Curve")
-        if not equity_curve_df.empty and "equity" in equity_curve_df.columns:
-            st.line_chart(equity_curve_df.set_index("timestamp")["equity"] if "timestamp" in equity_curve_df.columns else equity_curve_df["equity"])
-        else:
-            st.info("Equity curve will appear after the bot monitor records paper trade outcomes.")
-
-        st.subheader("Closed Trades")
-        if closed_df.empty:
-            st.info("No closed trades yet.")
-        else:
-            display_cols = [
-                "ticker", "market", "signal", "result", "entry_price", "current_price",
-                "pnl_percent", "pnl_dollars", "confidence", "date_opened", "date_closed",
-                "risk_reward_2", "signal_rank", "quality_score"
-            ]
-            display_cols = [col for col in display_cols if col in closed_df.columns]
-            st.dataframe(closed_df[display_cols], width="stretch")
-            st.download_button(
-                label="Download Closed Trades CSV",
-                data=closed_df.to_csv(index=False),
-                file_name="closed_paper_trades.csv",
-                mime="text/csv"
-            )
-
 # ======================================================
 # CRYPTO TAB
 # ======================================================
@@ -1915,11 +1813,11 @@ with crypto_tab:
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Ticker", top_crypto["Ticker"])
-        col2.metric("AI Confidence", confidence_display_text(top_crypto))
+        col2.metric("AI Confidence", f"{top_crypto['AI Confidence %']:.2f}%")
         col3.metric("Signal", top_crypto["AI Signal"])
 
         st.write(create_ai_summary(top_crypto))
-        st.dataframe(clean_watchlist_for_display(crypto_watchlist_df), width="stretch")
+        st.dataframe(crypto_watchlist_df, width="stretch")
 
         selected_crypto = st.selectbox("Choose crypto", CRYPTO_TICKERS, key="selected_crypto")
         crypto_data = get_price_data(selected_crypto, "6mo")
@@ -1955,11 +1853,11 @@ with stock_tab:
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Ticker", top_stock["Ticker"])
-        col2.metric("AI Confidence", confidence_display_text(top_stock))
+        col2.metric("AI Confidence", f"{top_stock['AI Confidence %']:.2f}%")
         col3.metric("Signal", top_stock["AI Signal"])
 
         st.write(create_ai_summary(top_stock))
-        st.dataframe(clean_watchlist_for_display(stock_watchlist_df), width="stretch")
+        st.dataframe(stock_watchlist_df, width="stretch")
 
         selected_stock = st.selectbox("Choose stock", STOCK_TICKERS, key="selected_stock")
         stock_data = get_price_data(selected_stock, "6mo")
@@ -2003,7 +1901,7 @@ with scanner_tab:
         st.subheader("Top AI Pick")
         col1, col2, col3 = st.columns(3)
         col1.metric("Ticker", top_pick["Ticker"])
-        col2.metric("AI Confidence", confidence_display_text(top_pick))
+        col2.metric("AI Confidence", f"{top_pick['AI Confidence %']:.2f}%")
         col3.metric("Signal", top_pick["AI Signal"])
 
         st.subheader("AI Market Sentiment")
@@ -2020,13 +1918,13 @@ with scanner_tab:
 
         with scanner_tab1:
             st.dataframe(
-                clean_watchlist_for_display(watchlist_df[watchlist_df["Market"] == "Crypto"]),
+                watchlist_df[watchlist_df["Market"] == "Crypto"],
                 width="stretch"
             )
 
         with scanner_tab2:
             st.dataframe(
-                clean_watchlist_for_display(watchlist_df[watchlist_df["Market"] == "Stock"]),
+                watchlist_df[watchlist_df["Market"] == "Stock"],
                 width="stretch"
             )
 
@@ -2060,7 +1958,7 @@ with scanner_tab:
                     filtered_watchlist["Ticker"].str.contains(ticker_search.upper(), na=False)
                 ]
 
-            st.dataframe(clean_watchlist_for_display(filtered_watchlist), width="stretch")
+            st.dataframe(filtered_watchlist, width="stretch")
 
             filtered_buy_amount = st.number_input(
                 "Dollar amount per filtered ticker",
@@ -2198,30 +2096,16 @@ with scanner_tab:
             if signal_rows.empty:
                 st.info("No buy or sell alerts right now.")
             else:
-                sent_count = 0
-                skipped_count = 0
-
                 for _, row in signal_rows.iterrows():
                     alert_key = f"{row['Ticker']}_{row['AI Signal']}_{now_dt().strftime('%Y-%m-%d')}"
 
-                    if alert_key in st.session_state.sent_signal_alerts:
-                        skipped_count += 1
-                        log_signal_history_from_row(row, "DUPLICATE_SKIPPED")
-                        continue
+                    if alert_key not in st.session_state.sent_signal_alerts:
+                        sent = send_signal_embed(row)
+                        if sent:
+                            st.session_state.sent_signal_alerts.add(alert_key)
+                        save_sent_signals(st.session_state.sent_signal_alerts)
 
-                    sent = send_signal_embed(row)
-                    if sent:
-                        sent_count += 1
-                        st.session_state.sent_signal_alerts.add(alert_key)
-                        log_signal_history_from_row(row, "SENT")
-                    else:
-                        log_signal_history_from_row(row, "SEND_FAILED")
-                    save_sent_signals(st.session_state.sent_signal_alerts)
-
-                if sent_count:
-                    st.success(f"Signal alerts sent: {sent_count}. Duplicates skipped: {skipped_count}.")
-                else:
-                    st.info(f"No new signal alerts sent. Duplicates skipped: {skipped_count}.")
+                st.success("Signal alerts sent.")
 
 # ======================================================
 # TRADE NOTIFICATIONS TAB
@@ -2283,21 +2167,6 @@ with alerts_tab:
             save_alert_history(st.session_state.alert_history)
             st.success("Trade notifications cleared.")
             st.rerun()
-
-
-    st.subheader("Signal History")
-    signal_history_df = load_signal_history()
-
-    if signal_history_df.empty:
-        st.info("No signal history logged yet.")
-    else:
-        st.dataframe(signal_history_df.sort_index(ascending=False).head(250), width="stretch")
-        st.download_button(
-            label="Download Signal History CSV",
-            data=signal_history_df.to_csv(index=False),
-            file_name="signal_history.csv",
-            mime="text/csv"
-        )
 
 # ======================================================
 # BACKTESTING TAB
@@ -2492,7 +2361,7 @@ with bot_status_tab:
         with st.expander("Raw bot status JSON"):
             st.json(bot_status)
 
-    st.subheader("v30.6 Feature Compatibility Checklist")
+    st.subheader("v32.3 Feature Compatibility Checklist")
     checklist = pd.DataFrame([
         {"System": "Market Regime Detection", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
         {"System": "AI Signal Ranking", "Dashboard Visibility": "Bot Status / Google Sheets", "Source of Truth": "Background bot"},
@@ -2533,6 +2402,16 @@ with settings_tab:
     with col2:
         st.write("Stock Tickers")
         st.write(STOCK_TICKERS)
+
+    st.subheader("Paper Trade Quality Settings")
+    st.write("Quality filter enabled:", BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED)
+    st.write("Max total open paper trades:", BOT_PAPER_TRADE_MAX_OPEN_TOTAL)
+    st.write("Minimum backtest PF:", BOT_PAPER_TRADE_MIN_BACKTEST_PF)
+    st.write("Minimum backtest win rate:", f"{BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}%")
+    st.write("Minimum backtest signals:", BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS)
+    st.write("Avoid tickers:", BOT_PAPER_TRADE_AVOID_TICKERS if BOT_PAPER_TRADE_AVOID_TICKERS else "None")
+    st.write("Paper trade summary enabled:", BOT_SEND_PAPER_TRADE_SUMMARY)
+    st.write("Paper trade summary interval hours:", BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS)
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
