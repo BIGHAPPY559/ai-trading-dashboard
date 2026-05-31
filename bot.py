@@ -205,7 +205,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v31.1-quality-upgrade-10of10-triple-deep-dive"
+BOT_VERSION = "google-sheets-100-production-v32-paper-trade-tracking"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -223,6 +223,7 @@ SUMMARY_MAX_LINES_PER_SECTION = max(3, get_env_int("SUMMARY_MAX_LINES_PER_SECTIO
 BOT_DISCORD_ELITE_ALERTS_ENABLED = get_env_bool("BOT_DISCORD_ELITE_ALERTS_ENABLED", True)
 BOT_SEND_TOP_SIGNALS_SUMMARY = get_env_bool("BOT_SEND_TOP_SIGNALS_SUMMARY", True)
 BOT_TOP_SIGNALS_COUNT = max(3, get_env_int("BOT_TOP_SIGNALS_COUNT", 5))
+BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES = max(5, get_env_int("BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES", 60))
 BOT_SEND_DAILY_PERFORMANCE_REPORT = get_env_bool("BOT_SEND_DAILY_PERFORMANCE_REPORT", True)
 BOT_DAILY_REPORT_HOUR = max(0, min(get_env_int("BOT_DAILY_REPORT_HOUR", 18), 23))
 BOT_SEND_BACKTEST_SCORECARD = get_env_bool("BOT_SEND_BACKTEST_SCORECARD", True)
@@ -402,6 +403,8 @@ BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", os.getenv("RAILWAY_VOLUME_MOUNT_PATH", 
 BOT_DATA_DIR = BOT_DATA_DIR.strip() or "."
 
 SIGNAL_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_signal_log.txt")
+TOP_SIGNALS_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_top_signals_log.txt")
+SIGNAL_HISTORY_FILE = os.path.join(BOT_DATA_DIR, "signal_history.csv")
 SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_summary_log.txt")
 NEWS_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_news_log.txt")
 NEWS_SCHEDULE_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_news_schedule_log.txt")
@@ -420,6 +423,26 @@ YFINANCE_USE_HISTORY_FALLBACK = get_env_bool("YFINANCE_USE_HISTORY_FALLBACK", Fa
 BOT_SLEEP_CHUNK_SECONDS = max(5, get_env_int("BOT_SLEEP_CHUNK_SECONDS", 30))
 LOG_MAX_ITEMS = max(100, get_env_int("BOT_LOG_MAX_ITEMS", 5000))
 BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
+
+
+# ======================================================
+# v32 PAPER TRADE TRACKING SYSTEM
+# ======================================================
+
+BOT_PAPER_TRADING_ENABLED = get_env_bool("BOT_PAPER_TRADING_ENABLED", True)
+BOT_PAPER_TRADE_MONITOR_ENABLED = get_env_bool("BOT_PAPER_TRADE_MONITOR_ENABLED", True)
+BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER", 1))
+BOT_PAPER_TRADE_STARTING_EQUITY = max(100, get_env_float("BOT_PAPER_TRADE_STARTING_EQUITY", BOT_ACCOUNT_SIZE))
+PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
+PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
+
+PAPER_TRADE_HEADERS = [
+    "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
+    "stop_loss", "tp1", "tp2", "confidence", "position_size", "position_value",
+    "status", "result", "date_opened", "date_closed", "last_updated",
+    "pnl_percent", "pnl_dollars", "risk_reward_2", "signal_rank", "quality_score",
+    "notes", "tp1_notified", "tp2_notified", "stop_notified", "closed_notified",
+]
 
 GOOGLE_SHEETS_CLIENT = None
 GOOGLE_SPREADSHEET = None
@@ -936,9 +959,56 @@ def build_top_signal_lines(rows, limit=None):
         lines.append(f"#{row.get('Signal Rank', '-')} {row.get('Ticker', '')} | {row.get('AI Signal', '')} | {row.get('AI Confidence %', 0)}% | QS {row.get('Signal Quality Score', 0)} | R/R {row.get('Risk/Reward 2', 0)} | {row.get('Risk Mode', 'N/A')}")
     return lines
 
+def get_top_signals_key():
+    bucket_seconds = BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES * 60
+    bucket = int(time.time() // bucket_seconds)
+    return f"top_signals_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+
+def top_signals_already_sent():
+    return get_top_signals_key() in load_log(TOP_SIGNALS_LOG_FILE)
+
+
+def mark_top_signals_sent():
+    items = load_log(TOP_SIGNALS_LOG_FILE)
+    items.add(get_top_signals_key())
+    save_log(TOP_SIGNALS_LOG_FILE, items)
+
+
+def append_signal_history(row, alert_status):
+    try:
+        ensure_data_dir()
+        record = {
+            "Time": now_text(),
+            "Ticker": row.get("Ticker", ""),
+            "Market": row.get("Market", ""),
+            "Signal": row.get("AI Signal", ""),
+            "Confidence %": row.get("AI Confidence %", 0),
+            "Quality Score": row.get("Signal Quality Score", 0),
+            "Rank": row.get("Signal Rank", ""),
+            "Price": row.get("Price", 0),
+            "Risk/Reward 2": row.get("Risk/Reward 2", 0),
+            "Alert Status": alert_status,
+            "Approval Notes": compact_text(row.get("Exposure Notes", ""), 500),
+        }
+        if os.path.exists(SIGNAL_HISTORY_FILE) and os.path.getsize(SIGNAL_HISTORY_FILE) > 0:
+            history = pd.read_csv(SIGNAL_HISTORY_FILE)
+            history = pd.concat([history, pd.DataFrame([record])], ignore_index=True)
+        else:
+            history = pd.DataFrame([record])
+        history = history.tail(LOG_MAX_ITEMS)
+        temp_path = f"{SIGNAL_HISTORY_FILE}.tmp"
+        history.to_csv(temp_path, index=False)
+        os.replace(temp_path, SIGNAL_HISTORY_FILE)
+    except Exception as error:
+        log(f"Signal history append error: {error}")
+
 
 def send_top_signals_summary(rows, candidates=0, sent_count=0):
     if not BOT_SEND_TOP_SIGNALS_SUMMARY or not rows:
+        return False
+    if top_signals_already_sent():
+        log(f"Top signals summary skipped: anti-spam cooldown active for {BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES} minutes.")
         return False
     webhook_url = get_top_signals_webhook()
     if not webhook_url:
@@ -953,7 +1023,10 @@ def send_top_signals_summary(rows, candidates=0, sent_count=0):
         {"name": f"Top {BOT_TOP_SIGNALS_COUNT} Signals", "value": compact_text("\n".join(build_top_signal_lines(rows)) or "No directional signals passed ranking.", 1000), "inline": False},
         {"name": "Time", "value": now_text(), "inline": False},
     ]
-    return send_discord_embed(webhook_url, "🏆 Top Ranked Signals", 15844367, fields)
+    sent = send_discord_embed(webhook_url, "🏆 Top Ranked Signals", 15844367, fields)
+    if sent:
+        mark_top_signals_sent()
+    return sent
 
 
 def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
@@ -2913,6 +2986,256 @@ def calculate_walk_forward_summary(results):
         "Walk Forward Notes": f"avg WR {round(avg_win_rate, 2)}% | avg PF {round(avg_pf, 2)} | avg WF pass {round(avg_wf_rate, 2)}% across {len(valid)} ticker(s)",
     }
 
+
+# ======================================================
+# v32 PAPER TRADE TRACKING HELPERS
+# ======================================================
+
+def load_paper_trades_df():
+    try:
+        ensure_data_dir()
+        if os.path.exists(PAPER_TRADES_FILE) and os.path.getsize(PAPER_TRADES_FILE) > 0:
+            df = pd.read_csv(PAPER_TRADES_FILE)
+        else:
+            df = pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+        for column in PAPER_TRADE_HEADERS:
+            if column not in df.columns:
+                if column in ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified"]:
+                    df[column] = False
+                else:
+                    df[column] = ""
+        return df[PAPER_TRADE_HEADERS]
+    except Exception as error:
+        log(f"Paper trades load error: {error}")
+        return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+
+
+def save_paper_trades_df(df):
+    try:
+        ensure_data_dir()
+        for column in PAPER_TRADE_HEADERS:
+            if column not in df.columns:
+                df[column] = ""
+        temp_path = f"{PAPER_TRADES_FILE}.tmp"
+        df[PAPER_TRADE_HEADERS].to_csv(temp_path, index=False)
+        os.replace(temp_path, PAPER_TRADES_FILE)
+        return True
+    except Exception as error:
+        log(f"Paper trades save error: {error}")
+        return False
+
+
+def paper_trade_id(row):
+    raw = "|".join([
+        str(row.get("Ticker", "")),
+        str(row.get("AI Signal", "")),
+        str(row.get("Trade Entry", row.get("Price", ""))),
+        now_dt().strftime("%Y-%m-%d"),
+    ])
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def paper_bool(value):
+    return str(value).strip().lower() in ["1", "true", "yes", "y", "on"]
+
+
+def has_open_paper_trade(df, ticker, signal):
+    if df.empty:
+        return False
+    open_df = df[
+        (df["ticker"].astype(str) == str(ticker))
+        & (df["signal"].astype(str) == str(signal))
+        & (df["status"].astype(str).isin(["OPEN", "TP1_HIT"]))
+    ]
+    return len(open_df) >= BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER
+
+
+def create_paper_trade_from_signal(row):
+    if not BOT_PAPER_TRADING_ENABLED or not is_directional_signal(row.get("AI Signal", "")):
+        return False
+    try:
+        df = load_paper_trades_df()
+        ticker = str(row.get("Ticker", ""))
+        signal = str(row.get("AI Signal", ""))
+        if has_open_paper_trade(df, ticker, signal):
+            log(f"Paper trade not opened for {ticker}: open {signal} trade already exists.")
+            return False
+        entry = safe_float(row.get("Trade Entry", row.get("Price", 0)), 0)
+        if entry <= 0:
+            return False
+        trade = {
+            "trade_id": paper_trade_id(row),
+            "ticker": ticker,
+            "market": row.get("Market", ""),
+            "signal": signal,
+            "entry_price": entry,
+            "current_price": safe_float(row.get("Price", entry), entry),
+            "stop_loss": safe_float(row.get("Stop Loss", 0), 0),
+            "tp1": safe_float(row.get("Take Profit 1", 0), 0),
+            "tp2": safe_float(row.get("Take Profit 2", 0), 0),
+            "confidence": safe_float(row.get("AI Confidence %", 0), 0),
+            "position_size": safe_float(row.get("Position Size", 0), 0),
+            "position_value": safe_float(row.get("Position Value", 0), 0),
+            "status": "OPEN",
+            "result": "OPEN",
+            "date_opened": now_text(),
+            "date_closed": "",
+            "last_updated": now_text(),
+            "pnl_percent": 0,
+            "pnl_dollars": 0,
+            "risk_reward_2": safe_float(row.get("Risk/Reward 2", 0), 0),
+            "signal_rank": row.get("Signal Rank", ""),
+            "quality_score": safe_float(row.get("Signal Quality Score", 0), 0),
+            "notes": compact_text(row.get("Exposure Notes", ""), 500),
+            "tp1_notified": False,
+            "tp2_notified": False,
+            "stop_notified": False,
+            "closed_notified": False,
+        }
+        df = pd.concat([df, pd.DataFrame([trade])], ignore_index=True)
+        saved = save_paper_trades_df(df)
+        if saved:
+            send_paper_trade_event(trade, "opened")
+        return saved
+    except Exception as error:
+        log(f"Create paper trade error: {error}")
+        return False
+
+
+def paper_trade_pnl(signal, entry, current, position_size):
+    entry = safe_float(entry, 0)
+    current = safe_float(current, 0)
+    position_size = safe_float(position_size, 0)
+    if entry <= 0 or current <= 0:
+        return 0, 0
+    if "SELL" in str(signal):
+        pnl_percent = ((entry - current) / entry) * 100
+    else:
+        pnl_percent = ((current - entry) / entry) * 100
+    pnl_dollars = (current - entry) * position_size
+    if "SELL" in str(signal):
+        pnl_dollars = (entry - current) * position_size
+    return round(pnl_percent, 2), round(pnl_dollars, 2)
+
+
+def classify_paper_trade_status(trade, current_price):
+    signal = str(trade.get("signal", ""))
+    stop = safe_float(trade.get("stop_loss", 0), 0)
+    tp1 = safe_float(trade.get("tp1", 0), 0)
+    tp2 = safe_float(trade.get("tp2", 0), 0)
+    current = safe_float(current_price, 0)
+    if current <= 0:
+        return str(trade.get("status", "OPEN")), str(trade.get("result", "OPEN"))
+    if "SELL" in signal:
+        if stop > 0 and current >= stop:
+            return "STOPPED", "LOSS"
+        if tp2 > 0 and current <= tp2:
+            return "TP2_HIT", "WIN"
+        if tp1 > 0 and current <= tp1:
+            return "TP1_HIT", "PARTIAL WIN"
+    else:
+        if stop > 0 and current <= stop:
+            return "STOPPED", "LOSS"
+        if tp2 > 0 and current >= tp2:
+            return "TP2_HIT", "WIN"
+        if tp1 > 0 and current >= tp1:
+            return "TP1_HIT", "PARTIAL WIN"
+    return str(trade.get("status", "OPEN")) if str(trade.get("status", "OPEN")) == "TP1_HIT" else "OPEN", "OPEN"
+
+
+def send_paper_trade_event(trade, event_type):
+    ticker = str(trade.get("ticker", ""))
+    webhook_url = get_trade_webhook(ticker)
+    titles = {
+        "opened": "📈 PAPER TRADE OPENED",
+        "tp1": "🎯 TP1 HIT",
+        "tp2": "🚀 TP2 HIT",
+        "stop": "🛑 STOP LOSS HIT",
+        "closed": "🏁 TRADE CLOSED",
+    }
+    colors = {"opened": 3447003, "tp1": 15844367, "tp2": 5763719, "stop": 15548997, "closed": 10181046}
+    fields = [
+        {"name": "Ticker / Signal", "value": f"{ticker} | {trade.get('signal', '')}", "inline": True},
+        {"name": "Status", "value": str(trade.get("status", "")), "inline": True},
+        {"name": "Confidence", "value": f"{trade.get('confidence', 0)}%", "inline": True},
+        {"name": "Entry", "value": format_money(trade.get("entry_price", 0)), "inline": True},
+        {"name": "Current", "value": format_money(trade.get("current_price", 0)), "inline": True},
+        {"name": "P/L", "value": f"{trade.get('pnl_percent', 0)}% / {format_money(trade.get('pnl_dollars', 0))}", "inline": True},
+        {"name": "Plan", "value": f"SL {format_money(trade.get('stop_loss', 0))} | TP1 {format_money(trade.get('tp1', 0))} | TP2 {format_money(trade.get('tp2', 0))}", "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    return send_discord_embed(webhook_url, titles.get(event_type, "📌 PAPER TRADE UPDATE"), colors.get(event_type, 3447003), fields)
+
+
+def monitor_open_paper_trades():
+    if not BOT_PAPER_TRADING_ENABLED or not BOT_PAPER_TRADE_MONITOR_ENABLED:
+        return {"checked": 0, "updated": 0, "closed": 0}
+    df = load_paper_trades_df()
+    if df.empty:
+        return {"checked": 0, "updated": 0, "closed": 0}
+    checked = updated = closed = 0
+    for index, trade in df.iterrows():
+        if str(trade.get("status", "")) not in ["OPEN", "TP1_HIT"]:
+            continue
+        ticker = str(trade.get("ticker", ""))
+        data = get_price_data(ticker, "5d", "1d")
+        if data.empty:
+            continue
+        current = float(data["Close"].iloc[-1])
+        checked += 1
+        status, result = classify_paper_trade_status(trade, current)
+        pnl_percent, pnl_dollars = paper_trade_pnl(trade.get("signal", ""), trade.get("entry_price", 0), current, trade.get("position_size", 0))
+        df.at[index, "current_price"] = round(current, 4)
+        df.at[index, "pnl_percent"] = pnl_percent
+        df.at[index, "pnl_dollars"] = pnl_dollars
+        df.at[index, "last_updated"] = now_text()
+        old_status = str(trade.get("status", "OPEN"))
+        if status != old_status:
+            updated += 1
+            df.at[index, "status"] = status
+            df.at[index, "result"] = result
+            event_trade = df.loc[index].to_dict()
+            if status == "TP1_HIT" and not paper_bool(trade.get("tp1_notified", False)):
+                send_paper_trade_event(event_trade, "tp1")
+                df.at[index, "tp1_notified"] = True
+            elif status == "TP2_HIT" and not paper_bool(trade.get("tp2_notified", False)):
+                send_paper_trade_event(event_trade, "tp2")
+                df.at[index, "tp2_notified"] = True
+                df.at[index, "date_closed"] = now_text()
+                closed += 1
+            elif status == "STOPPED" and not paper_bool(trade.get("stop_notified", False)):
+                send_paper_trade_event(event_trade, "stop")
+                df.at[index, "stop_notified"] = True
+                df.at[index, "date_closed"] = now_text()
+                closed += 1
+    save_paper_trades_df(df)
+    update_paper_equity_curve(df)
+    return {"checked": checked, "updated": updated, "closed": closed}
+
+
+def update_paper_equity_curve(df=None):
+    try:
+        df = load_paper_trades_df() if df is None else df
+        realized = 0
+        if not df.empty:
+            closed_df = df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])]
+            realized = pd.to_numeric(closed_df["pnl_dollars"], errors="coerce").fillna(0).sum()
+        equity = round(BOT_PAPER_TRADE_STARTING_EQUITY + realized, 2)
+        row = {"timestamp": now_text(), "equity": equity, "realized_pnl": round(realized, 2)}
+        if os.path.exists(PAPER_EQUITY_FILE) and os.path.getsize(PAPER_EQUITY_FILE) > 0:
+            eq = pd.read_csv(PAPER_EQUITY_FILE)
+            eq = pd.concat([eq, pd.DataFrame([row])], ignore_index=True)
+        else:
+            eq = pd.DataFrame([row])
+        eq = eq.tail(LOG_MAX_ITEMS)
+        temp_path = f"{PAPER_EQUITY_FILE}.tmp"
+        eq.to_csv(temp_path, index=False)
+        os.replace(temp_path, PAPER_EQUITY_FILE)
+        return True
+    except Exception as error:
+        log(f"Paper equity update error: {error}")
+        return False
+
 # ======================================================
 # NEWS NORMALIZATION
 # ======================================================
@@ -3599,7 +3922,10 @@ def send_signal_alert(row):
             {"name": "Confidence", "value": f"{row['AI Confidence %']}%", "inline": True},
             {"name": "Time", "value": now_text(), "inline": False},
         ]
-        return send_discord_embed(get_trade_webhook(row["Ticker"]), f"{row['Market']} Market | {row['AI Signal']}", signal_embed_color(row["AI Signal"]), fields)
+        sent = send_discord_embed(get_trade_webhook(row["Ticker"]), f"{row['Market']} Market | {row['AI Signal']}", signal_embed_color(row["AI Signal"]), fields)
+        if sent:
+            create_paper_trade_from_signal(row)
+        return sent
 
     signal = str(row.get("AI Signal", ""))
     title = f"{signal_emoji(signal)} {signal} | {row.get('Ticker', '')} | Rank #{row.get('Signal Rank', 'N/A')}"
@@ -3649,7 +3975,10 @@ def send_signal_alert(row):
         {"name": "Approval", "value": f"{row.get('Alert Approved', 'N/A')} | {row.get('Exposure Notes', 'N/A')}", "inline": False},
         {"name": "Time", "value": now_text(), "inline": False},
     ]
-    return send_discord_embed(get_trade_webhook(row["Ticker"]), title, signal_embed_color(row["AI Signal"]), fields)
+    sent = send_discord_embed(get_trade_webhook(row["Ticker"]), title, signal_embed_color(row["AI Signal"]), fields)
+    if sent:
+        create_paper_trade_from_signal(row)
+    return sent
 
 
 def build_summary_fields(rows, market):
@@ -5490,6 +5819,9 @@ def run_scan():
     news_sentiment_contexts = build_news_sentiment_contexts(scan_started_at)
     log(f"News sentiment weighting contexts built: {len(news_sentiment_contexts)} ticker(s)")
 
+    paper_monitor_result = monitor_open_paper_trades()
+    log(f"Paper trade monitor: {paper_monitor_result}")
+
     for ticker in ALL_TICKERS:
         if time.time() - scan_started_at > BOT_MAX_SCAN_SECONDS:
             ticker_errors += 1
@@ -5540,6 +5872,7 @@ def run_scan():
         if alert_key in sent_signals:
             skipped_duplicates += 1
             row["Exposure Notes"] = "skipped duplicate alert"
+            append_signal_history(row, "DUPLICATE_SKIPPED")
             continue
 
         sent = send_signal_alert(row)
@@ -5548,8 +5881,11 @@ def run_scan():
             sent_count += 1
             alerted_rows.append(row)
             sent_signals.add(alert_key)
+            append_signal_history(row, "SENT")
             save_log(SIGNAL_LOG_FILE, sent_signals)
             interruptible_sleep(1)
+        else:
+            append_signal_history(row, "SEND_FAILED")
 
     post_scan_errors = 0
 
@@ -5715,7 +6051,7 @@ def main():
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
     log(f"Discord elite alerts enabled: {BOT_DISCORD_ELITE_ALERTS_ENABLED}")
-    log(f"Top signals summary enabled: {BOT_SEND_TOP_SIGNALS_SUMMARY} | count={BOT_TOP_SIGNALS_COUNT}")
+    log(f"Top signals summary enabled: {BOT_SEND_TOP_SIGNALS_SUMMARY} | count={BOT_TOP_SIGNALS_COUNT} | cooldown={BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES} min")
     log(f"Daily performance report enabled: {BOT_SEND_DAILY_PERFORMANCE_REPORT} | hour={BOT_DAILY_REPORT_HOUR}")
     log(f"Backtest scorecard enabled: {BOT_SEND_BACKTEST_SCORECARD}")
     log(f"Summary max lines per section: {SUMMARY_MAX_LINES_PER_SECTION}")
