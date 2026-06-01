@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.11-strategy-ranking-engine"
+BOT_VERSION = "google-sheets-100-production-v32.12-automation-readiness-center"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -514,9 +514,22 @@ BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS = get_env_bool("BOT_STRATEGY_RANKING_BLOC
 BOT_STRATEGY_RANKING_INCLUDE_NOTES = get_env_bool("BOT_STRATEGY_RANKING_INCLUDE_NOTES", True)
 BOT_STRATEGY_RANKING_MAX_REPORT_ROWS = max(3, get_env_int("BOT_STRATEGY_RANKING_MAX_REPORT_ROWS", 10))
 
+# v32.12 Automation Readiness Center.
+# Recommendation-only readiness layer before v33 3Commas paper automation.
+BOT_AUTOMATION_READINESS_ENABLED = get_env_bool("BOT_AUTOMATION_READINESS_ENABLED", True)
+BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES = max(1, get_env_int("BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES", 100))
+BOT_AUTOMATION_READINESS_TARGET_WR = max(0, min(get_env_float("BOT_AUTOMATION_READINESS_TARGET_WR", 50), 100))
+BOT_AUTOMATION_READINESS_TARGET_PF = max(0, get_env_float("BOT_AUTOMATION_READINESS_TARGET_PF", 1.5))
+BOT_AUTOMATION_READINESS_TARGET_SCORE = max(0, min(get_env_float("BOT_AUTOMATION_READINESS_TARGET_SCORE", 80), 100))
+BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT = max(0, get_env_float("BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT", 20))
+BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES = max(0, get_env_int("BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES", 1))
+BOT_SEND_AUTOMATION_READINESS_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_REPORT", True)
+BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS", 24))
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
+AUTOMATION_READINESS_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_report_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -3578,6 +3591,235 @@ def log_strategy_ranking_report():
     return report
 
 
+
+# ======================================================
+# v32.12 AUTOMATION READINESS CENTER
+# ======================================================
+
+def automation_readiness_status(score):
+    score = safe_float(score, 0)
+    if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE:
+        return "READY FOR v33 PAPER AUTOMATION"
+    if score >= 60:
+        return "NEARLY READY - KEEP TESTING"
+    if score >= 40:
+        return "EARLY TESTING - NOT READY"
+    return "NOT READY - COLLECT MORE DATA"
+
+
+def calculate_equity_curve_summary():
+    empty = {"starting_equity": BOT_PAPER_TRADE_STARTING_EQUITY, "current_equity": BOT_PAPER_TRADE_STARTING_EQUITY, "return_pct": 0, "max_drawdown_pct": 0, "positive_equity": False}
+    try:
+        if not os.path.exists(PAPER_EQUITY_FILE) or os.path.getsize(PAPER_EQUITY_FILE) <= 0:
+            return empty
+        df = pd.read_csv(PAPER_EQUITY_FILE)
+        if df.empty or "equity" not in df.columns:
+            return empty
+        equity = pd.to_numeric(df["equity"], errors="coerce").dropna()
+        if equity.empty:
+            return empty
+        starting = float(equity.iloc[0])
+        current = float(equity.iloc[-1])
+        rolling_high = equity.cummax()
+        drawdown = ((equity - rolling_high) / rolling_high * 100).fillna(0)
+        max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0
+        return {
+            "starting_equity": round(starting, 2),
+            "current_equity": round(current, 2),
+            "return_pct": round(((current - starting) / starting * 100), 2) if starting else 0,
+            "max_drawdown_pct": round(max_drawdown, 2),
+            "positive_equity": current > starting,
+        }
+    except Exception as error:
+        log(f"Automation readiness equity summary error: {error}")
+        return empty
+
+
+def calculate_overall_closed_trade_stats(df=None):
+    try:
+        df = load_paper_trades_df() if df is None else df
+        if df is None or df.empty or "status" not in df.columns:
+            return {"closed": 0, "wins": 0, "losses": 0, "wr": 0, "pf": 0, "total_pnl": 0, "avg_return": 0}
+        closed = df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+        if closed.empty:
+            return {"closed": 0, "wins": 0, "losses": 0, "wr": 0, "pf": 0, "total_pnl": 0, "avg_return": 0}
+        pnl = pd.to_numeric(closed.get("pnl_dollars", 0), errors="coerce").fillna(0)
+        pnl_pct = pd.to_numeric(closed.get("pnl_percent", 0), errors="coerce").fillna(0)
+        wins = pnl[pnl > 0]
+        losses = pnl[pnl < 0]
+        gross_wins = float(wins.sum())
+        gross_losses = abs(float(losses.sum()))
+        pf = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0)
+        wr = round((len(wins) / len(closed)) * 100, 2) if len(closed) else 0
+        return {
+            "closed": int(len(closed)),
+            "wins": int(len(wins)),
+            "losses": int(len(losses)),
+            "wr": wr,
+            "pf": pf,
+            "total_pnl": round(float(pnl.sum()), 2),
+            "avg_return": round(float(pnl_pct.mean()), 2) if len(pnl_pct) else 0,
+        }
+    except Exception as error:
+        log(f"Automation readiness trade stats error: {error}")
+        return {"closed": 0, "wins": 0, "losses": 0, "wr": 0, "pf": 0, "total_pnl": 0, "avg_return": 0}
+
+
+def readiness_points(value, target, max_points, higher_is_better=True):
+    value = safe_float(value, 0)
+    target = safe_float(target, 0)
+    max_points = safe_float(max_points, 0)
+    if max_points <= 0:
+        return 0
+    if target <= 0:
+        return max_points if value > 0 else 0
+    if higher_is_better:
+        return round(max(0, min(max_points, (value / target) * max_points)), 2)
+    if value <= target:
+        return max_points
+    if value <= 0:
+        return max_points
+    return round(max(0, min(max_points, (target / value) * max_points)), 2)
+
+
+def build_automation_readiness_report(backtest_results=None):
+    if not BOT_AUTOMATION_READINESS_ENABLED:
+        return {
+            "enabled": False,
+            "score": 0,
+            "status": "Automation readiness disabled.",
+            "recommendation": "Enable BOT_AUTOMATION_READINESS_ENABLED to score v33 readiness.",
+            "rows": [],
+        }
+
+    trades_df = load_paper_trades_df()
+    trade_stats = calculate_overall_closed_trade_stats(trades_df)
+    equity = calculate_equity_curve_summary()
+    strategy_report = build_strategy_ranking_report(trades_df) if BOT_STRATEGY_RANKING_ENABLED else {"rows": [], "best_strategy": "N/A", "weak_strategy": "N/A", "recommendation": "Strategy ranking disabled."}
+    dynamic_report = build_dynamic_confidence_report(backtest_results)
+
+    strategy_rows = strategy_report.get("rows", []) or []
+    strong_count = len([row for row in strategy_rows if row.get("strategy_label") == "STRONG"])
+    weak_count = len([row for row in strategy_rows if row.get("strategy_label") == "WEAK"])
+
+    closed_points = readiness_points(trade_stats.get("closed", 0), BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, 20)
+    wr_points = readiness_points(trade_stats.get("wr", 0), BOT_AUTOMATION_READINESS_TARGET_WR, 20)
+    pf_points = readiness_points(trade_stats.get("pf", 0), BOT_AUTOMATION_READINESS_TARGET_PF, 20)
+    equity_points = 15 if equity.get("positive_equity") else 0
+    drawdown_points = readiness_points(equity.get("max_drawdown_pct", 0), BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, 10, higher_is_better=False)
+    strategy_points = 10 if strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES and weak_count == 0 else 7 if strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES else 3 if strategy_rows else 0
+    confidence_rec = str(dynamic_report.get("recommendation", ""))
+    confidence_points = 5 if dynamic_report.get("source") in ["paper", "backtest"] and not confidence_rec.startswith("WAIT") else 0
+
+    score = round(closed_points + wr_points + pf_points + equity_points + drawdown_points + strategy_points + confidence_points, 2)
+    status = automation_readiness_status(score)
+
+    blocking_notes = []
+    if trade_stats.get("closed", 0) < BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES:
+        blocking_notes.append(f"Need {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES - trade_stats.get('closed', 0)} more closed paper trades.")
+    if trade_stats.get("wr", 0) < BOT_AUTOMATION_READINESS_TARGET_WR:
+        blocking_notes.append("Win rate is below target.")
+    if trade_stats.get("pf", 0) < BOT_AUTOMATION_READINESS_TARGET_PF:
+        blocking_notes.append("Profit factor is below target.")
+    if not equity.get("positive_equity"):
+        blocking_notes.append("Equity curve is not positive yet.")
+    if weak_count > 0:
+        blocking_notes.append(f"{weak_count} weak strategy label(s) should not be automated.")
+    if strong_count < BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES:
+        blocking_notes.append("Need at least one strong strategy before v33.")
+
+    recommendation = "READY: Begin v33 3Commas paper automation planning." if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE and not blocking_notes else "NOT READY: " + " ".join(blocking_notes[:4]) if blocking_notes else "NEARLY READY: Continue collecting paper-trade evidence."
+
+    rows = [
+        [now_text(), "Automation Readiness Score", score, BOT_AUTOMATION_READINESS_TARGET_SCORE, "YES" if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE else "NO", score, status],
+        [now_text(), "Closed Paper Trades", trade_stats.get("closed", 0), BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, "YES" if trade_stats.get("closed", 0) >= BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES else "NO", closed_points, "Sample size before automation."],
+        [now_text(), "Win Rate %", trade_stats.get("wr", 0), BOT_AUTOMATION_READINESS_TARGET_WR, "YES" if trade_stats.get("wr", 0) >= BOT_AUTOMATION_READINESS_TARGET_WR else "NO", wr_points, f"Wins {trade_stats.get('wins', 0)} | Losses {trade_stats.get('losses', 0)}"],
+        [now_text(), "Profit Factor", trade_stats.get("pf", 0), BOT_AUTOMATION_READINESS_TARGET_PF, "YES" if trade_stats.get("pf", 0) >= BOT_AUTOMATION_READINESS_TARGET_PF else "NO", pf_points, f"Total P/L {trade_stats.get('total_pnl', 0)} | Avg return {trade_stats.get('avg_return', 0)}%"],
+        [now_text(), "Positive Equity Curve", "YES" if equity.get("positive_equity") else "NO", "YES", "YES" if equity.get("positive_equity") else "NO", equity_points, f"Start {equity.get('starting_equity')} | Current {equity.get('current_equity')} | Return {equity.get('return_pct')}%"],
+        [now_text(), "Max Drawdown %", equity.get("max_drawdown_pct", 0), BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, "YES" if equity.get("max_drawdown_pct", 0) <= BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT else "NO", drawdown_points, "Lower drawdown is better."],
+        [now_text(), "Strong Strategies", strong_count, BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES, "YES" if strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES else "NO", strategy_points, strategy_report.get("best_strategy", "N/A")],
+        [now_text(), "Weak / Do Not Automate Strategies", weak_count, 0, "YES" if weak_count == 0 else "NO", 0 if weak_count else 5, strategy_report.get("weak_strategy", "N/A")],
+        [now_text(), "Dynamic Confidence", dynamic_report.get("recommended_min_confidence", MIN_CONFIDENCE), "Recommendation Ready", "YES" if confidence_points > 0 else "NO", confidence_points, dynamic_report.get("recommendation", "N/A")],
+        [now_text(), "Readiness Recommendation", recommendation, "v33 gate", "YES" if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE else "NO", 0, status],
+    ]
+
+    return {
+        "enabled": True,
+        "score": score,
+        "status": status,
+        "recommendation": recommendation,
+        "trade_stats": trade_stats,
+        "equity": equity,
+        "strategy_report": strategy_report,
+        "dynamic_confidence_report": dynamic_report,
+        "strong_strategy_count": strong_count,
+        "weak_strategy_count": weak_count,
+        "rows": rows,
+    }
+
+
+def sync_automation_readiness_to_google_sheets(spreadsheet, backtest_results=None):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_AUTOMATION_READINESS_ENABLED:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Automation Readiness", AUTOMATION_READINESS_HEADERS)
+        report = build_automation_readiness_report(backtest_results)
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [AUTOMATION_READINESS_HEADERS] + report.get("rows", []))
+        return True
+    except Exception as error:
+        log(f"Automation readiness sync error: {error}")
+        return False
+
+
+def get_automation_readiness_report_key():
+    current_bucket = int(time.time() // (BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS * 3600))
+    return f"automation_readiness_{current_bucket}"
+
+
+def automation_readiness_report_already_sent():
+    return get_automation_readiness_report_key() in load_log(AUTOMATION_READINESS_REPORT_LOG_FILE)
+
+
+def mark_automation_readiness_report_sent():
+    items = load_log(AUTOMATION_READINESS_REPORT_LOG_FILE)
+    items.add(get_automation_readiness_report_key())
+    save_log(AUTOMATION_READINESS_REPORT_LOG_FILE, items)
+
+
+def send_automation_readiness_report_if_due(backtest_results=None):
+    if not BOT_SEND_AUTOMATION_READINESS_REPORT or not BOT_AUTOMATION_READINESS_ENABLED:
+        return False
+    if automation_readiness_report_already_sent():
+        return False
+    webhook_url = get_top_signals_webhook() or get_daily_report_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Automation readiness report skipped: no webhook available.")
+        return False
+    report = build_automation_readiness_report(backtest_results)
+    trade_stats = report.get("trade_stats", {})
+    equity = report.get("equity", {})
+    fields = [
+        {"name": "Readiness", "value": f"Score {report.get('score', 0)}/100 | {report.get('status', 'N/A')}", "inline": False},
+        {"name": "Paper Performance", "value": f"Closed {trade_stats.get('closed', 0)} | WR {trade_stats.get('wr', 0)}% | PF {trade_stats.get('pf', 0)} | P/L {format_money(trade_stats.get('total_pnl', 0))}", "inline": False},
+        {"name": "Equity", "value": f"Current {format_money(equity.get('current_equity', 0))} | Return {equity.get('return_pct', 0)}% | DD {equity.get('max_drawdown_pct', 0)}%", "inline": False},
+        {"name": "Strategies", "value": f"Strong {report.get('strong_strategy_count', 0)} | Weak {report.get('weak_strategy_count', 0)}\nBest: {compact_text(report.get('strategy_report', {}).get('best_strategy', 'N/A'), 500)}", "inline": False},
+        {"name": "Recommendation", "value": compact_text(report.get("recommendation", "N/A"), 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🤖 Automation Readiness Report", 5763719 if report.get("score", 0) >= BOT_AUTOMATION_READINESS_TARGET_SCORE else 15844367, fields)
+    if sent:
+        mark_automation_readiness_report_sent()
+    return sent
+
+
+def log_automation_readiness_report(backtest_results=None):
+    report = build_automation_readiness_report(backtest_results)
+    if BOT_AUTOMATION_READINESS_ENABLED:
+        log(f"Automation readiness score: {report.get('score')}/100 | {report.get('status')}")
+        log(f"Automation readiness recommendation: {report.get('recommendation')}")
+    return report
+
 def strategy_ranking_check(row):
     """
     Enforce v32.11 strategy-level learning.
@@ -4768,6 +5010,7 @@ def send_startup_message():
         {"name": "Dynamic Confidence", "value": f"{'On' if BOT_DYNAMIC_CONFIDENCE_ENABLED else 'Off'} | Current Min {MIN_CONFIDENCE}% | Target PF {BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | Target WR {BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "Setup Analytics", "value": f"{'On' if BOT_SETUP_ANALYTICS_ENABLED else 'Off'} | Min Sample {BOT_SETUP_ANALYTICS_MIN_SAMPLE} | Strong PF {BOT_SETUP_ANALYTICS_STRONG_PF} | Strong WR {BOT_SETUP_ANALYTICS_STRONG_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "Strategy Ranking", "value": f"{'On' if BOT_STRATEGY_RANKING_ENABLED else 'Off'} | Min Sample {BOT_STRATEGY_RANKING_MIN_SAMPLE} | Strong PF {BOT_STRATEGY_RANKING_STRONG_PF} | Weak PF {BOT_STRATEGY_RANKING_WEAK_PF} | Block Weak {'On' if BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS else 'Off'}", "inline": False},
+        {"name": "Automation Readiness", "value": f"{'On' if BOT_AUTOMATION_READINESS_ENABLED else 'Off'} | Min Closed {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | Target PF {BOT_AUTOMATION_READINESS_TARGET_PF} | Target WR {BOT_AUTOMATION_READINESS_TARGET_WR}% | Ready Score {BOT_AUTOMATION_READINESS_TARGET_SCORE}", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -5508,6 +5751,10 @@ STRATEGY_RANKING_HEADERS = [
     "Timestamp", "Rank", "Setup Name", "Strategy Label", "Trades", "Wins", "Losses",
     "Win Rate %", "Profit Factor", "Average Return %", "Total P/L",
     "Strategy Score", "Do Not Automate", "Recommended Action"
+]
+
+AUTOMATION_READINESS_HEADERS = [
+    "Timestamp", "Metric", "Value", "Target", "Passed", "Score Contribution", "Notes"
 ]
 
 WALK_FORWARD_HEADERS = [
@@ -6510,6 +6757,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Dashboard Analytics", DASHBOARD_ANALYTICS_HEADERS)
         get_or_create_worksheet(spreadsheet, "Setup Performance", SETUP_PERFORMANCE_HEADERS)
         get_or_create_worksheet(spreadsheet, "Strategy Ranking", STRATEGY_RANKING_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Automation Readiness", AUTOMATION_READINESS_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
@@ -6534,6 +6782,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         sync_dashboard_analytics_to_google_sheets(scanned_rows)
         sync_setup_performance_to_google_sheets(spreadsheet)
         sync_strategy_ranking_to_google_sheets(spreadsheet)
+        sync_automation_readiness_to_google_sheets(spreadsheet)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -6879,6 +7128,12 @@ def run_scan():
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Setup performance analytics", log_setup_performance_report)
     post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Strategy ranking engine", log_strategy_ranking_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Automation readiness center", log_automation_readiness_report, backtest_results)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Automation readiness Discord report", send_automation_readiness_report_if_due, backtest_results)
+    post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Top signals Discord summary", send_top_signals_summary, scanned_rows, candidates, sent_count)
     post_scan_errors += int(step_error)
@@ -7004,6 +7259,7 @@ def main():
     log(f"Dynamic confidence enabled: {BOT_DYNAMIC_CONFIDENCE_ENABLED} | min sample={BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE} | target PF={BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | target WR={BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | mode=recommendation-only")
     log(f"Setup analytics enabled: {BOT_SETUP_ANALYTICS_ENABLED} | min sample={BOT_SETUP_ANALYTICS_MIN_SAMPLE} | strong PF={BOT_SETUP_ANALYTICS_STRONG_PF} | strong WR={BOT_SETUP_ANALYTICS_STRONG_WR}% | mode=recommendation-only")
     log(f"Strategy ranking enabled: {BOT_STRATEGY_RANKING_ENABLED} | min sample={BOT_STRATEGY_RANKING_MIN_SAMPLE} | strong PF={BOT_STRATEGY_RANKING_STRONG_PF} | strong WR={BOT_STRATEGY_RANKING_STRONG_WR}% | weak PF={BOT_STRATEGY_RANKING_WEAK_PF} | weak WR={BOT_STRATEGY_RANKING_WEAK_WR}% | block weak={BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS}")
+    log(f"Automation readiness enabled: {BOT_AUTOMATION_READINESS_ENABLED} | min closed={BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | target WR={BOT_AUTOMATION_READINESS_TARGET_WR}% | target PF={BOT_AUTOMATION_READINESS_TARGET_PF} | ready score={BOT_AUTOMATION_READINESS_TARGET_SCORE}")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")

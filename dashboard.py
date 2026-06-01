@@ -116,7 +116,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.10.1_setup_intelligence_dashboard"
+APP_VERSION = "v32.12_automation_readiness_center_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -199,6 +199,14 @@ BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS = get_env_int("BOT_SETUP_ANALYTICS_MAX_REPOR
 BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE = get_env_int("BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE", 20)
 BOT_DYNAMIC_CONFIDENCE_TARGET_PF = get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_PF", 1.5)
 BOT_DYNAMIC_CONFIDENCE_TARGET_WR = get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_WR", 50)
+
+# v32.12 Automation Readiness Center settings.
+BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES = get_env_int("BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES", 100)
+BOT_AUTOMATION_READINESS_TARGET_WR = get_env_float("BOT_AUTOMATION_READINESS_TARGET_WR", 50)
+BOT_AUTOMATION_READINESS_TARGET_PF = get_env_float("BOT_AUTOMATION_READINESS_TARGET_PF", 1.5)
+BOT_AUTOMATION_READINESS_TARGET_SCORE = get_env_float("BOT_AUTOMATION_READINESS_TARGET_SCORE", 80)
+BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT = get_env_float("BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT", 20)
+BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES = get_env_int("BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES", 1)
 
 
 def now_dt():
@@ -777,6 +785,114 @@ def build_performance_gate_report(trades_df, equity_df):
     }
     return checks_df, summary
 
+
+
+# ======================================================
+# v32.12 AUTOMATION READINESS CENTER HELPERS
+# ======================================================
+
+def readiness_points_dashboard(value, target, max_points, higher_is_better=True):
+    value = safe_float_dashboard(value, 0)
+    target = safe_float_dashboard(target, 0)
+    max_points = safe_float_dashboard(max_points, 0)
+    if max_points <= 0:
+        return 0
+    if target <= 0:
+        return max_points if value > 0 else 0
+    if higher_is_better:
+        return round(max(0, min(max_points, (value / target) * max_points)), 2)
+    if value <= target:
+        return max_points
+    if value <= 0:
+        return max_points
+    return round(max(0, min(max_points, (target / value) * max_points)), 2)
+
+
+def automation_readiness_status_dashboard(score):
+    score = safe_float_dashboard(score, 0)
+    if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE:
+        return "READY FOR v33 PAPER AUTOMATION"
+    if score >= 60:
+        return "NEARLY READY - KEEP TESTING"
+    if score >= 40:
+        return "EARLY TESTING - NOT READY"
+    return "NOT READY - COLLECT MORE DATA"
+
+
+def build_automation_readiness_dashboard_report(trades_df, equity_df):
+    trades_df = normalize_paper_trade_df(trades_df)
+    metrics = paper_trade_metrics(trades_df)
+    equity = calculate_equity_curve_stats(equity_df)
+    setup_tables = build_setup_performance_tables(trades_df)
+    setup_perf = setup_tables.get("setup_perf", pd.DataFrame())
+    confidence_df, confidence_recommendation = build_dynamic_confidence_dashboard(trades_df)
+
+    if setup_perf is None or setup_perf.empty:
+        strong_count = 0
+        weak_count = 0
+        best_strategy = "N/A"
+        weak_strategy = "N/A"
+    else:
+        reliable = setup_perf[setup_perf["Trades"] >= BOT_SETUP_ANALYTICS_MIN_SAMPLE].copy()
+        strong = reliable[(reliable["Profit Factor"] >= BOT_SETUP_ANALYTICS_STRONG_PF) & (reliable["Win Rate %"] >= BOT_SETUP_ANALYTICS_STRONG_WR)]
+        weak = reliable[(reliable["Profit Factor"] <= BOT_ADAPTIVE_AVOID_MAX_PF) | (reliable["Win Rate %"] <= BOT_ADAPTIVE_AVOID_MAX_WR)]
+        strong_count = len(strong)
+        weak_count = len(weak)
+        best_strategy = f"{strong.iloc[0]['Group']} | PF {strong.iloc[0]['Profit Factor']} | WR {strong.iloc[0]['Win Rate %']}%" if not strong.empty else "No strong setup yet"
+        weak_strategy = f"{weak.iloc[0]['Group']} | PF {weak.iloc[0]['Profit Factor']} | WR {weak.iloc[0]['Win Rate %']}%" if not weak.empty else "No confirmed weak setup"
+
+    closed_points = readiness_points_dashboard(metrics.get("total_closed", 0), BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, 20)
+    wr_points = readiness_points_dashboard(metrics.get("win_rate", 0), BOT_AUTOMATION_READINESS_TARGET_WR, 20)
+    pf_points = readiness_points_dashboard(metrics.get("profit_factor", 0), BOT_AUTOMATION_READINESS_TARGET_PF, 20)
+    equity_points = 15 if equity.get("positive_equity") else 0
+    drawdown_points = readiness_points_dashboard(equity.get("max_drawdown_pct", 0), BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, 10, higher_is_better=False)
+    strategy_points = 10 if strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES and weak_count == 0 else 7 if strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES else 3 if setup_perf is not None and not setup_perf.empty else 0
+    confidence_points = 5 if not confidence_df.empty else 0
+
+    score = round(closed_points + wr_points + pf_points + equity_points + drawdown_points + strategy_points + confidence_points, 2)
+    status = automation_readiness_status_dashboard(score)
+
+    blockers = []
+    if metrics.get("total_closed", 0) < BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES:
+        blockers.append(f"Need {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES - metrics.get('total_closed', 0)} more closed paper trades.")
+    if metrics.get("win_rate", 0) < BOT_AUTOMATION_READINESS_TARGET_WR:
+        blockers.append("Win rate is below target.")
+    if metrics.get("profit_factor", 0) < BOT_AUTOMATION_READINESS_TARGET_PF:
+        blockers.append("Profit factor is below target.")
+    if not equity.get("positive_equity"):
+        blockers.append("Equity curve is not positive yet.")
+    if weak_count > 0:
+        blockers.append(f"{weak_count} weak setup(s) should not be automated.")
+    if strong_count < BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES:
+        blockers.append("Need at least one strong setup before v33.")
+
+    recommendation = "READY: Begin v33 3Commas paper automation planning." if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE and not blockers else "NOT READY: " + " ".join(blockers[:4]) if blockers else "NEARLY READY: Continue collecting paper-trade evidence."
+
+    checks = pd.DataFrame([
+        {"Gate": "Automation Readiness Score", "Current": score, "Target": BOT_AUTOMATION_READINESS_TARGET_SCORE, "Passed": score >= BOT_AUTOMATION_READINESS_TARGET_SCORE, "Score Contribution": score, "Notes": status},
+        {"Gate": "Closed Paper Trades", "Current": metrics.get("total_closed", 0), "Target": BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, "Passed": metrics.get("total_closed", 0) >= BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, "Score Contribution": closed_points, "Notes": "Sample size before automation."},
+        {"Gate": "Win Rate", "Current": f"{metrics.get('win_rate', 0)}%", "Target": f">= {BOT_AUTOMATION_READINESS_TARGET_WR}%", "Passed": metrics.get("win_rate", 0) >= BOT_AUTOMATION_READINESS_TARGET_WR, "Score Contribution": wr_points, "Notes": "Paper-trade win rate."},
+        {"Gate": "Profit Factor", "Current": metrics.get("profit_factor", 0), "Target": f">= {BOT_AUTOMATION_READINESS_TARGET_PF}", "Passed": metrics.get("profit_factor", 0) >= BOT_AUTOMATION_READINESS_TARGET_PF, "Score Contribution": pf_points, "Notes": "Gross winners vs gross losers."},
+        {"Gate": "Positive Equity Curve", "Current": "YES" if equity.get("positive_equity") else "NO", "Target": "YES", "Passed": equity.get("positive_equity"), "Score Contribution": equity_points, "Notes": f"Return {equity.get('equity_return_pct', 0)}%"},
+        {"Gate": "Max Drawdown", "Current": f"{equity.get('max_drawdown_pct', 0)}%", "Target": f"<= {BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT}%", "Passed": equity.get("max_drawdown_pct", 0) <= BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, "Score Contribution": drawdown_points, "Notes": "Risk control before automation."},
+        {"Gate": "Strong Setups", "Current": strong_count, "Target": BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES, "Passed": strong_count >= BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES, "Score Contribution": strategy_points, "Notes": best_strategy},
+        {"Gate": "Weak / Do-Not-Automate Setups", "Current": weak_count, "Target": 0, "Passed": weak_count == 0, "Score Contribution": 0 if weak_count else 5, "Notes": weak_strategy},
+        {"Gate": "Dynamic Confidence", "Current": "Available" if not confidence_df.empty else "Needs Data", "Target": "Recommendation", "Passed": not confidence_df.empty, "Score Contribution": confidence_points, "Notes": confidence_recommendation},
+    ])
+
+    return {
+        "score": score,
+        "status": status,
+        "recommendation": recommendation,
+        "checks": checks,
+        "metrics": metrics,
+        "equity": equity,
+        "strong_count": strong_count,
+        "weak_count": weak_count,
+        "best_strategy": best_strategy,
+        "weak_strategy": weak_strategy,
+        "confidence_recommendation": confidence_recommendation,
+    }
 
 def performance_gate_color(readiness_pct):
     try:
@@ -2370,13 +2486,14 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
     "Paper Quality",
     "Decision Dashboard",
     "Performance Gate",
+    "Automation Readiness",
     "Trade Intelligence",
     "Adaptive Filters",
     "Setup Intelligence",
@@ -3020,6 +3137,66 @@ with adaptive_filters_tab:
         "After that, we can promote the strongest rules into bot.py."
     )
 
+
+
+
+# ======================================================
+# v32.12 AUTOMATION READINESS TAB
+# ======================================================
+
+with automation_readiness_tab:
+    st.header("v32.12 Automation Readiness Center")
+    st.caption("This tells you whether the paper-trading system has enough evidence to move toward v33 3Commas paper automation.")
+
+    paper_trades_df = load_paper_trades_df()
+    paper_equity_df = load_paper_equity_df()
+    readiness = build_automation_readiness_dashboard_report(paper_trades_df, paper_equity_df)
+
+    score = readiness.get("score", 0)
+    status = readiness.get("status", "N/A")
+    metrics = readiness.get("metrics", {})
+    equity = readiness.get("equity", {})
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Readiness Score", f"{score}/100")
+    col2.metric("Closed Trades", metrics.get("total_closed", 0))
+    col3.metric("Win Rate", f"{metrics.get('win_rate', 0)}%")
+    col4.metric("Profit Factor", metrics.get("profit_factor", 0))
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Equity Return", f"{equity.get('equity_return_pct', 0)}%")
+    col6.metric("Max Drawdown", f"{equity.get('max_drawdown_pct', 0)}%")
+    col7.metric("Strong Setups", readiness.get("strong_count", 0))
+    col8.metric("Weak Setups", readiness.get("weak_count", 0))
+
+    if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE:
+        st.success(status)
+    elif score >= 60:
+        st.warning(status)
+    else:
+        st.error(status)
+
+    st.subheader("Deploy Recommendation")
+    st.write(readiness.get("recommendation", "N/A"))
+
+    st.subheader("Automation Readiness Gates")
+    checks = readiness.get("checks", pd.DataFrame())
+    if checks.empty:
+        st.info("No readiness data yet.")
+    else:
+        st.dataframe(arrow_safe_df(checks), width="stretch")
+
+    st.subheader("Strategy Automation Notes")
+    st.write("Best strategy:", readiness.get("best_strategy", "N/A"))
+    st.write("Weak strategy:", readiness.get("weak_strategy", "N/A"))
+    st.write("Dynamic confidence:", readiness.get("confidence_recommendation", "N/A"))
+
+    st.subheader("v33 Rule")
+    st.info(
+        f"Do not start v33 3Commas paper automation until readiness score is {BOT_AUTOMATION_READINESS_TARGET_SCORE}+ "
+        f"with {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES}+ closed paper trades, PF >= {BOT_AUTOMATION_READINESS_TARGET_PF}, "
+        f"WR >= {BOT_AUTOMATION_READINESS_TARGET_WR}%, and a positive equity curve."
+    )
 
 
 # ======================================================
@@ -3765,6 +3942,14 @@ with settings_tab:
     st.write("Dynamic confidence min sample:", BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE)
     st.write("Dynamic confidence target PF:", BOT_DYNAMIC_CONFIDENCE_TARGET_PF)
     st.write("Dynamic confidence target win rate:", f"{BOT_DYNAMIC_CONFIDENCE_TARGET_WR}%")
+
+    st.subheader("Automation Readiness Settings")
+    st.write("Minimum closed paper trades:", BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES)
+    st.write("Target win rate:", f"{BOT_AUTOMATION_READINESS_TARGET_WR}%")
+    st.write("Target profit factor:", BOT_AUTOMATION_READINESS_TARGET_PF)
+    st.write("Target readiness score:", BOT_AUTOMATION_READINESS_TARGET_SCORE)
+    st.write("Max drawdown:", f"{BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT}%")
+    st.write("Minimum strong strategies:", BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES)
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
