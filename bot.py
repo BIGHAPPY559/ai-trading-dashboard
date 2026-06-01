@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.10-setup-performance-analytics"
+BOT_VERSION = "google-sheets-100-production-v32.11-strategy-ranking-engine"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -500,6 +500,20 @@ BOT_SETUP_ANALYTICS_MIN_SAMPLE = max(1, get_env_int("BOT_SETUP_ANALYTICS_MIN_SAM
 BOT_SETUP_ANALYTICS_STRONG_PF = max(0, get_env_float("BOT_SETUP_ANALYTICS_STRONG_PF", 1.5))
 BOT_SETUP_ANALYTICS_STRONG_WR = max(0, min(get_env_float("BOT_SETUP_ANALYTICS_STRONG_WR", 50), 100))
 BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS = max(3, get_env_int("BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS", 10))
+
+# v32.11 Strategy Ranking Engine.
+# Converts setup performance into strong/neutral/weak strategy labels before v33 automation.
+# Optional blocking only triggers after enough closed trades exist for that setup.
+BOT_STRATEGY_RANKING_ENABLED = get_env_bool("BOT_STRATEGY_RANKING_ENABLED", True)
+BOT_STRATEGY_RANKING_MIN_SAMPLE = max(1, get_env_int("BOT_STRATEGY_RANKING_MIN_SAMPLE", BOT_SETUP_ANALYTICS_MIN_SAMPLE))
+BOT_STRATEGY_RANKING_STRONG_PF = max(0, get_env_float("BOT_STRATEGY_RANKING_STRONG_PF", BOT_SETUP_ANALYTICS_STRONG_PF))
+BOT_STRATEGY_RANKING_STRONG_WR = max(0, min(get_env_float("BOT_STRATEGY_RANKING_STRONG_WR", BOT_SETUP_ANALYTICS_STRONG_WR), 100))
+BOT_STRATEGY_RANKING_WEAK_PF = max(0, get_env_float("BOT_STRATEGY_RANKING_WEAK_PF", 1.0))
+BOT_STRATEGY_RANKING_WEAK_WR = max(0, min(get_env_float("BOT_STRATEGY_RANKING_WEAK_WR", 45), 100))
+BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS = get_env_bool("BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS", True)
+BOT_STRATEGY_RANKING_INCLUDE_NOTES = get_env_bool("BOT_STRATEGY_RANKING_INCLUDE_NOTES", True)
+BOT_STRATEGY_RANKING_MAX_REPORT_ROWS = max(3, get_env_int("BOT_STRATEGY_RANKING_MAX_REPORT_ROWS", 10))
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -3099,6 +3113,10 @@ def build_dashboard_analytics_rows(scanned_rows, backtest_results=None):
     rows.append(["Best Setup", setup_report.get("best_setup", "N/A")])
     rows.append(["Worst Setup", setup_report.get("worst_setup", "N/A")])
     rows.append(["Setup Recommendation", setup_report.get("recommendation", "N/A")])
+    strategy_report = build_strategy_ranking_report() if BOT_STRATEGY_RANKING_ENABLED else {}
+    rows.append(["Best Strategy", strategy_report.get("best_strategy", "N/A")])
+    rows.append(["Weakest Strategy", strategy_report.get("weak_strategy", "N/A")])
+    rows.append(["Strategy Ranking Recommendation", strategy_report.get("recommendation", "N/A")])
     return rows
 
 def sync_dashboard_analytics_to_google_sheets(scanned_rows, backtest_results=None):
@@ -3429,6 +3447,174 @@ def log_setup_performance_report():
             log(f"Worst setup: {report.get('worst_setup')}")
     return report
 
+
+# ======================================================
+# v32.11 STRATEGY RANKING ENGINE
+# ======================================================
+
+def calculate_strategy_score(row):
+    """Score a setup/strategy using performance, sample size, and realized P/L."""
+    try:
+        trades = int(row.get("trades", 0) or 0)
+        wr = safe_float(row.get("wr", 0), 0)
+        pf = safe_float(row.get("pf", 0), 0)
+        avg_return = safe_float(row.get("avg_return", 0), 0)
+        total_pnl = safe_float(row.get("total_pnl", 0), 0)
+
+        sample_score = min(25, (trades / max(1, BOT_STRATEGY_RANKING_MIN_SAMPLE)) * 25)
+        wr_score = min(25, max(0, wr / 100 * 25))
+        pf_score = min(30, max(0, pf / max(0.01, BOT_STRATEGY_RANKING_STRONG_PF) * 30))
+        return_score = min(10, max(0, (avg_return + 5) / 10 * 10))
+        pnl_score = 10 if total_pnl > 0 else 0
+
+        return round(min(100, sample_score + wr_score + pf_score + return_score + pnl_score), 2)
+    except Exception:
+        return 0
+
+
+def classify_strategy_row(row):
+    trades = int(row.get("trades", 0) or 0)
+    pf = safe_float(row.get("pf", 0), 0)
+    wr = safe_float(row.get("wr", 0), 0)
+
+    if trades < BOT_STRATEGY_RANKING_MIN_SAMPLE:
+        return "COLLECTING"
+    if pf <= BOT_STRATEGY_RANKING_WEAK_PF or wr <= BOT_STRATEGY_RANKING_WEAK_WR:
+        return "WEAK"
+    if pf >= BOT_STRATEGY_RANKING_STRONG_PF and wr >= BOT_STRATEGY_RANKING_STRONG_WR:
+        return "STRONG"
+    return "NEUTRAL"
+
+
+def strategy_action_from_label(label):
+    if label == "STRONG":
+        return "Favor this setup when normal filters agree."
+    if label == "WEAK":
+        return "Do not automate; block new paper trades if enforcement is enabled."
+    if label == "NEUTRAL":
+        return "Allow but do not prioritize."
+    return "Collect more closed trades before enforcing."
+
+
+def calculate_strategy_ranking_rows(df=None):
+    if not BOT_STRATEGY_RANKING_ENABLED:
+        return []
+
+    setup_rows = calculate_setup_performance_rows(df)
+    ranked = []
+
+    for row in setup_rows:
+        label = classify_strategy_row(row)
+        score = calculate_strategy_score(row)
+        ranked.append({
+            **row,
+            "strategy_label": label,
+            "strategy_score": score,
+            "do_not_automate": label == "WEAK",
+            "recommended_action": strategy_action_from_label(label),
+        })
+
+    ranked = sorted(
+        ranked,
+        key=lambda item: (
+            safe_float(item.get("strategy_score", 0), 0),
+            safe_float(item.get("pf", 0), 0),
+            safe_float(item.get("wr", 0), 0),
+            safe_float(item.get("total_pnl", 0), 0),
+        ),
+        reverse=True
+    )
+
+    for index, row in enumerate(ranked, start=1):
+        row["strategy_rank"] = index
+
+    return ranked
+
+
+def build_strategy_ranking_report(df=None):
+    rows = calculate_strategy_ranking_rows(df)
+    if not BOT_STRATEGY_RANKING_ENABLED:
+        return {"rows": [], "recommendation": "Strategy ranking disabled.", "best_strategy": "N/A", "weak_strategy": "N/A"}
+
+    if not rows:
+        return {
+            "rows": [],
+            "recommendation": "Collect more setup-tagged closed paper trades before ranking strategies.",
+            "best_strategy": "N/A",
+            "weak_strategy": "N/A",
+        }
+
+    strong = [row for row in rows if row.get("strategy_label") == "STRONG"]
+    weak = [row for row in rows if row.get("strategy_label") == "WEAK"]
+    best = strong[0] if strong else rows[0]
+    weakest = sorted(rows, key=lambda item: (
+        safe_float(item.get("pf", 0), 0),
+        safe_float(item.get("wr", 0), 0),
+        safe_float(item.get("total_pnl", 0), 0),
+    ))[0]
+
+    if strong:
+        recommendation = f"Prioritize strategy '{best.get('setup_name')}' for future automation testing. PF {best.get('pf')} | WR {best.get('wr')}%."
+    elif weak:
+        recommendation = f"Do not automate weak setup '{weak[0].get('setup_name')}'. PF {weak[0].get('pf')} | WR {weak[0].get('wr')}%."
+    else:
+        recommendation = "No strategy has earned STRONG status yet. Keep collecting paper trades."
+
+    return {
+        "rows": rows,
+        "recommendation": recommendation,
+        "best_strategy": f"{best.get('setup_name')} | {best.get('strategy_label')} | Score {best.get('strategy_score')} | PF {best.get('pf')} | WR {best.get('wr')}% | Trades {best.get('trades')}",
+        "weak_strategy": f"{weakest.get('setup_name')} | {weakest.get('strategy_label')} | Score {weakest.get('strategy_score')} | PF {weakest.get('pf')} | WR {weakest.get('wr')}% | Trades {weakest.get('trades')}",
+    }
+
+
+def log_strategy_ranking_report():
+    report = build_strategy_ranking_report()
+    if BOT_STRATEGY_RANKING_ENABLED:
+        log(f"Strategy ranking engine: {report.get('recommendation')}")
+        if report.get("best_strategy") != "N/A":
+            log(f"Best strategy: {report.get('best_strategy')}")
+            log(f"Weakest strategy: {report.get('weak_strategy')}")
+    return report
+
+
+def strategy_ranking_check(row):
+    """
+    Enforce v32.11 strategy-level learning.
+
+    This checks the setup generated by the current signal against historical closed
+    paper trades for the same setup_name. It only blocks when enough setup-level
+    data exists and the strategy is labeled WEAK.
+    """
+    if not BOT_STRATEGY_RANKING_ENABLED:
+        return True, "strategy ranking disabled"
+
+    try:
+        setup = build_setup_profile(row)
+        setup_name = str(setup.get("setup_name", "Unknown Setup"))
+        ranking_rows = calculate_strategy_ranking_rows()
+        match = next((item for item in ranking_rows if str(item.get("setup_name", "")) == setup_name), None)
+
+        if not match:
+            return True, f"strategy collecting: {setup_name}"
+
+        label = str(match.get("strategy_label", "COLLECTING"))
+        trades = int(match.get("trades", 0) or 0)
+        pf = safe_float(match.get("pf", 0), 0)
+        wr = safe_float(match.get("wr", 0), 0)
+        score = safe_float(match.get("strategy_score", 0), 0)
+
+        note = f"strategy {label}: {setup_name} | trades {trades} | PF {pf} | WR {wr}% | score {score}"
+
+        if label == "WEAK" and BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS:
+            return False, "blocked: " + note
+
+        return True, note if BOT_STRATEGY_RANKING_INCLUDE_NOTES else f"strategy {label}"
+    except Exception as error:
+        log(f"Strategy ranking check error: {error}")
+        return True, "strategy ranking unavailable; allowed"
+
+
 # ======================================================
 # v32 PAPER TRADE TRACKING HELPERS
 # ======================================================
@@ -3613,6 +3799,10 @@ def paper_trade_quality_check(row):
     if not adaptive_ok:
         return False, adaptive_note
 
+    strategy_ok, strategy_note = strategy_ranking_check(row)
+    if not strategy_ok:
+        return False, strategy_note
+
     pf = safe_float(row.get("Backtest Quality PF", 0), 0)
     wr = safe_float(row.get("Backtest Quality WR", 0), 0)
     signals = int(safe_float(row.get("Backtest Quality Signals", 0), 0))
@@ -3632,7 +3822,7 @@ def paper_trade_quality_check(row):
     if wr < BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE:
         return False, f"blocked: paper trade WR {wr}% below {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}%"
 
-    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals} | {adaptive_note}"
+    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals} | {adaptive_note} | {strategy_note}"
 
 
 def create_paper_trade_from_signal(row):
@@ -4577,6 +4767,7 @@ def send_startup_message():
         {"name": "Paper Trade Quality Gate", "value": f"Max Open {BOT_PAPER_TRADE_MAX_OPEN_TOTAL} | Min PF {BOT_PAPER_TRADE_MIN_BACKTEST_PF} | Min WR {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}% | Min Signals {BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS} | Avoid {', '.join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else 'None'}", "inline": False},
         {"name": "Dynamic Confidence", "value": f"{'On' if BOT_DYNAMIC_CONFIDENCE_ENABLED else 'Off'} | Current Min {MIN_CONFIDENCE}% | Target PF {BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | Target WR {BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "Setup Analytics", "value": f"{'On' if BOT_SETUP_ANALYTICS_ENABLED else 'Off'} | Min Sample {BOT_SETUP_ANALYTICS_MIN_SAMPLE} | Strong PF {BOT_SETUP_ANALYTICS_STRONG_PF} | Strong WR {BOT_SETUP_ANALYTICS_STRONG_WR}% | Mode Recommendation-Only", "inline": False},
+        {"name": "Strategy Ranking", "value": f"{'On' if BOT_STRATEGY_RANKING_ENABLED else 'Off'} | Min Sample {BOT_STRATEGY_RANKING_MIN_SAMPLE} | Strong PF {BOT_STRATEGY_RANKING_STRONG_PF} | Weak PF {BOT_STRATEGY_RANKING_WEAK_PF} | Block Weak {'On' if BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS else 'Off'}", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -5311,6 +5502,12 @@ DASHBOARD_ANALYTICS_HEADERS = [
 SETUP_PERFORMANCE_HEADERS = [
     "Timestamp", "Setup Name", "Setup Tags", "Trades", "Wins", "Losses",
     "Win Rate %", "Profit Factor", "Average Return %", "Total P/L", "Status"
+]
+
+STRATEGY_RANKING_HEADERS = [
+    "Timestamp", "Rank", "Setup Name", "Strategy Label", "Trades", "Wins", "Losses",
+    "Win Rate %", "Profit Factor", "Average Return %", "Total P/L",
+    "Strategy Score", "Do Not Automate", "Recommended Action"
 ]
 
 WALK_FORWARD_HEADERS = [
@@ -6263,6 +6460,29 @@ def sync_setup_performance_to_google_sheets(spreadsheet):
         return False
 
 
+def sync_strategy_ranking_to_google_sheets(spreadsheet):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_STRATEGY_RANKING_ENABLED:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Strategy Ranking", STRATEGY_RANKING_HEADERS)
+        rows = []
+        for row in calculate_strategy_ranking_rows()[:BOT_STRATEGY_RANKING_MAX_REPORT_ROWS]:
+            rows.append([
+                now_text(), row.get("strategy_rank", ""), row.get("setup_name", ""),
+                row.get("strategy_label", ""), row.get("trades", 0), row.get("wins", 0),
+                row.get("losses", 0), row.get("wr", 0), row.get("pf", 0),
+                row.get("avg_return", 0), row.get("total_pnl", 0),
+                row.get("strategy_score", 0), "YES" if row.get("do_not_automate") else "NO",
+                row.get("recommended_action", ""),
+            ])
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [STRATEGY_RANKING_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Strategy ranking sync error: {error}")
+        return False
+
+
 def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0):
     global LAST_GOOGLE_SHEETS_SYNC_TIME
     global LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME
@@ -6289,6 +6509,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Walk Forward", WALK_FORWARD_HEADERS)
         get_or_create_worksheet(spreadsheet, "Dashboard Analytics", DASHBOARD_ANALYTICS_HEADERS)
         get_or_create_worksheet(spreadsheet, "Setup Performance", SETUP_PERFORMANCE_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Strategy Ranking", STRATEGY_RANKING_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
@@ -6312,6 +6533,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         update_best_tickers(spreadsheet)
         sync_dashboard_analytics_to_google_sheets(scanned_rows)
         sync_setup_performance_to_google_sheets(spreadsheet)
+        sync_strategy_ranking_to_google_sheets(spreadsheet)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -6781,6 +7003,7 @@ def main():
     log(f"Adaptive thresholds: avoid PF<={BOT_ADAPTIVE_AVOID_MAX_PF} or WR<={BOT_ADAPTIVE_AVOID_MAX_WR}% | favorite PF>={BOT_ADAPTIVE_FAVORITE_MIN_PF} and WR>={BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
     log(f"Dynamic confidence enabled: {BOT_DYNAMIC_CONFIDENCE_ENABLED} | min sample={BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE} | target PF={BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | target WR={BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | mode=recommendation-only")
     log(f"Setup analytics enabled: {BOT_SETUP_ANALYTICS_ENABLED} | min sample={BOT_SETUP_ANALYTICS_MIN_SAMPLE} | strong PF={BOT_SETUP_ANALYTICS_STRONG_PF} | strong WR={BOT_SETUP_ANALYTICS_STRONG_WR}% | mode=recommendation-only")
+    log(f"Strategy ranking enabled: {BOT_STRATEGY_RANKING_ENABLED} | min sample={BOT_STRATEGY_RANKING_MIN_SAMPLE} | strong PF={BOT_STRATEGY_RANKING_STRONG_PF} | strong WR={BOT_STRATEGY_RANKING_STRONG_WR}% | weak PF={BOT_STRATEGY_RANKING_WEAK_PF} | weak WR={BOT_STRATEGY_RANKING_WEAK_WR}% | block weak={BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS}")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
