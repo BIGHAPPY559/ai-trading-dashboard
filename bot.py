@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.8-adaptive-filter-enforcement"
+BOT_VERSION = "google-sheets-100-production-v32.8.1-adaptive-bootstrap-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -472,6 +472,11 @@ BOT_ADAPTIVE_AVOID_MAX_WR = max(0, min(get_env_float("BOT_ADAPTIVE_AVOID_MAX_WR"
 BOT_ADAPTIVE_FAVORITE_MIN_PF = max(0, get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_PF", 1.5))
 BOT_ADAPTIVE_FAVORITE_MIN_WR = max(0, min(get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_WR", 55), 100))
 BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE = get_env_bool("BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE", True)
+# v32.8.1 bootstrap fix: until enough closed paper trades exist, optionally use
+# backtest quality stats as a temporary adaptive-filter data source. Once a ticker
+# reaches BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES, real paper-trade results take over.
+BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP = get_env_bool("BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP", True)
+BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS = max(1, get_env_int("BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS", BOT_BACKTEST_QUALITY_MIN_SIGNALS))
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -3209,7 +3214,14 @@ def calculate_closed_paper_trade_performance(df, ticker):
 
 
 def adaptive_filter_check(row):
-    """Enforce v32.8 paper-trade adaptive filters using closed paper-trade results."""
+    """
+    Enforce v32.8 adaptive filters.
+
+    v32.8.1 behavior:
+    - Use real closed paper-trade performance once enough closed trades exist.
+    - Before enough paper trades exist, optionally bootstrap from backtest stats so
+      obvious weak tickers can be blocked immediately instead of waiting weeks.
+    """
     if not BOT_ADAPTIVE_FILTERS_ENABLED:
         return True, "adaptive filters disabled"
 
@@ -3223,21 +3235,49 @@ def adaptive_filter_check(row):
     wr = safe_float(stats.get("wr", 0), 0)
     pf = safe_float(stats.get("pf", 0), 0)
 
+    source = "paper"
+    sample_text = f"{trades} closed"
+
     if trades < BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES:
-        return True, f"adaptive: needs more data ({trades}/{BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES} closed)"
+        if not BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP:
+            return True, f"adaptive: needs more data ({trades}/{BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES} closed)"
+
+        # Prefer the backtest fields already attached to the row. If they are
+        # missing, run the same backtest-quality lookup used by the paper gate.
+        bt_pf = safe_float(row.get("Backtest Quality PF", 0), 0)
+        bt_wr = safe_float(row.get("Backtest Quality WR", 0), 0)
+        bt_signals = int(safe_float(row.get("Backtest Quality Signals", 0), 0))
+
+        if bt_signals <= 0:
+            quality = backtest_quality_for_ticker(ticker)
+            bt_pf = safe_float(quality.get("pf", bt_pf), bt_pf)
+            bt_wr = safe_float(quality.get("wr", bt_wr), bt_wr)
+            bt_signals = int(safe_float(quality.get("signals", bt_signals), bt_signals))
+
+        if bt_signals < BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS:
+            return True, (
+                f"adaptive bootstrap: not enough backtest data "
+                f"({bt_signals}/{BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS} signals); "
+                f"paper sample {trades}/{BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES}"
+            )
+
+        pf = bt_pf
+        wr = bt_wr
+        source = "backtest bootstrap"
+        sample_text = f"{bt_signals} backtest signals | {trades}/{BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES} paper closed"
 
     if pf <= BOT_ADAPTIVE_AVOID_MAX_PF or wr <= BOT_ADAPTIVE_AVOID_MAX_WR:
-        note = f"adaptive weak ticker: {ticker} {trades} closed | PF {pf} | WR {wr}%"
+        note = f"adaptive weak ticker ({source}): {ticker} | {sample_text} | PF {pf} | WR {wr}%"
         if BOT_ADAPTIVE_BLOCK_WEAK_TICKERS:
             return False, "blocked: " + note
         return True, "warning: " + note
 
     if pf >= BOT_ADAPTIVE_FAVORITE_MIN_PF and wr >= BOT_ADAPTIVE_FAVORITE_MIN_WR:
         if BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE:
-            return True, f"adaptive favorite: {ticker} {trades} closed | PF {pf} | WR {wr}%"
-        return True, "adaptive favorite"
+            return True, f"adaptive favorite ({source}): {ticker} | {sample_text} | PF {pf} | WR {wr}%"
+        return True, f"adaptive favorite ({source})"
 
-    return True, f"adaptive neutral: {ticker} {trades} closed | PF {pf} | WR {wr}%"
+    return True, f"adaptive neutral ({source}): {ticker} | {sample_text} | PF {pf} | WR {wr}%"
 
 
 def paper_trade_quality_check(row):
@@ -6374,6 +6414,7 @@ def main():
     log(f"Backtesting settings: period={BOT_BACKTEST_PERIOD}, hold={BOT_BACKTEST_HOLD_DAYS}, lookback={BOT_BACKTEST_LOOKBACK_DAYS}, min_conf={BOT_BACKTEST_MIN_CONFIDENCE}, max_tickers={BOT_BACKTEST_MAX_TICKERS}")
     log(f"Phase 3: regime={BOT_MARKET_REGIME_DETECTION_ENABLED}, ranking={BOT_SIGNAL_RANKING_ENABLED}, sizing={BOT_POSITION_SIZING_ENABLED}, trailing={BOT_TRAILING_STOP_ENABLED}, exposure={BOT_EXPOSURE_CONTROLS_ENABLED}, walk_forward={BOT_WALK_FORWARD_ENABLED}, outcomes={BOT_OUTCOME_TRACKING_ENABLED}, dashboard_analytics={BOT_DASHBOARD_ANALYTICS_ENABLED}")
     log(f"Adaptive filters enabled: {BOT_ADAPTIVE_FILTERS_ENABLED} | block weak={BOT_ADAPTIVE_BLOCK_WEAK_TICKERS} | min closed={BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES}")
+    log(f"Adaptive bootstrap enabled: {BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP} | min backtest signals={BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS}")
     log(f"Adaptive thresholds: avoid PF<={BOT_ADAPTIVE_AVOID_MAX_PF} or WR<={BOT_ADAPTIVE_AVOID_MAX_WR}% | favorite PF>={BOT_ADAPTIVE_FAVORITE_MIN_PF} and WR>={BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
