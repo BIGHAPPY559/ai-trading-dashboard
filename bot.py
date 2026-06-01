@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.12-automation-readiness-center"
+BOT_VERSION = "google-sheets-100-production-v32.13-trade-lifecycle-analytics"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -526,10 +526,22 @@ BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES = max(0, get_env_int("BOT_AUTOMAT
 BOT_SEND_AUTOMATION_READINESS_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_REPORT", True)
 BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS", 24))
 
+# v32.13 Trade Lifecycle Analytics.
+# Recommendation-only analytics layer that measures how long paper trades take
+# to hit TP1/TP2/stop and how efficiently setups use capital over time.
+BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED = get_env_bool("BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED", True)
+BOT_TRADE_LIFECYCLE_MIN_SAMPLE = max(1, get_env_int("BOT_TRADE_LIFECYCLE_MIN_SAMPLE", 5))
+BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS = max(1, get_env_float("BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS", 24))
+BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS = max(1, get_env_float("BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS", 10))
+BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY = get_env_float("BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY", 0.5)
+BOT_SEND_TRADE_LIFECYCLE_REPORT = get_env_bool("BOT_SEND_TRADE_LIFECYCLE_REPORT", True)
+BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS", 24))
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
 AUTOMATION_READINESS_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_report_log.txt")
+TRADE_LIFECYCLE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_trade_lifecycle_report_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -537,6 +549,8 @@ PAPER_TRADE_HEADERS = [
     "status", "result", "date_opened", "date_closed", "last_updated",
     "pnl_percent", "pnl_dollars", "risk_reward_2", "signal_rank", "quality_score",
     "setup_name", "setup_tags", "setup_score",
+    "date_tp1", "date_tp2", "date_stopped",
+    "hours_open", "days_open", "hours_to_tp1", "hours_to_tp2", "hours_to_stop", "lifecycle_stage",
     "notes", "tp1_notified", "tp2_notified", "stop_notified", "closed_notified",
 ]
 
@@ -1035,6 +1049,7 @@ def normalize_paper_trade_dtypes(df):
         "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
         "position_size", "position_value", "pnl_percent", "pnl_dollars",
         "risk_reward_2", "signal_rank", "quality_score", "setup_score",
+        "hours_open", "days_open", "hours_to_tp1", "hours_to_tp2", "hours_to_stop",
     ]
     bool_columns = ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified"]
     text_columns = [column for column in PAPER_TRADE_HEADERS if column not in numeric_columns + bool_columns]
@@ -3818,6 +3833,195 @@ def log_automation_readiness_report(backtest_results=None):
     if BOT_AUTOMATION_READINESS_ENABLED:
         log(f"Automation readiness score: {report.get('score')}/100 | {report.get('status')}")
         log(f"Automation readiness recommendation: {report.get('recommendation')}")
+
+
+# ======================================================
+# v32.13 TRADE LIFECYCLE ANALYTICS
+# ======================================================
+
+def closed_lifecycle_trades(df=None):
+    df = load_paper_trades_df() if df is None else df
+    if df is None or df.empty or "status" not in df.columns:
+        return pd.DataFrame()
+    return df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+
+
+def enrich_lifecycle_trade_df(df=None):
+    df = load_paper_trades_df() if df is None else df
+    if df is None or df.empty:
+        return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    out = df.copy()
+    for column in ["date_tp1", "date_tp2", "date_stopped", "hours_open", "days_open", "hours_to_tp1", "hours_to_tp2", "hours_to_stop", "lifecycle_stage"]:
+        if column not in out.columns:
+            out[column] = "" if column.startswith("date_") or column == "lifecycle_stage" else 0
+    for idx, row in out.iterrows():
+        status = str(row.get("status", "OPEN"))
+        opened = row.get("date_opened", "")
+        closed_at = row.get("date_closed", "") if status in ["TP2_HIT", "STOPPED", "CLOSED"] else now_text()
+        hours_open = safe_float(row.get("hours_open", 0), 0)
+        if hours_open <= 0:
+            hours_open = lifecycle_hours_between(opened, closed_at)
+            out.at[idx, "hours_open"] = hours_open
+            out.at[idx, "days_open"] = round(hours_open / 24, 2)
+        if safe_float(row.get("hours_to_tp1", 0), 0) <= 0 and str(row.get("date_tp1", "")).strip():
+            out.at[idx, "hours_to_tp1"] = lifecycle_hours_between(opened, row.get("date_tp1", ""))
+        if safe_float(row.get("hours_to_tp2", 0), 0) <= 0 and str(row.get("date_tp2", "")).strip():
+            out.at[idx, "hours_to_tp2"] = lifecycle_hours_between(opened, row.get("date_tp2", ""))
+        if safe_float(row.get("hours_to_stop", 0), 0) <= 0 and str(row.get("date_stopped", "")).strip():
+            out.at[idx, "hours_to_stop"] = lifecycle_hours_between(opened, row.get("date_stopped", ""))
+        if not str(row.get("lifecycle_stage", "")).strip() or str(row.get("lifecycle_stage", "")).lower() == "nan":
+            out.at[idx, "lifecycle_stage"] = "TP2_CLOSED" if status == "TP2_HIT" else "STOP_CLOSED" if status == "STOPPED" else "TP1_OPEN" if status == "TP1_HIT" else status
+    return normalize_paper_trade_dtypes(out)
+
+
+def lifecycle_avg(series):
+    values = pd.to_numeric(series, errors="coerce")
+    values = values[values > 0]
+    return round(float(values.mean()), 2) if not values.empty else 0
+
+
+def build_trade_lifecycle_report(df=None):
+    if not BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED:
+        return {"enabled": False, "summary": {}, "setup_rows": [], "recommendations": ["Trade lifecycle analytics disabled."]}
+    trades = enrich_lifecycle_trade_df(df)
+    closed = closed_lifecycle_trades(trades)
+    open_df = trades[trades["status"].astype(str).isin(["OPEN", "TP1_HIT"])] if not trades.empty and "status" in trades.columns else pd.DataFrame()
+    tp1_df = trades[pd.to_numeric(trades.get("hours_to_tp1", 0), errors="coerce").fillna(0) > 0] if not trades.empty else pd.DataFrame()
+    tp2_df = closed[closed["status"].astype(str) == "TP2_HIT"] if not closed.empty else pd.DataFrame()
+    stop_df = closed[closed["status"].astype(str) == "STOPPED"] if not closed.empty else pd.DataFrame()
+    pnl_pct = pd.to_numeric(closed.get("pnl_percent", 0), errors="coerce").fillna(0) if not closed.empty else pd.Series(dtype=float)
+    hours_open = pd.to_numeric(closed.get("hours_open", 0), errors="coerce").fillna(0) if not closed.empty else pd.Series(dtype=float)
+    positive_hours = hours_open[hours_open > 0]
+    avg_return_per_day = 0
+    if not closed.empty and not positive_hours.empty:
+        days = hours_open.replace(0, pd.NA) / 24
+        rpd = pnl_pct / days
+        rpd = pd.to_numeric(rpd, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+        avg_return_per_day = round(float(rpd.mean()), 2) if not rpd.empty else 0
+    summary = {
+        "total_trades": int(len(trades)),
+        "open_trades": int(len(open_df)),
+        "closed_trades": int(len(closed)),
+        "tp1_hits": int(len(tp1_df)),
+        "tp2_hits": int(len(tp2_df)),
+        "stop_hits": int(len(stop_df)),
+        "avg_hours_open": lifecycle_avg(hours_open),
+        "avg_days_open": round(lifecycle_avg(hours_open) / 24, 2) if lifecycle_avg(hours_open) else 0,
+        "avg_hours_to_tp1": lifecycle_avg(tp1_df.get("hours_to_tp1", pd.Series(dtype=float))) if not tp1_df.empty else 0,
+        "avg_hours_to_tp2": lifecycle_avg(tp2_df.get("hours_to_tp2", pd.Series(dtype=float))) if not tp2_df.empty else 0,
+        "avg_hours_to_stop": lifecycle_avg(stop_df.get("hours_to_stop", pd.Series(dtype=float))) if not stop_df.empty else 0,
+        "avg_return_per_day": avg_return_per_day,
+        "fast_tp1_count": int((pd.to_numeric(tp1_df.get("hours_to_tp1", 0), errors="coerce").fillna(0) <= BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS).sum()) if not tp1_df.empty else 0,
+        "slow_closed_count": int((hours_open > BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS * 24).sum()) if not closed.empty else 0,
+    }
+    setup_rows = []
+    if not closed.empty and "setup_name" in closed.columns:
+        for setup_name, group in closed.groupby("setup_name"):
+            trade_count = len(group)
+            group_pnl = pd.to_numeric(group.get("pnl_percent", 0), errors="coerce").fillna(0)
+            group_hours = pd.to_numeric(group.get("hours_open", 0), errors="coerce").fillna(0)
+            days = group_hours.replace(0, pd.NA) / 24
+            rpd = pd.to_numeric(group_pnl / days, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+            wins = len(group_pnl[group_pnl > 0])
+            setup_rows.append({
+                "setup_name": setup_name,
+                "trades": trade_count,
+                "wins": wins,
+                "losses": trade_count - wins,
+                "win_rate": round((wins / trade_count) * 100, 2) if trade_count else 0,
+                "avg_hours_open": lifecycle_avg(group_hours),
+                "avg_days_open": round(lifecycle_avg(group_hours) / 24, 2) if lifecycle_avg(group_hours) else 0,
+                "avg_return_pct": round(float(group_pnl.mean()), 2) if trade_count else 0,
+                "avg_return_per_day": round(float(rpd.mean()), 2) if not rpd.empty else 0,
+                "avg_hours_to_tp1": lifecycle_avg(group.get("hours_to_tp1", pd.Series(dtype=float))),
+                "avg_hours_to_tp2": lifecycle_avg(group.get("hours_to_tp2", pd.Series(dtype=float))),
+                "avg_hours_to_stop": lifecycle_avg(group.get("hours_to_stop", pd.Series(dtype=float))),
+                "sample_status": "Reliable" if trade_count >= BOT_TRADE_LIFECYCLE_MIN_SAMPLE else "Needs More Data",
+            })
+    setup_rows = sorted(setup_rows, key=lambda r: (r.get("avg_return_per_day", 0), r.get("win_rate", 0)), reverse=True)
+    recommendations = []
+    if summary["closed_trades"] < BOT_TRADE_LIFECYCLE_MIN_SAMPLE:
+        recommendations.append(f"Collect more closed trades before judging lifecycle efficiency ({summary['closed_trades']}/{BOT_TRADE_LIFECYCLE_MIN_SAMPLE}).")
+    if summary["avg_hours_to_tp1"] and summary["avg_hours_to_tp1"] <= BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS:
+        recommendations.append(f"TP1 speed is healthy: average TP1 hit in {summary['avg_hours_to_tp1']} hours.")
+    if summary["slow_closed_count"] > 0:
+        recommendations.append(f"Review {summary['slow_closed_count']} slow closed trade(s) over {BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS} days; capital may be tied up too long.")
+    strong_setups = [r for r in setup_rows if r.get("trades", 0) >= BOT_TRADE_LIFECYCLE_MIN_SAMPLE and r.get("avg_return_per_day", 0) >= BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY]
+    if strong_setups:
+        top = strong_setups[0]
+        recommendations.append(f"Most capital-efficient setup so far: {top['setup_name']} | {top['avg_return_per_day']}%/day | WR {top['win_rate']}%.")
+    if not recommendations:
+        recommendations.append("Lifecycle data is not decisive yet. Keep collecting paper-trade outcomes.")
+    return {"enabled": True, "summary": summary, "setup_rows": setup_rows, "recommendations": recommendations[:8]}
+
+
+def sync_trade_lifecycle_to_google_sheets(spreadsheet):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Trade Lifecycle", TRADE_LIFECYCLE_HEADERS)
+        report = build_trade_lifecycle_report()
+        summary = report.get("summary", {})
+        rows = [
+            [now_text(), "SUMMARY", "ALL", summary.get("closed_trades", 0), summary.get("tp1_hits", 0), summary.get("tp2_hits", 0), summary.get("stop_hits", 0), summary.get("avg_hours_open", 0), summary.get("avg_days_open", 0), summary.get("avg_hours_to_tp1", 0), summary.get("avg_hours_to_tp2", 0), summary.get("avg_hours_to_stop", 0), summary.get("avg_return_per_day", 0), "Overall lifecycle summary"],
+        ]
+        for row in report.get("setup_rows", [])[:25]:
+            rows.append([now_text(), "SETUP", row.get("setup_name", ""), row.get("trades", 0), "", "", "", row.get("avg_hours_open", 0), row.get("avg_days_open", 0), row.get("avg_hours_to_tp1", 0), row.get("avg_hours_to_tp2", 0), row.get("avg_hours_to_stop", 0), row.get("avg_return_per_day", 0), row.get("sample_status", "")])
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [TRADE_LIFECYCLE_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Trade lifecycle sync error: {error}")
+        return False
+
+
+def get_trade_lifecycle_report_key():
+    current_bucket = int(time.time() // (BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS * 3600))
+    return f"trade_lifecycle_{current_bucket}"
+
+
+def trade_lifecycle_report_already_sent():
+    return get_trade_lifecycle_report_key() in load_log(TRADE_LIFECYCLE_REPORT_LOG_FILE)
+
+
+def mark_trade_lifecycle_report_sent():
+    items = load_log(TRADE_LIFECYCLE_REPORT_LOG_FILE)
+    items.add(get_trade_lifecycle_report_key())
+    save_log(TRADE_LIFECYCLE_REPORT_LOG_FILE, items)
+
+
+def send_trade_lifecycle_report_if_due():
+    if not BOT_SEND_TRADE_LIFECYCLE_REPORT or not BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED:
+        return False
+    if trade_lifecycle_report_already_sent():
+        return False
+    webhook_url = get_top_signals_webhook() or get_daily_report_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Trade lifecycle report skipped: no webhook available.")
+        return False
+    report = build_trade_lifecycle_report()
+    summary = report.get("summary", {})
+    recommendations = "\n".join(report.get("recommendations", [])[:5])
+    fields = [
+        {"name": "Lifecycle Summary", "value": f"Closed {summary.get('closed_trades', 0)} | TP1 {summary.get('tp1_hits', 0)} | TP2 {summary.get('tp2_hits', 0)} | Stops {summary.get('stop_hits', 0)}", "inline": False},
+        {"name": "Average Timing", "value": f"Open {summary.get('avg_days_open', 0)} days | TP1 {summary.get('avg_hours_to_tp1', 0)}h | TP2 {summary.get('avg_hours_to_tp2', 0)}h | Stop {summary.get('avg_hours_to_stop', 0)}h", "inline": False},
+        {"name": "Capital Efficiency", "value": f"Avg return/day {summary.get('avg_return_per_day', 0)}% | Slow closed trades {summary.get('slow_closed_count', 0)}", "inline": False},
+        {"name": "Recommendations", "value": compact_text(recommendations or "Collect more lifecycle data.", 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "⏱️ Trade Lifecycle Analytics", 10181046, fields)
+    if sent:
+        mark_trade_lifecycle_report_sent()
+    return sent
+
+
+def log_trade_lifecycle_report():
+    if not BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED:
+        return
+    report = build_trade_lifecycle_report()
+    summary = report.get("summary", {})
+    log(f"Trade lifecycle analytics: closed {summary.get('closed_trades', 0)} | avg open {summary.get('avg_days_open', 0)} days | TP1 {summary.get('avg_hours_to_tp1', 0)}h | return/day {summary.get('avg_return_per_day', 0)}%")
+
     return report
 
 def strategy_ranking_check(row):
@@ -4111,6 +4315,15 @@ def create_paper_trade_from_signal(row):
             "signal_rank": row.get("Signal Rank", ""),
             "quality_score": safe_float(row.get("Signal Quality Score", 0), 0),
             **build_setup_profile(row),
+            "date_tp1": "",
+            "date_tp2": "",
+            "date_stopped": "",
+            "hours_open": 0,
+            "days_open": 0,
+            "hours_to_tp1": 0,
+            "hours_to_tp2": 0,
+            "hours_to_stop": 0,
+            "lifecycle_stage": "OPEN",
             "notes": compact_text(f"{row.get('Exposure Notes', '')} | {quality_note}", 500),
             "tp1_notified": False,
             "tp2_notified": False,
@@ -4168,6 +4381,81 @@ def classify_paper_trade_status(trade, current_price):
     return str(trade.get("status", "OPEN")) if str(trade.get("status", "OPEN")) == "TP1_HIT" else "OPEN", "OPEN"
 
 
+
+def parse_trade_datetime(value):
+    try:
+        text = str(value or "").strip()
+        if not text or text.lower() in ["nan", "none"]:
+            return None
+        # Most bot timestamps are timezone-local strings from now_text().
+        for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"]:
+            try:
+                return datetime.strptime(text, fmt)
+            except Exception:
+                pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(ZoneInfo(BOT_TIMEZONE)).replace(tzinfo=None)
+            return parsed
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def lifecycle_hours_between(start_value, end_value=None):
+    start = parse_trade_datetime(start_value)
+    if start is None:
+        return 0
+    end = parse_trade_datetime(end_value) if end_value else now_dt().replace(tzinfo=None)
+    if end is None:
+        return 0
+    return round(max(0, (end - start).total_seconds() / 3600), 2)
+
+
+def update_lifecycle_fields_for_trade(df, index, event_status=None):
+    """Update v32.13 lifecycle timing fields for one paper trade row."""
+    try:
+        opened = df.at[index, "date_opened"] if "date_opened" in df.columns else ""
+        status = str(event_status or df.at[index, "status"] if "status" in df.columns else "OPEN")
+        end_time = df.at[index, "date_closed"] if status in ["TP2_HIT", "STOPPED", "CLOSED"] and "date_closed" in df.columns else now_text()
+        hours_open = lifecycle_hours_between(opened, end_time)
+        df.at[index, "hours_open"] = hours_open
+        df.at[index, "days_open"] = round(hours_open / 24, 2)
+        if status == "TP1_HIT" and not str(df.at[index, "date_tp1"] if "date_tp1" in df.columns else "").strip():
+            df.at[index, "date_tp1"] = now_text()
+        if status == "TP2_HIT":
+            if not str(df.at[index, "date_tp2"] if "date_tp2" in df.columns else "").strip():
+                df.at[index, "date_tp2"] = now_text()
+            if not str(df.at[index, "date_closed"] if "date_closed" in df.columns else "").strip():
+                df.at[index, "date_closed"] = now_text()
+        if status == "STOPPED":
+            if not str(df.at[index, "date_stopped"] if "date_stopped" in df.columns else "").strip():
+                df.at[index, "date_stopped"] = now_text()
+            if not str(df.at[index, "date_closed"] if "date_closed" in df.columns else "").strip():
+                df.at[index, "date_closed"] = now_text()
+        date_tp1 = df.at[index, "date_tp1"] if "date_tp1" in df.columns else ""
+        date_tp2 = df.at[index, "date_tp2"] if "date_tp2" in df.columns else ""
+        date_stop = df.at[index, "date_stopped"] if "date_stopped" in df.columns else ""
+        df.at[index, "hours_to_tp1"] = lifecycle_hours_between(opened, date_tp1) if str(date_tp1).strip() else 0
+        df.at[index, "hours_to_tp2"] = lifecycle_hours_between(opened, date_tp2) if str(date_tp2).strip() else 0
+        df.at[index, "hours_to_stop"] = lifecycle_hours_between(opened, date_stop) if str(date_stop).strip() else 0
+        if status == "TP2_HIT":
+            stage = "TP2_CLOSED"
+        elif status == "STOPPED":
+            stage = "STOP_CLOSED"
+        elif status == "TP1_HIT":
+            stage = "TP1_OPEN"
+        elif status == "CLOSED":
+            stage = "MANUAL_CLOSED"
+        else:
+            stage = "OPEN"
+        df.at[index, "lifecycle_stage"] = stage
+    except Exception as error:
+        log(f"Lifecycle field update error: {error}")
+    return df
+
 def send_paper_trade_event(trade, event_type):
     ticker = str(trade.get("ticker", ""))
     webhook_url = get_paper_trade_webhook(ticker)
@@ -4214,6 +4502,7 @@ def monitor_open_paper_trades():
         df.at[index, "pnl_percent"] = pnl_percent
         df.at[index, "pnl_dollars"] = pnl_dollars
         df.at[index, "last_updated"] = now_text()
+        df = update_lifecycle_fields_for_trade(df, index, status)
         old_status = str(trade.get("status", "OPEN"))
         if status != old_status:
             updated += 1
@@ -4221,17 +4510,23 @@ def monitor_open_paper_trades():
             df.at[index, "result"] = result
             event_trade = df.loc[index].to_dict()
             if status == "TP1_HIT" and not paper_bool(trade.get("tp1_notified", False)):
+                df = update_lifecycle_fields_for_trade(df, index, status)
+                event_trade = df.loc[index].to_dict()
                 send_paper_trade_event(event_trade, "tp1")
                 df.at[index, "tp1_notified"] = True
             elif status == "TP2_HIT" and not paper_bool(trade.get("tp2_notified", False)):
+                df.at[index, "date_closed"] = now_text()
+                df = update_lifecycle_fields_for_trade(df, index, status)
+                event_trade = df.loc[index].to_dict()
                 send_paper_trade_event(event_trade, "tp2")
                 df.at[index, "tp2_notified"] = True
-                df.at[index, "date_closed"] = now_text()
                 closed += 1
             elif status == "STOPPED" and not paper_bool(trade.get("stop_notified", False)):
+                df.at[index, "date_closed"] = now_text()
+                df = update_lifecycle_fields_for_trade(df, index, status)
+                event_trade = df.loc[index].to_dict()
                 send_paper_trade_event(event_trade, "stop")
                 df.at[index, "stop_notified"] = True
-                df.at[index, "date_closed"] = now_text()
                 closed += 1
     save_paper_trades_df(df)
     update_paper_equity_curve(df)
@@ -5011,6 +5306,7 @@ def send_startup_message():
         {"name": "Setup Analytics", "value": f"{'On' if BOT_SETUP_ANALYTICS_ENABLED else 'Off'} | Min Sample {BOT_SETUP_ANALYTICS_MIN_SAMPLE} | Strong PF {BOT_SETUP_ANALYTICS_STRONG_PF} | Strong WR {BOT_SETUP_ANALYTICS_STRONG_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "Strategy Ranking", "value": f"{'On' if BOT_STRATEGY_RANKING_ENABLED else 'Off'} | Min Sample {BOT_STRATEGY_RANKING_MIN_SAMPLE} | Strong PF {BOT_STRATEGY_RANKING_STRONG_PF} | Weak PF {BOT_STRATEGY_RANKING_WEAK_PF} | Block Weak {'On' if BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS else 'Off'}", "inline": False},
         {"name": "Automation Readiness", "value": f"{'On' if BOT_AUTOMATION_READINESS_ENABLED else 'Off'} | Min Closed {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | Target PF {BOT_AUTOMATION_READINESS_TARGET_PF} | Target WR {BOT_AUTOMATION_READINESS_TARGET_WR}% | Ready Score {BOT_AUTOMATION_READINESS_TARGET_SCORE}", "inline": False},
+        {"name": "Trade Lifecycle", "value": f"{'On' if BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED else 'Off'} | Min Sample {BOT_TRADE_LIFECYCLE_MIN_SAMPLE} | Fast TP1 <= {BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS}h | Max Hold {BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS}d", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -5757,6 +6053,12 @@ AUTOMATION_READINESS_HEADERS = [
     "Timestamp", "Metric", "Value", "Target", "Passed", "Score Contribution", "Notes"
 ]
 
+TRADE_LIFECYCLE_HEADERS = [
+    "Timestamp", "Row Type", "Setup Name", "Trades", "TP1 Hits", "TP2 Hits", "Stop Hits",
+    "Avg Hours Open", "Avg Days Open", "Avg Hours To TP1", "Avg Hours To TP2",
+    "Avg Hours To Stop", "Avg Return Per Day %", "Notes"
+]
+
 WALK_FORWARD_HEADERS = [
     "Timestamp", "Windows", "Passed", "Notes"
 ]
@@ -5787,6 +6089,7 @@ GOOGLE_SHEETS_TAB_COLORS = {
     "Backtesting Results": "#00A6A6",
     "Walk Forward": "#00A6A6",
     "Dashboard Analytics": "#34A853",
+    "Trade Lifecycle": "#8E44AD",
     "System Status": "#CC3333",
 }
 
@@ -6758,6 +7061,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Setup Performance", SETUP_PERFORMANCE_HEADERS)
         get_or_create_worksheet(spreadsheet, "Strategy Ranking", STRATEGY_RANKING_HEADERS)
         get_or_create_worksheet(spreadsheet, "Automation Readiness", AUTOMATION_READINESS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Trade Lifecycle", TRADE_LIFECYCLE_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
@@ -6783,6 +7087,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         sync_setup_performance_to_google_sheets(spreadsheet)
         sync_strategy_ranking_to_google_sheets(spreadsheet)
         sync_automation_readiness_to_google_sheets(spreadsheet)
+        sync_trade_lifecycle_to_google_sheets(spreadsheet)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -7134,6 +7439,10 @@ def run_scan():
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Automation readiness Discord report", send_automation_readiness_report_if_due, backtest_results)
     post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Trade lifecycle analytics", log_trade_lifecycle_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Trade lifecycle Discord report", send_trade_lifecycle_report_if_due)
+    post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Top signals Discord summary", send_top_signals_summary, scanned_rows, candidates, sent_count)
     post_scan_errors += int(step_error)
@@ -7260,6 +7569,7 @@ def main():
     log(f"Setup analytics enabled: {BOT_SETUP_ANALYTICS_ENABLED} | min sample={BOT_SETUP_ANALYTICS_MIN_SAMPLE} | strong PF={BOT_SETUP_ANALYTICS_STRONG_PF} | strong WR={BOT_SETUP_ANALYTICS_STRONG_WR}% | mode=recommendation-only")
     log(f"Strategy ranking enabled: {BOT_STRATEGY_RANKING_ENABLED} | min sample={BOT_STRATEGY_RANKING_MIN_SAMPLE} | strong PF={BOT_STRATEGY_RANKING_STRONG_PF} | strong WR={BOT_STRATEGY_RANKING_STRONG_WR}% | weak PF={BOT_STRATEGY_RANKING_WEAK_PF} | weak WR={BOT_STRATEGY_RANKING_WEAK_WR}% | block weak={BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS}")
     log(f"Automation readiness enabled: {BOT_AUTOMATION_READINESS_ENABLED} | min closed={BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | target WR={BOT_AUTOMATION_READINESS_TARGET_WR}% | target PF={BOT_AUTOMATION_READINESS_TARGET_PF} | ready score={BOT_AUTOMATION_READINESS_TARGET_SCORE}")
+    log(f"Trade lifecycle analytics enabled: {BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED} | min sample={BOT_TRADE_LIFECYCLE_MIN_SAMPLE} | fast TP1={BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS}h | max hold={BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS}d | mode=recommendation-only")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
