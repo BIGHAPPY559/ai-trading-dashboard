@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.9-dynamic-confidence-optimization"
+BOT_VERSION = "google-sheets-100-production-v32.10-setup-performance-analytics"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -493,6 +493,13 @@ BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED = max(0, min(get_env_float("BOT_DYNAMIC_C
 BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED = max(BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED, min(get_env_float("BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED", 90), 100))
 BOT_DYNAMIC_CONFIDENCE_USE_BACKTEST = get_env_bool("BOT_DYNAMIC_CONFIDENCE_USE_BACKTEST", True)
 BOT_DYNAMIC_CONFIDENCE_USE_PAPER = get_env_bool("BOT_DYNAMIC_CONFIDENCE_USE_PAPER", True)
+
+# v32.10 Setup Performance Analytics.
+BOT_SETUP_ANALYTICS_ENABLED = get_env_bool("BOT_SETUP_ANALYTICS_ENABLED", True)
+BOT_SETUP_ANALYTICS_MIN_SAMPLE = max(1, get_env_int("BOT_SETUP_ANALYTICS_MIN_SAMPLE", 5))
+BOT_SETUP_ANALYTICS_STRONG_PF = max(0, get_env_float("BOT_SETUP_ANALYTICS_STRONG_PF", 1.5))
+BOT_SETUP_ANALYTICS_STRONG_WR = max(0, min(get_env_float("BOT_SETUP_ANALYTICS_STRONG_WR", 50), 100))
+BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS = max(3, get_env_int("BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS", 10))
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -502,6 +509,7 @@ PAPER_TRADE_HEADERS = [
     "stop_loss", "tp1", "tp2", "confidence", "position_size", "position_value",
     "status", "result", "date_opened", "date_closed", "last_updated",
     "pnl_percent", "pnl_dollars", "risk_reward_2", "signal_rank", "quality_score",
+    "setup_name", "setup_tags", "setup_score",
     "notes", "tp1_notified", "tp2_notified", "stop_notified", "closed_notified",
 ]
 
@@ -999,7 +1007,7 @@ def normalize_paper_trade_dtypes(df):
     numeric_columns = [
         "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
         "position_size", "position_value", "pnl_percent", "pnl_dollars",
-        "risk_reward_2", "signal_rank", "quality_score",
+        "risk_reward_2", "signal_rank", "quality_score", "setup_score",
     ]
     bool_columns = ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified"]
     text_columns = [column for column in PAPER_TRADE_HEADERS if column not in numeric_columns + bool_columns]
@@ -3087,6 +3095,10 @@ def build_dashboard_analytics_rows(scanned_rows, backtest_results=None):
     rows.append(["Dynamic Confidence Recommendation", confidence_report.get("recommendation", "N/A")])
     rows.append(["Best Confidence Bucket", confidence_report.get("best_bucket", "N/A")])
     rows.append(["Confidence Bucket Summary", confidence_report.get("bucket_summary", "No confidence data")])
+    setup_report = build_setup_performance_report() if BOT_SETUP_ANALYTICS_ENABLED else {}
+    rows.append(["Best Setup", setup_report.get("best_setup", "N/A")])
+    rows.append(["Worst Setup", setup_report.get("worst_setup", "N/A")])
+    rows.append(["Setup Recommendation", setup_report.get("recommendation", "N/A")])
     return rows
 
 def sync_dashboard_analytics_to_google_sheets(scanned_rows, backtest_results=None):
@@ -3300,6 +3312,121 @@ def log_dynamic_confidence_report(backtest_results=None):
         return report
     log(f"Dynamic confidence optimization source: {report.get('source')}")
     log(f"Dynamic confidence recommendation: {report.get('recommendation')}")
+    return report
+
+
+# ======================================================
+# v32.10 SETUP PERFORMANCE ANALYTICS
+# ======================================================
+
+def setup_tag_enabled(row, column, threshold=70):
+    return safe_float(row.get(column, 0), 0) >= threshold
+
+
+def build_setup_profile(row):
+    try:
+        signal = str(row.get("AI Signal", ""))
+        direction = "Long" if "BUY" in signal else "Short" if "SELL" in signal else "Neutral"
+        tags = []
+        if setup_tag_enabled(row, "MTF Confidence"):
+            tags.append("MTF")
+        if setup_tag_enabled(row, "Volume Confidence"):
+            tags.append("Volume")
+        if setup_tag_enabled(row, "Market Confidence"):
+            tags.append("Market")
+        if setup_tag_enabled(row, "S/R Confidence"):
+            tags.append("S/R")
+        if setup_tag_enabled(row, "Risk/Reward Confidence"):
+            tags.append("R/R")
+        if setup_tag_enabled(row, "News Confidence"):
+            tags.append("News")
+        if not tags:
+            tags = ["Base"]
+        rr = safe_float(row.get("Risk/Reward 2", 0), 0)
+        confidence = safe_float(row.get("AI Confidence %", 0), 0)
+        quality = safe_float(row.get("Signal Quality Score", 0), 0)
+        setup_score = round(min(100, max(0, confidence * 0.55 + quality * 0.30 + min(rr, 3) * 5)), 2)
+        setup_name = f"{direction}: " + "+".join(tags[:4])
+        if len(tags) > 4:
+            setup_name += f" +{len(tags) - 4}"
+        return {"setup_name": setup_name, "setup_tags": ", ".join(tags), "setup_score": setup_score}
+    except Exception as error:
+        log(f"Setup profile build error: {error}")
+        return {"setup_name": "Unknown Setup", "setup_tags": "Unknown", "setup_score": 0}
+
+
+def calculate_setup_performance_rows(df=None):
+    if not BOT_SETUP_ANALYTICS_ENABLED:
+        return []
+    try:
+        df = load_paper_trades_df() if df is None else df
+        if df is None or df.empty or "setup_name" not in df.columns:
+            return []
+        closed = df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+        if closed.empty:
+            return []
+        rows = []
+        for setup_name, group in closed.groupby(closed["setup_name"].fillna("Unknown Setup").astype(str)):
+            pnl = pd.to_numeric(group.get("pnl_dollars", 0), errors="coerce").fillna(0)
+            pnl_pct = pd.to_numeric(group.get("pnl_percent", 0), errors="coerce").fillna(0)
+            wins = pnl[pnl > 0]
+            losses = pnl[pnl < 0]
+            trades = int(len(group))
+            gross_wins = float(wins.sum())
+            gross_losses = abs(float(losses.sum()))
+            pf = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0)
+            wr = round((len(wins) / trades) * 100, 2) if trades else 0
+            tags_blob = ", ".join(group.get("setup_tags", pd.Series(dtype=str)).fillna("").astype(str).tolist())
+            tags = ", ".join(sorted({item.strip() for item in tags_blob.split(",") if item.strip()})) or "N/A"
+            status = "STRONG" if trades >= BOT_SETUP_ANALYTICS_MIN_SAMPLE and pf >= BOT_SETUP_ANALYTICS_STRONG_PF and wr >= BOT_SETUP_ANALYTICS_STRONG_WR else "WATCH" if trades >= BOT_SETUP_ANALYTICS_MIN_SAMPLE else "COLLECTING"
+            rows.append({
+                "setup_name": setup_name or "Unknown Setup",
+                "setup_tags": tags,
+                "trades": trades,
+                "wins": int(len(wins)),
+                "losses": int(len(losses)),
+                "wr": wr,
+                "pf": pf,
+                "avg_return": round(float(pnl_pct.mean()), 2) if trades else 0,
+                "total_pnl": round(float(pnl.sum()), 2),
+                "status": status,
+            })
+        return sorted(rows, key=lambda row: (safe_float(row.get("pf", 0), 0), safe_float(row.get("wr", 0), 0), safe_float(row.get("total_pnl", 0), 0)), reverse=True)
+    except Exception as error:
+        log(f"Setup performance calculation error: {error}")
+        return []
+
+
+def build_setup_performance_report(df=None):
+    rows = calculate_setup_performance_rows(df)
+    if not rows:
+        return {"rows": [], "best_setup": "N/A", "worst_setup": "N/A", "recommendation": "Collect more closed paper trades before ranking setups."}
+    reliable = [row for row in rows if int(row.get("trades", 0)) >= BOT_SETUP_ANALYTICS_MIN_SAMPLE]
+    source_rows = reliable if reliable else rows
+    best = source_rows[0]
+    worst = sorted(source_rows, key=lambda row: (safe_float(row.get("pf", 0), 0), safe_float(row.get("wr", 0), 0), safe_float(row.get("total_pnl", 0), 0)))[0]
+    strong = [row for row in reliable if row.get("status") == "STRONG"]
+    if strong:
+        recommendation = f"Prioritize {strong[0].get('setup_name')} when it appears. PF {strong[0].get('pf')} | WR {strong[0].get('wr')}%."
+    elif reliable:
+        recommendation = f"No setup has met PF {BOT_SETUP_ANALYTICS_STRONG_PF} and WR {BOT_SETUP_ANALYTICS_STRONG_WR}% yet. Best reliable setup: {best.get('setup_name')}."
+    else:
+        recommendation = f"Collect more data. Minimum sample is {BOT_SETUP_ANALYTICS_MIN_SAMPLE} closed trades per setup."
+    return {
+        "rows": rows,
+        "best_setup": f"{best.get('setup_name')} | PF {best.get('pf')} | WR {best.get('wr')}% | Trades {best.get('trades')}",
+        "worst_setup": f"{worst.get('setup_name')} | PF {worst.get('pf')} | WR {worst.get('wr')}% | Trades {worst.get('trades')}",
+        "recommendation": recommendation,
+    }
+
+
+def log_setup_performance_report():
+    report = build_setup_performance_report()
+    if BOT_SETUP_ANALYTICS_ENABLED:
+        log(f"Setup performance analytics: {report.get('recommendation')}")
+        if report.get("best_setup") != "N/A":
+            log(f"Best setup: {report.get('best_setup')}")
+            log(f"Worst setup: {report.get('worst_setup')}")
     return report
 
 # ======================================================
@@ -3551,6 +3678,7 @@ def create_paper_trade_from_signal(row):
             "risk_reward_2": safe_float(row.get("Risk/Reward 2", 0), 0),
             "signal_rank": row.get("Signal Rank", ""),
             "quality_score": safe_float(row.get("Signal Quality Score", 0), 0),
+            **build_setup_profile(row),
             "notes": compact_text(f"{row.get('Exposure Notes', '')} | {quality_note}", 500),
             "tp1_notified": False,
             "tp2_notified": False,
@@ -4448,6 +4576,7 @@ def send_startup_message():
         {"name": "Paper Trade Routing", "value": f"Crypto {'Dedicated' if CRYPTO_PAPER_TRADE_WEBHOOK_URL != CRYPTO_TRADE_WEBHOOK_URL else 'Trade fallback'} | Stock {'Dedicated' if STOCK_PAPER_TRADE_WEBHOOK_URL != STOCK_TRADE_WEBHOOK_URL else 'Trade fallback'}", "inline": False},
         {"name": "Paper Trade Quality Gate", "value": f"Max Open {BOT_PAPER_TRADE_MAX_OPEN_TOTAL} | Min PF {BOT_PAPER_TRADE_MIN_BACKTEST_PF} | Min WR {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}% | Min Signals {BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS} | Avoid {', '.join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else 'None'}", "inline": False},
         {"name": "Dynamic Confidence", "value": f"{'On' if BOT_DYNAMIC_CONFIDENCE_ENABLED else 'Off'} | Current Min {MIN_CONFIDENCE}% | Target PF {BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | Target WR {BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | Mode Recommendation-Only", "inline": False},
+        {"name": "Setup Analytics", "value": f"{'On' if BOT_SETUP_ANALYTICS_ENABLED else 'Off'} | Min Sample {BOT_SETUP_ANALYTICS_MIN_SAMPLE} | Strong PF {BOT_SETUP_ANALYTICS_STRONG_PF} | Strong WR {BOT_SETUP_ANALYTICS_STRONG_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -5177,6 +5306,11 @@ BOT_PERFORMANCE_HEADERS = [
 
 DASHBOARD_ANALYTICS_HEADERS = [
     "Metric", "Value"
+]
+
+SETUP_PERFORMANCE_HEADERS = [
+    "Timestamp", "Setup Name", "Setup Tags", "Trades", "Wins", "Losses",
+    "Win Rate %", "Profit Factor", "Average Return %", "Total P/L", "Status"
 ]
 
 WALK_FORWARD_HEADERS = [
@@ -6108,6 +6242,27 @@ def update_best_tickers(spreadsheet):
         log(f"Google Sheets best tickers update error: {error}")
 
 
+def sync_setup_performance_to_google_sheets(spreadsheet):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_SETUP_ANALYTICS_ENABLED:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Setup Performance", SETUP_PERFORMANCE_HEADERS)
+        rows = []
+        for row in calculate_setup_performance_rows()[:BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS]:
+            rows.append([
+                now_text(), row.get("setup_name", ""), row.get("setup_tags", ""),
+                row.get("trades", 0), row.get("wins", 0), row.get("losses", 0),
+                row.get("wr", 0), row.get("pf", 0), row.get("avg_return", 0),
+                row.get("total_pnl", 0), row.get("status", ""),
+            ])
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [SETUP_PERFORMANCE_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Setup performance sync error: {error}")
+        return False
+
+
 def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0):
     global LAST_GOOGLE_SHEETS_SYNC_TIME
     global LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME
@@ -6133,6 +6288,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Backtesting Results", BACKTEST_RESULTS_HEADERS)
         get_or_create_worksheet(spreadsheet, "Walk Forward", WALK_FORWARD_HEADERS)
         get_or_create_worksheet(spreadsheet, "Dashboard Analytics", DASHBOARD_ANALYTICS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Setup Performance", SETUP_PERFORMANCE_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
@@ -6155,6 +6311,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         update_bot_performance(spreadsheet)
         update_best_tickers(spreadsheet)
         sync_dashboard_analytics_to_google_sheets(scanned_rows)
+        sync_setup_performance_to_google_sheets(spreadsheet)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -6498,6 +6655,8 @@ def run_scan():
 
     _, step_error = run_safe_step("Dynamic confidence optimization", log_dynamic_confidence_report, backtest_results)
     post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Setup performance analytics", log_setup_performance_report)
+    post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Top signals Discord summary", send_top_signals_summary, scanned_rows, candidates, sent_count)
     post_scan_errors += int(step_error)
@@ -6620,6 +6779,8 @@ def main():
     log(f"Adaptive filters enabled: {BOT_ADAPTIVE_FILTERS_ENABLED} | block weak={BOT_ADAPTIVE_BLOCK_WEAK_TICKERS} | min closed={BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES}")
     log(f"Adaptive bootstrap enabled: {BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP} | min backtest signals={BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS}")
     log(f"Adaptive thresholds: avoid PF<={BOT_ADAPTIVE_AVOID_MAX_PF} or WR<={BOT_ADAPTIVE_AVOID_MAX_WR}% | favorite PF>={BOT_ADAPTIVE_FAVORITE_MIN_PF} and WR>={BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
+    log(f"Dynamic confidence enabled: {BOT_DYNAMIC_CONFIDENCE_ENABLED} | min sample={BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE} | target PF={BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | target WR={BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | mode=recommendation-only")
+    log(f"Setup analytics enabled: {BOT_SETUP_ANALYTICS_ENABLED} | min sample={BOT_SETUP_ANALYTICS_MIN_SAMPLE} | strong PF={BOT_SETUP_ANALYTICS_STRONG_PF} | strong WR={BOT_SETUP_ANALYTICS_STRONG_WR}% | mode=recommendation-only")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")

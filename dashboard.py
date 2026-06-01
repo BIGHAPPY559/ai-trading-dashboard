@@ -116,7 +116,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.7.2_arrow_dtype_safe_deploy"
+APP_VERSION = "v32.10.1_setup_intelligence_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -189,6 +189,16 @@ BOT_ADAPTIVE_FAVORITE_MIN_PF = get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_PF", 1.5
 BOT_ADAPTIVE_FAVORITE_MIN_WR = get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_WR", 55)
 BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE = get_env_int("BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE", 5)
 BOT_ADAPTIVE_REGIME_MIN_SAMPLE = get_env_int("BOT_ADAPTIVE_REGIME_MIN_SAMPLE", 5)
+
+# v32.10.1 Setup Intelligence dashboard settings.
+# These mirror the v32.10 bot analytics so the dashboard can show which setups are working.
+BOT_SETUP_ANALYTICS_MIN_SAMPLE = get_env_int("BOT_SETUP_ANALYTICS_MIN_SAMPLE", 5)
+BOT_SETUP_ANALYTICS_STRONG_PF = get_env_float("BOT_SETUP_ANALYTICS_STRONG_PF", 1.5)
+BOT_SETUP_ANALYTICS_STRONG_WR = get_env_float("BOT_SETUP_ANALYTICS_STRONG_WR", 50)
+BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS = get_env_int("BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS", 10)
+BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE = get_env_int("BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE", 20)
+BOT_DYNAMIC_CONFIDENCE_TARGET_PF = get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_PF", 1.5)
+BOT_DYNAMIC_CONFIDENCE_TARGET_WR = get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_WR", 50)
 
 
 def now_dt():
@@ -1134,6 +1144,150 @@ def build_adaptive_filter_report(df):
 
 
 
+
+def fallback_setup_name(row):
+    """Build a readable setup name when older paper trades do not have v32.10 setup_name yet."""
+    signal = str(row.get("signal", "UNKNOWN") or "UNKNOWN").upper()
+    direction = "Long" if "BUY" in signal else "Short" if "SELL" in signal else "Unknown"
+    tags = []
+    notes = str(row.get("notes", "") or "").lower()
+    quality = safe_float_dashboard(row.get("quality_score", 0), 0)
+    rr = safe_float_dashboard(row.get("risk_reward_2", 0), 0)
+    confidence = safe_float_dashboard(row.get("confidence", 0), 0)
+    if confidence >= 80:
+        tags.append("HighConf")
+    elif confidence >= 75:
+        tags.append("MinConf")
+    if rr >= 2:
+        tags.append("RR2+")
+    elif rr >= 1.5:
+        tags.append("RR1.5+")
+    if quality >= 85:
+        tags.append("EliteQS")
+    elif quality >= 70:
+        tags.append("StrongQS")
+    if "mtf" in notes:
+        tags.append("MTF")
+    if "volume" in notes:
+        tags.append("Volume")
+    if "market" in notes or "risk-on" in notes or "risk-off" in notes:
+        tags.append("Market")
+    if not tags:
+        tags.append("General")
+    return f"{direction}: " + "+".join(tags[:4])
+
+
+def safe_float_dashboard(value, default=0):
+    try:
+        value = float(value)
+        if pd.isna(value):
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def ensure_setup_columns(df):
+    trades = normalize_paper_trade_df(df)
+    if trades.empty:
+        return trades
+    if "setup_name" not in trades.columns:
+        trades["setup_name"] = trades.apply(fallback_setup_name, axis=1)
+    else:
+        trades["setup_name"] = trades["setup_name"].replace(["", "nan", "None"], pd.NA)
+        missing = trades["setup_name"].isna()
+        if missing.any():
+            trades.loc[missing, "setup_name"] = trades[missing].apply(fallback_setup_name, axis=1)
+    if "setup_tags" not in trades.columns:
+        trades["setup_tags"] = trades["setup_name"].astype(str).str.replace(": ", "+", regex=False)
+    if "setup_score" not in trades.columns:
+        trades["setup_score"] = pd.to_numeric(trades.get("quality_score", 0), errors="coerce").fillna(0)
+    else:
+        trades["setup_score"] = pd.to_numeric(trades["setup_score"], errors="coerce").fillna(pd.to_numeric(trades.get("quality_score", 0), errors="coerce").fillna(0))
+    return trades
+
+
+def build_setup_performance_tables(df):
+    trades = ensure_setup_columns(df)
+    closed = closed_paper_trades(trades)
+    setup_perf = build_group_performance(trades, "setup_name", BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+    tag_perf = build_group_performance(trades, "setup_tags", BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+    if setup_perf.empty:
+        best_setups = pd.DataFrame()
+        worst_setups = pd.DataFrame()
+        needs_more_data = pd.DataFrame()
+    else:
+        best_setups = setup_perf[
+            (setup_perf["Trades"] >= BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+            & (setup_perf["Profit Factor"] >= BOT_SETUP_ANALYTICS_STRONG_PF)
+            & (setup_perf["Win Rate %"] >= BOT_SETUP_ANALYTICS_STRONG_WR)
+        ].head(BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS)
+        reliable = setup_perf[setup_perf["Trades"] >= BOT_SETUP_ANALYTICS_MIN_SAMPLE]
+        worst_setups = reliable[
+            (reliable["Profit Factor"] <= BOT_ADAPTIVE_AVOID_MAX_PF)
+            | (reliable["Win Rate %"] <= BOT_ADAPTIVE_AVOID_MAX_WR)
+        ].sort_values(by=["Profit Factor", "Win Rate %", "Total P/L $"], ascending=True).head(BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS)
+        needs_more_data = setup_perf[setup_perf["Trades"] < BOT_SETUP_ANALYTICS_MIN_SAMPLE].head(BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS)
+    if closed.empty:
+        recent_closed = pd.DataFrame()
+    else:
+        scorecard_cols = [
+            "ticker", "market", "signal", "setup_name", "setup_tags", "setup_score",
+            "confidence", "quality_score", "risk_reward_2", "pnl_percent", "pnl_dollars",
+            "status", "date_opened", "date_closed"
+        ]
+        scorecard_cols = [col for col in scorecard_cols if col in closed.columns]
+        recent_closed = closed.sort_values(by="date_closed", ascending=False).head(25)[scorecard_cols] if "date_closed" in closed.columns else closed.head(25)[scorecard_cols]
+    return {
+        "trades": trades,
+        "closed": closed,
+        "setup_perf": setup_perf,
+        "tag_perf": tag_perf,
+        "best_setups": best_setups,
+        "worst_setups": worst_setups,
+        "needs_more_data": needs_more_data,
+        "recent_closed": recent_closed,
+    }
+
+
+def build_setup_intelligence_recommendations(tables):
+    recs = []
+    best = tables.get("best_setups", pd.DataFrame())
+    worst = tables.get("worst_setups", pd.DataFrame())
+    setup_perf = tables.get("setup_perf", pd.DataFrame())
+    if not best.empty:
+        for _, row in best.head(3).iterrows():
+            recs.append(f"✅ Favor setup '{row['Group']}' when other filters agree: PF {row['Profit Factor']} | WR {row['Win Rate %']}% | Trades {row['Trades']}.")
+    if not worst.empty:
+        for _, row in worst.head(3).iterrows():
+            recs.append(f"⚠️ Do not automate setup '{row['Group']}' yet: PF {row['Profit Factor']} | WR {row['Win Rate %']}% | Trades {row['Trades']}.")
+    if setup_perf.empty:
+        recs.append("Collect setup-tagged paper trades first. v32.10 bot trades will populate setup_name/setup_tags automatically.")
+    elif not recs:
+        recs.append("Setup data is not decisive yet. Keep collecting closed paper trades before turning setup rules into automation.")
+    return recs[:8]
+
+
+def build_dynamic_confidence_dashboard(df):
+    trades = ensure_setup_columns(df)
+    confidence_df = build_group_performance(trades, "confidence_bucket", 1) if "confidence_bucket" in trades.columns else pd.DataFrame()
+    if confidence_df.empty:
+        enriched = enrich_trade_intelligence_df(trades)
+        confidence_df = build_group_performance(enriched, "confidence_bucket", 1)
+    if confidence_df.empty:
+        return confidence_df, "No confidence-bucket results yet. Keep current BOT_SIGNAL_MIN_CONFIDENCE until more trades close."
+    reliable = confidence_df[confidence_df["Trades"] >= BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE].copy()
+    if reliable.empty:
+        return confidence_df, f"Need {BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE}+ closed trades per confidence bucket before changing BOT_SIGNAL_MIN_CONFIDENCE."
+    strong = reliable[
+        (reliable["Profit Factor"] >= BOT_DYNAMIC_CONFIDENCE_TARGET_PF)
+        & (reliable["Win Rate %"] >= BOT_DYNAMIC_CONFIDENCE_TARGET_WR)
+    ].sort_values(by=["Profit Factor", "Win Rate %"], ascending=False)
+    if strong.empty:
+        return confidence_df, "No confidence bucket has met the target yet. Keep the current confidence threshold and collect more data."
+    best = strong.iloc[0]
+    return confidence_df, f"Best reliable confidence bucket: {best['Group']} | PF {best['Profit Factor']} | WR {best['Win Rate %']}%. Use this as guidance before raising automation thresholds."
+
 def normalize_paper_trade_df(df):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -1141,12 +1295,12 @@ def normalize_paper_trade_df(df):
     numeric_columns = [
         "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
         "position_size", "position_value", "pnl_percent", "pnl_dollars",
-        "risk_reward_2", "signal_rank", "quality_score"
+        "risk_reward_2", "signal_rank", "quality_score", "setup_score"
     ]
     for column in numeric_columns:
         if column in clean_df.columns:
             clean_df[column] = pd.to_numeric(clean_df[column], errors="coerce")
-    for column in ["ticker", "market", "signal", "status", "result", "notes"]:
+    for column in ["ticker", "market", "signal", "status", "result", "notes", "setup_name", "setup_tags"]:
         if column in clean_df.columns:
             clean_df[column] = clean_df[column].astype(str)
     return clean_df
@@ -2216,7 +2370,7 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, adaptive_filters_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -2225,6 +2379,7 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Performance Gate",
     "Trade Intelligence",
     "Adaptive Filters",
+    "Setup Intelligence",
     "Crypto",
     "Stocks",
     "AI Scanner",
@@ -2868,6 +3023,102 @@ with adaptive_filters_tab:
 
 
 # ======================================================
+# v32.10.1 SETUP INTELLIGENCE TAB
+# ======================================================
+
+with setup_intelligence_tab:
+    st.header("v32.10.1 Setup Intelligence")
+    st.caption("This shows which setup types are working, which setups should not be automated, and whether confidence buckets support raising thresholds.")
+
+    paper_trades_df = load_paper_trades_df()
+    tables = build_setup_performance_tables(paper_trades_df)
+    setup_perf = tables["setup_perf"]
+    best_setups = tables["best_setups"]
+    worst_setups = tables["worst_setups"]
+    closed_count = len(tables["closed"])
+    unique_setups = setup_perf["Group"].nunique() if not setup_perf.empty and "Group" in setup_perf.columns else 0
+    confidence_df, confidence_recommendation = build_dynamic_confidence_dashboard(paper_trades_df)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Closed Trades", closed_count)
+    col2.metric("Unique Setups", unique_setups)
+    col3.metric("Strong Setups", len(best_setups))
+    col4.metric("Weak Setups", len(worst_setups))
+
+    st.subheader("Setup Intelligence Recommendations")
+    for recommendation in build_setup_intelligence_recommendations(tables):
+        st.write(recommendation)
+    st.write("📌", confidence_recommendation)
+
+    if closed_count < BOT_PERFORMANCE_GATE_MIN_TRADES:
+        st.warning(
+            f"Do not move to v33 automation yet. Current closed trades: {closed_count}. "
+            f"Target: {BOT_PERFORMANCE_GATE_MIN_TRADES}+ closed paper trades."
+        )
+
+    st.subheader("Best Setups")
+    if best_setups.empty:
+        st.info(f"No setup has met the strong criteria yet: PF >= {BOT_SETUP_ANALYTICS_STRONG_PF}, WR >= {BOT_SETUP_ANALYTICS_STRONG_WR}%, and {BOT_SETUP_ANALYTICS_MIN_SAMPLE}+ trades.")
+    else:
+        st.dataframe(best_setups, width="stretch")
+
+    st.subheader("Weak / Do-Not-Automate Setups")
+    if worst_setups.empty:
+        st.success("No reliable weak setup has been confirmed yet.")
+    else:
+        st.error("These setups should not be automated until performance improves.")
+        st.dataframe(worst_setups, width="stretch")
+
+    st.subheader("All Setup Performance")
+    if setup_perf.empty:
+        st.info("No setup performance data yet. Deploy/run the v32.10 bot so new paper trades include setup_name and setup_tags.")
+    else:
+        st.dataframe(setup_perf, width="stretch")
+        chart_cols = [col for col in ["Win Rate %", "Profit Factor"] if col in setup_perf.columns]
+        if "Group" in setup_perf.columns and chart_cols:
+            st.bar_chart(setup_perf.set_index("Group")[chart_cols])
+        st.download_button(
+            "Download Setup Performance CSV",
+            setup_perf.to_csv(index=False),
+            "setup_performance_dashboard.csv",
+            "text/csv"
+        )
+
+    st.subheader("Setup Tag Performance")
+    tag_perf = tables["tag_perf"]
+    if tag_perf.empty:
+        st.info("No setup tag performance data yet.")
+    else:
+        st.dataframe(tag_perf, width="stretch")
+
+    st.subheader("Dynamic Confidence Recommendation")
+    if confidence_df.empty:
+        st.info("No confidence-bucket data yet.")
+    else:
+        st.dataframe(confidence_df, width="stretch")
+        if "Group" in confidence_df.columns:
+            st.bar_chart(confidence_df.set_index("Group")[["Win Rate %", "Profit Factor"]])
+
+    st.subheader("Recent Closed Setup Scorecards")
+    recent_closed = tables["recent_closed"]
+    if recent_closed.empty:
+        st.info("Closed paper trades will appear here once trades hit TP2, stop loss, or close.")
+    else:
+        st.dataframe(recent_closed, width="stretch")
+
+    st.subheader("v33 Automation Guardrail")
+    guardrails = pd.DataFrame([
+        {"Rule": "Minimum closed paper trades", "Current": closed_count, "Required": BOT_PERFORMANCE_GATE_MIN_TRADES},
+        {"Rule": "Strong setup PF", "Current": f">= {BOT_SETUP_ANALYTICS_STRONG_PF}", "Required": "Before favoring setup"},
+        {"Rule": "Strong setup WR", "Current": f">= {BOT_SETUP_ANALYTICS_STRONG_WR}%", "Required": "Before favoring setup"},
+        {"Rule": "Weak setup block", "Current": f"PF <= {BOT_ADAPTIVE_AVOID_MAX_PF} or WR <= {BOT_ADAPTIVE_AVOID_MAX_WR}%", "Required": "Do not automate"},
+        {"Rule": "Confidence sample", "Current": BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE, "Required": "Per bucket before threshold change"},
+    ])
+    st.dataframe(arrow_safe_df(guardrails), width="stretch")
+
+
+
+# ======================================================
 # CRYPTO TAB
 # ======================================================
 
@@ -3505,6 +3756,15 @@ with settings_tab:
     st.write("Auto-favorite min win rate:", f"{BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
     st.write("Confidence optimization min sample:", BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE)
     st.write("Market regime optimization min sample:", BOT_ADAPTIVE_REGIME_MIN_SAMPLE)
+
+    st.subheader("Setup Intelligence Settings")
+    st.write("Setup analytics minimum sample:", BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+    st.write("Strong setup profit factor:", BOT_SETUP_ANALYTICS_STRONG_PF)
+    st.write("Strong setup win rate:", f"{BOT_SETUP_ANALYTICS_STRONG_WR}%")
+    st.write("Max setup report rows:", BOT_SETUP_ANALYTICS_MAX_REPORT_ROWS)
+    st.write("Dynamic confidence min sample:", BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE)
+    st.write("Dynamic confidence target PF:", BOT_DYNAMIC_CONFIDENCE_TARGET_PF)
+    st.write("Dynamic confidence target win rate:", f"{BOT_DYNAMIC_CONFIDENCE_TARGET_WR}%")
 
     st.subheader("Discord Webhook Status")
     st.write("Crypto Trade Webhook:", "Connected" if CRYPTO_TRADE_WEBHOOK_URL else "Not connected")
