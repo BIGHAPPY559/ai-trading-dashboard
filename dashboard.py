@@ -55,6 +55,31 @@ def get_env_list(name, default_items):
     return items if items else list(default_items)
 
 
+def arrow_safe_df(df):
+    """Make Streamlit/PyArrow display stable when a table mixes strings, booleans, and decimals."""
+    if df is None or df.empty:
+        return df
+    safe = df.copy()
+    for column in safe.columns:
+        if safe[column].dtype == "object":
+            safe[column] = safe[column].astype(str)
+    return safe
+
+
+# Global display guard: every st.dataframe call passes through arrow_safe_df.
+# This prevents PyArrow warnings when metric tables mix values like 45.0%, True, and 1.5.
+_ORIGINAL_ST_DATAFRAME = st.dataframe
+
+
+def safe_streamlit_dataframe(data=None, *args, **kwargs):
+    if isinstance(data, pd.DataFrame):
+        data = arrow_safe_df(data)
+    return _ORIGINAL_ST_DATAFRAME(data, *args, **kwargs)
+
+
+st.dataframe = safe_streamlit_dataframe
+
+
 # ======================================================
 # PAGE SETUP
 # ======================================================
@@ -91,7 +116,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.7_adaptive_trade_filters"
+APP_VERSION = "v32.7.2_arrow_dtype_safe_deploy"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -2522,7 +2547,7 @@ with paper_quality_tab:
         {"Guardrail": "Minimum Backtest Signals", "Value": BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS},
         {"Guardrail": "Avoid Tickers", "Value": ", ".join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else "None"},
     ])
-    st.dataframe(guardrails, width="stretch")
+    st.dataframe(arrow_safe_df(guardrails), width="stretch")
     if paper_trades_df.empty:
         st.info("No paper trade quality data yet.")
     else:
@@ -2833,7 +2858,7 @@ with adaptive_filters_tab:
         {"Setting": "Confidence bucket min sample", "Value": BOT_ADAPTIVE_CONFIDENCE_MIN_SAMPLE},
         {"Setting": "Market regime min sample", "Value": BOT_ADAPTIVE_REGIME_MIN_SAMPLE},
     ])
-    st.dataframe(guardrail_df, width="stretch")
+    st.dataframe(arrow_safe_df(guardrail_df), width="stretch")
 
     st.info(
         "Deploy recommendation: keep these adaptive filters as dashboard recommendations until you have 100+ closed paper trades. "

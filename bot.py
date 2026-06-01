@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.2-paper-trade-quality-upgrade"
+BOT_VERSION = "google-sheets-100-production-v32.2.2-dtype-hotfix-safe-deploy"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -919,6 +919,70 @@ def compact_text(value, limit=900):
     return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
 
 
+def to_plain_value(value):
+    """Convert pandas/numpy scalars and NaN values into safe Python values."""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    try:
+        if hasattr(value, "item"):
+            return value.item()
+    except Exception:
+        pass
+
+    return value
+
+
+def sanitize_sheet_values(values):
+    """Normalize Google Sheets payloads to avoid pandas/gspread dtype edge cases."""
+    cleaned = []
+    for row in values or []:
+        if isinstance(row, (list, tuple)):
+            cleaned.append([to_plain_value(cell) for cell in row])
+        else:
+            cleaned.append([to_plain_value(row)])
+    return cleaned
+
+
+def normalize_numeric_ohlcv(data):
+    """Force OHLCV columns to float-safe numeric dtypes before indicators are added."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+    out = data.copy()
+    for column in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("float64")
+    return out
+
+
+def normalize_paper_trade_dtypes(df):
+    """Keep paper-trade CSV columns compatible with decimal updates during monitoring."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    out = df.copy()
+    numeric_columns = [
+        "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
+        "position_size", "position_value", "pnl_percent", "pnl_dollars",
+        "risk_reward_2", "signal_rank", "quality_score",
+    ]
+    bool_columns = ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified"]
+    text_columns = [column for column in PAPER_TRADE_HEADERS if column not in numeric_columns + bool_columns]
+
+    for column in numeric_columns:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("float64")
+    for column in bool_columns:
+        if column in out.columns:
+            out[column] = out[column].astype(str).str.lower().isin(["true", "1", "yes", "y", "on"])
+    for column in text_columns:
+        if column in out.columns:
+            out[column] = out[column].fillna("").astype(str)
+    return out
+
+
 def signal_emoji(signal):
     signal = str(signal or "")
     if "STRONG BUY" in signal:
@@ -1181,7 +1245,8 @@ def normalize_price_data(data):
         if column not in data.columns:
             return pd.DataFrame()
 
-    return data.dropna(subset=["Close"])
+    data = data.dropna(subset=["Close"])
+    return normalize_numeric_ohlcv(data)
 
 
 def get_price_data(ticker, period="1y", interval="1d"):
@@ -1231,7 +1296,7 @@ def get_price_data(ticker, period="1y", interval="1d"):
 
 
 def calculate_indicators(data):
-    data = data.copy()
+    data = normalize_numeric_ohlcv(data)
 
     if data.empty:
         return data
@@ -3043,7 +3108,7 @@ def load_paper_trades_df():
                     df[column] = False
                 else:
                     df[column] = ""
-        return df[PAPER_TRADE_HEADERS]
+        return normalize_paper_trade_dtypes(df[PAPER_TRADE_HEADERS])
     except Exception as error:
         log(f"Paper trades load error: {error}")
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
@@ -3055,6 +3120,7 @@ def save_paper_trades_df(df):
         for column in PAPER_TRADE_HEADERS:
             if column not in df.columns:
                 df[column] = ""
+        df = normalize_paper_trade_dtypes(df[PAPER_TRADE_HEADERS])
         temp_path = f"{PAPER_TRADES_FILE}.tmp"
         df[PAPER_TRADE_HEADERS].to_csv(temp_path, index=False)
         os.replace(temp_path, PAPER_TRADES_FILE)
@@ -4866,9 +4932,9 @@ def safe_update_tab_color(worksheet, color):
 def safe_sheet_update(worksheet, range_name, values):
     """
     Keeps Google Sheets writes compatible across gspread versions.
-    Some versions prefer update(range_name, values), newer versions also
-    accept named arguments. This wrapper prevents deployment surprises.
+    Also sanitizes pandas/numpy scalar values before sending.
     """
+    values = sanitize_sheet_values(values)
     try:
         return worksheet.update(range_name=range_name, values=values)
     except TypeError:
@@ -4879,6 +4945,7 @@ def safe_append_rows(worksheet, rows):
     if not rows:
         return None
 
+    rows = sanitize_sheet_values(rows)
     try:
         return worksheet.append_rows(rows, value_input_option="USER_ENTERED")
     except TypeError:
