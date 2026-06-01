@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.2.2-dtype-hotfix-safe-deploy"
+BOT_VERSION = "google-sheets-100-production-v32.8-adaptive-filter-enforcement"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -460,6 +460,18 @@ BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS = max(1, get_env_int("BOT_PAPER_TRADE_MIN_B
 BOT_PAPER_TRADE_AVOID_TICKERS = clean_ticker_list(get_env_list("BOT_PAPER_TRADE_AVOID_TICKERS", []))
 BOT_SEND_PAPER_TRADE_SUMMARY = get_env_bool("BOT_SEND_PAPER_TRADE_SUMMARY", True)
 BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS = max(1, get_env_float("BOT_PAPER_TRADE_SUMMARY_INTERVAL_HOURS", 6))
+
+# v32.8 Adaptive Filter Enforcement.
+# This uses actual closed paper-trade performance to block weak repeat setups
+# and tag strong repeat setups before v33 automation. It does not place real trades.
+BOT_ADAPTIVE_FILTERS_ENABLED = get_env_bool("BOT_ADAPTIVE_FILTERS_ENABLED", True)
+BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES = max(1, get_env_int("BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES", 20))
+BOT_ADAPTIVE_BLOCK_WEAK_TICKERS = get_env_bool("BOT_ADAPTIVE_BLOCK_WEAK_TICKERS", True)
+BOT_ADAPTIVE_AVOID_MAX_PF = max(0, get_env_float("BOT_ADAPTIVE_AVOID_MAX_PF", 1.0))
+BOT_ADAPTIVE_AVOID_MAX_WR = max(0, min(get_env_float("BOT_ADAPTIVE_AVOID_MAX_WR", 45), 100))
+BOT_ADAPTIVE_FAVORITE_MIN_PF = max(0, get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_PF", 1.5))
+BOT_ADAPTIVE_FAVORITE_MIN_WR = max(0, min(get_env_float("BOT_ADAPTIVE_FAVORITE_MIN_WR", 55), 100))
+BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE = get_env_bool("BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE", True)
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -3161,6 +3173,73 @@ def count_open_paper_trades(df):
     return len(df[df["status"].astype(str).isin(["OPEN", "TP1_HIT"])])
 
 
+def calculate_closed_paper_trade_performance(df, ticker):
+    """Return closed paper-trade stats for one ticker using realized P/L."""
+    empty = {"trades": 0, "wr": 0, "pf": 0, "total_pnl": 0}
+    try:
+        if df is None or df.empty or not ticker:
+            return empty
+        if "ticker" not in df.columns or "status" not in df.columns:
+            return empty
+        closed_statuses = ["TP2_HIT", "STOPPED", "CLOSED"]
+        clean = df.copy()
+        ticker = str(ticker).upper().strip()
+        closed = clean[
+            (clean["ticker"].astype(str).str.upper().str.strip() == ticker)
+            & (clean["status"].astype(str).isin(closed_statuses))
+        ].copy()
+        if closed.empty:
+            return empty
+        pnl = pd.to_numeric(closed.get("pnl_dollars", 0), errors="coerce").fillna(0)
+        wins = pnl[pnl > 0]
+        losses = pnl[pnl < 0]
+        gross_wins = float(wins.sum())
+        gross_losses = abs(float(losses.sum()))
+        profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0)
+        win_rate = round((len(wins) / len(closed)) * 100, 2) if len(closed) else 0
+        return {
+            "trades": int(len(closed)),
+            "wr": win_rate,
+            "pf": profit_factor,
+            "total_pnl": round(float(pnl.sum()), 2),
+        }
+    except Exception as error:
+        log(f"Adaptive filter performance calculation error for {ticker}: {error}")
+        return empty
+
+
+def adaptive_filter_check(row):
+    """Enforce v32.8 paper-trade adaptive filters using closed paper-trade results."""
+    if not BOT_ADAPTIVE_FILTERS_ENABLED:
+        return True, "adaptive filters disabled"
+
+    ticker = str(row.get("Ticker", "")).upper().strip()
+    if not ticker:
+        return True, "adaptive filter skipped: missing ticker"
+
+    df = load_paper_trades_df()
+    stats = calculate_closed_paper_trade_performance(df, ticker)
+    trades = int(stats.get("trades", 0))
+    wr = safe_float(stats.get("wr", 0), 0)
+    pf = safe_float(stats.get("pf", 0), 0)
+
+    if trades < BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES:
+        return True, f"adaptive: needs more data ({trades}/{BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES} closed)"
+
+    if pf <= BOT_ADAPTIVE_AVOID_MAX_PF or wr <= BOT_ADAPTIVE_AVOID_MAX_WR:
+        note = f"adaptive weak ticker: {ticker} {trades} closed | PF {pf} | WR {wr}%"
+        if BOT_ADAPTIVE_BLOCK_WEAK_TICKERS:
+            return False, "blocked: " + note
+        return True, "warning: " + note
+
+    if pf >= BOT_ADAPTIVE_FAVORITE_MIN_PF and wr >= BOT_ADAPTIVE_FAVORITE_MIN_WR:
+        if BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE:
+            return True, f"adaptive favorite: {ticker} {trades} closed | PF {pf} | WR {wr}%"
+        return True, "adaptive favorite"
+
+    return True, f"adaptive neutral: {ticker} {trades} closed | PF {pf} | WR {wr}%"
+
+
 def paper_trade_quality_check(row):
     if not BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED:
         return True, "paper trade quality filter disabled"
@@ -3168,6 +3247,10 @@ def paper_trade_quality_check(row):
     ticker = str(row.get("Ticker", "")).upper().strip()
     if ticker in BOT_PAPER_TRADE_AVOID_TICKERS:
         return False, f"blocked: {ticker} is on BOT_PAPER_TRADE_AVOID_TICKERS"
+
+    adaptive_ok, adaptive_note = adaptive_filter_check(row)
+    if not adaptive_ok:
+        return False, adaptive_note
 
     pf = safe_float(row.get("Backtest Quality PF", 0), 0)
     wr = safe_float(row.get("Backtest Quality WR", 0), 0)
@@ -3188,7 +3271,7 @@ def paper_trade_quality_check(row):
     if wr < BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE:
         return False, f"blocked: paper trade WR {wr}% below {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}%"
 
-    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals}"
+    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals} | {adaptive_note}"
 
 
 def create_paper_trade_from_signal(row):
@@ -6290,6 +6373,8 @@ def main():
     log(f"Backtesting enabled: {BOT_BACKTESTING_ENABLED}")
     log(f"Backtesting settings: period={BOT_BACKTEST_PERIOD}, hold={BOT_BACKTEST_HOLD_DAYS}, lookback={BOT_BACKTEST_LOOKBACK_DAYS}, min_conf={BOT_BACKTEST_MIN_CONFIDENCE}, max_tickers={BOT_BACKTEST_MAX_TICKERS}")
     log(f"Phase 3: regime={BOT_MARKET_REGIME_DETECTION_ENABLED}, ranking={BOT_SIGNAL_RANKING_ENABLED}, sizing={BOT_POSITION_SIZING_ENABLED}, trailing={BOT_TRAILING_STOP_ENABLED}, exposure={BOT_EXPOSURE_CONTROLS_ENABLED}, walk_forward={BOT_WALK_FORWARD_ENABLED}, outcomes={BOT_OUTCOME_TRACKING_ENABLED}, dashboard_analytics={BOT_DASHBOARD_ANALYTICS_ENABLED}")
+    log(f"Adaptive filters enabled: {BOT_ADAPTIVE_FILTERS_ENABLED} | block weak={BOT_ADAPTIVE_BLOCK_WEAK_TICKERS} | min closed={BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES}")
+    log(f"Adaptive thresholds: avoid PF<={BOT_ADAPTIVE_AVOID_MAX_PF} or WR<={BOT_ADAPTIVE_AVOID_MAX_WR}% | favorite PF>={BOT_ADAPTIVE_FAVORITE_MIN_PF} and WR>={BOT_ADAPTIVE_FAVORITE_MIN_WR}%")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
