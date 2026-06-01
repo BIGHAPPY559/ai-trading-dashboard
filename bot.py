@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.8.1-adaptive-bootstrap-fix"
+BOT_VERSION = "google-sheets-100-production-v32.9-dynamic-confidence-optimization"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -477,6 +477,22 @@ BOT_ADAPTIVE_INCLUDE_FAVORITE_NOTE = get_env_bool("BOT_ADAPTIVE_INCLUDE_FAVORITE
 # reaches BOT_ADAPTIVE_FILTERS_MIN_CLOSED_TRADES, real paper-trade results take over.
 BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP = get_env_bool("BOT_ADAPTIVE_USE_BACKTEST_BOOTSTRAP", True)
 BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS = max(1, get_env_int("BOT_ADAPTIVE_BOOTSTRAP_MIN_BACKTEST_SIGNALS", BOT_BACKTEST_QUALITY_MIN_SIGNALS))
+
+
+# v32.9 Dynamic Confidence Optimization.
+# Recommendation-first intelligence layer. It does not automatically change
+# BOT_SIGNAL_MIN_CONFIDENCE; it analyzes paper/backtest performance by
+# confidence bucket and recommends whether the threshold should stay, rise,
+# or wait for more data.
+BOT_DYNAMIC_CONFIDENCE_ENABLED = get_env_bool("BOT_DYNAMIC_CONFIDENCE_ENABLED", True)
+BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE = max(1, get_env_int("BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE", 20))
+BOT_DYNAMIC_CONFIDENCE_TARGET_PF = max(0, get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_PF", 1.5))
+BOT_DYNAMIC_CONFIDENCE_TARGET_WR = max(0, min(get_env_float("BOT_DYNAMIC_CONFIDENCE_TARGET_WR", 50), 100))
+BOT_DYNAMIC_CONFIDENCE_BUCKET_SIZE = max(5, min(get_env_int("BOT_DYNAMIC_CONFIDENCE_BUCKET_SIZE", 5), 20))
+BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED = max(0, min(get_env_float("BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED", MIN_CONFIDENCE), 100))
+BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED = max(BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED, min(get_env_float("BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED", 90), 100))
+BOT_DYNAMIC_CONFIDENCE_USE_BACKTEST = get_env_bool("BOT_DYNAMIC_CONFIDENCE_USE_BACKTEST", True)
+BOT_DYNAMIC_CONFIDENCE_USE_PAPER = get_env_bool("BOT_DYNAMIC_CONFIDENCE_USE_PAPER", True)
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -3063,6 +3079,14 @@ def build_dashboard_analytics_rows(scanned_rows, backtest_results=None):
         rows.append(["Worst Backtest Ticker", "None"])
         rows.append(["Best Setup By Backtest", "None"])
         rows.append(["Worst Setup By Backtest", "None"])
+
+    confidence_report = build_dynamic_confidence_report(backtest_results)
+    rows.append(["Dynamic Confidence Source", confidence_report.get("source", "none")])
+    rows.append(["Current Minimum Confidence", MIN_CONFIDENCE])
+    rows.append(["Recommended Minimum Confidence", confidence_report.get("recommended_min_confidence", MIN_CONFIDENCE)])
+    rows.append(["Dynamic Confidence Recommendation", confidence_report.get("recommendation", "N/A")])
+    rows.append(["Best Confidence Bucket", confidence_report.get("best_bucket", "N/A")])
+    rows.append(["Confidence Bucket Summary", confidence_report.get("bucket_summary", "No confidence data")])
     return rows
 
 def sync_dashboard_analytics_to_google_sheets(scanned_rows, backtest_results=None):
@@ -3107,6 +3131,176 @@ def calculate_walk_forward_summary(results):
         "Walk Forward Notes": f"avg WR {round(avg_win_rate, 2)}% | avg PF {round(avg_pf, 2)} | avg WF pass {round(avg_wf_rate, 2)}% across {len(valid)} ticker(s)",
     }
 
+
+
+# ======================================================
+# v32.9 DYNAMIC CONFIDENCE OPTIMIZATION HELPERS
+# ======================================================
+
+def confidence_bucket_floor(confidence):
+    try:
+        confidence = float(confidence)
+    except Exception:
+        confidence = 0
+    confidence = max(0, min(confidence, 100))
+    bucket = int(confidence // BOT_DYNAMIC_CONFIDENCE_BUCKET_SIZE) * BOT_DYNAMIC_CONFIDENCE_BUCKET_SIZE
+    return min(bucket, 100)
+
+
+def confidence_bucket_label(confidence):
+    floor = confidence_bucket_floor(confidence)
+    if floor >= 100:
+        return "100%"
+    upper = min(100, floor + BOT_DYNAMIC_CONFIDENCE_BUCKET_SIZE - 1)
+    return f"{floor}-{upper}%"
+
+
+def summarize_returns_for_confidence_bucket(values):
+    returns = [safe_float(value, 0) for value in values or []]
+    if not returns:
+        return {"trades": 0, "wr": 0, "pf": 0, "avg_return": 0}
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    gross_wins = sum(wins)
+    gross_losses = abs(sum(losses))
+    pf = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0)
+    wr = round((len(wins) / len(returns)) * 100, 2) if returns else 0
+    avg_return = round(sum(returns) / len(returns), 2) if returns else 0
+    return {"trades": len(returns), "wr": wr, "pf": pf, "avg_return": avg_return}
+
+
+def summarize_confidence_bucket_returns(bucket_returns):
+    rows = []
+    for bucket_floor, returns in sorted((bucket_returns or {}).items()):
+        stats = summarize_returns_for_confidence_bucket(returns)
+        rows.append({
+            "bucket_floor": int(bucket_floor),
+            "bucket": confidence_bucket_label(bucket_floor),
+            **stats,
+        })
+    return rows
+
+
+def choose_dynamic_confidence_recommendation(bucket_rows):
+    if not BOT_DYNAMIC_CONFIDENCE_ENABLED:
+        return {
+            "recommended_min_confidence": MIN_CONFIDENCE,
+            "recommendation": "Dynamic confidence optimization disabled.",
+            "best_bucket": "N/A",
+            "bucket_summary": "Disabled",
+        }
+
+    reliable = [
+        row for row in (bucket_rows or [])
+        if int(row.get("trades", 0)) >= BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE
+    ]
+    if not reliable:
+        total = sum(int(row.get("trades", 0)) for row in (bucket_rows or []))
+        return {
+            "recommended_min_confidence": MIN_CONFIDENCE,
+            "recommendation": f"WAIT: need {BOT_DYNAMIC_CONFIDENCE_MIN_SAMPLE}+ trades per confidence bucket before changing threshold. Current bucketed trades: {total}.",
+            "best_bucket": "Needs more data",
+            "bucket_summary": compact_text(format_confidence_bucket_summary(bucket_rows), 900),
+        }
+
+    strong = [
+        row for row in reliable
+        if safe_float(row.get("pf", 0), 0) >= BOT_DYNAMIC_CONFIDENCE_TARGET_PF
+        and safe_float(row.get("wr", 0), 0) >= BOT_DYNAMIC_CONFIDENCE_TARGET_WR
+    ]
+    if strong:
+        best = sorted(strong, key=lambda row: (safe_float(row.get("pf", 0), 0), safe_float(row.get("wr", 0), 0), safe_float(row.get("avg_return", 0), 0)), reverse=True)[0]
+        recommended = max(BOT_DYNAMIC_CONFIDENCE_MIN_RECOMMENDED, min(float(best.get("bucket_floor", MIN_CONFIDENCE)), BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED))
+        action = "KEEP" if recommended <= MIN_CONFIDENCE else "RAISE"
+        return {
+            "recommended_min_confidence": round(recommended, 2),
+            "recommendation": f"{action}: recommended minimum confidence {round(recommended, 2)} based on strongest reliable bucket {best.get('bucket')} | PF {best.get('pf')} | WR {best.get('wr')}%.",
+            "best_bucket": f"{best.get('bucket')} | PF {best.get('pf')} | WR {best.get('wr')}% | Trades {best.get('trades')}",
+            "bucket_summary": compact_text(format_confidence_bucket_summary(bucket_rows), 900),
+        }
+
+    best = sorted(reliable, key=lambda row: (safe_float(row.get("pf", 0), 0), safe_float(row.get("wr", 0), 0), safe_float(row.get("avg_return", 0), 0)), reverse=True)[0]
+    recommended = max(MIN_CONFIDENCE, min(float(best.get("bucket_floor", MIN_CONFIDENCE)), BOT_DYNAMIC_CONFIDENCE_MAX_RECOMMENDED))
+    return {
+        "recommended_min_confidence": round(recommended, 2),
+        "recommendation": f"CAUTION: no bucket met PF {BOT_DYNAMIC_CONFIDENCE_TARGET_PF} and WR {BOT_DYNAMIC_CONFIDENCE_TARGET_WR}%. Best available bucket is {best.get('bucket')} | PF {best.get('pf')} | WR {best.get('wr')}%. Keep collecting data before enforcing.",
+        "best_bucket": f"{best.get('bucket')} | PF {best.get('pf')} | WR {best.get('wr')}% | Trades {best.get('trades')}",
+        "bucket_summary": compact_text(format_confidence_bucket_summary(bucket_rows), 900),
+    }
+
+
+def format_confidence_bucket_summary(bucket_rows):
+    if not bucket_rows:
+        return "No confidence bucket data yet."
+    lines = []
+    for row in sorted(bucket_rows, key=lambda item: int(item.get("bucket_floor", 0))):
+        lines.append(
+            f"{row.get('bucket')}: {row.get('trades', 0)} trades | WR {row.get('wr', 0)}% | PF {row.get('pf', 0)} | Avg {row.get('avg_return', 0)}%"
+        )
+    return "\n".join(lines)
+
+
+def build_paper_confidence_bucket_rows():
+    if not BOT_DYNAMIC_CONFIDENCE_USE_PAPER:
+        return []
+    try:
+        df = load_paper_trades_df()
+        if df is None or df.empty:
+            return []
+        closed = df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+        if closed.empty or "confidence" not in closed.columns:
+            return []
+        bucket_returns = {}
+        for _, trade in closed.iterrows():
+            bucket = confidence_bucket_floor(trade.get("confidence", 0))
+            pnl_pct = safe_float(trade.get("pnl_percent", 0), 0)
+            bucket_returns.setdefault(bucket, []).append(pnl_pct)
+        return summarize_confidence_bucket_returns(bucket_returns)
+    except Exception as error:
+        log(f"Paper confidence optimization error: {error}")
+        return []
+
+
+def merge_confidence_bucket_rows(rows_list):
+    merged_returns = {}
+    for rows in rows_list or []:
+        for row in rows or []:
+            # Reconstruct weighted pseudo-returns from aggregate stats without inventing wins/losses.
+            # This merge is used for display/recommendation only; paper rows are preferred when available.
+            bucket = int(row.get("bucket_floor", 0))
+            trades = int(row.get("trades", 0) or 0)
+            avg_return = safe_float(row.get("avg_return", 0), 0)
+            if trades <= 0:
+                continue
+            merged_returns.setdefault(bucket, []).extend([avg_return] * trades)
+    return summarize_confidence_bucket_returns(merged_returns)
+
+
+def build_dynamic_confidence_report(backtest_results=None):
+    paper_rows = build_paper_confidence_bucket_rows()
+    backtest_rows = []
+    if BOT_DYNAMIC_CONFIDENCE_USE_BACKTEST:
+        for result in backtest_results or []:
+            for row in result.get("Confidence Bucket Rows", []) or []:
+                backtest_rows.append(row)
+
+    source = "paper" if paper_rows else "backtest" if backtest_rows else "none"
+    rows = paper_rows if paper_rows else merge_confidence_bucket_rows([backtest_rows]) if backtest_rows else []
+    recommendation = choose_dynamic_confidence_recommendation(rows)
+    return {
+        "source": source,
+        "bucket_rows": rows,
+        **recommendation,
+    }
+
+
+def log_dynamic_confidence_report(backtest_results=None):
+    report = build_dynamic_confidence_report(backtest_results)
+    if not BOT_DYNAMIC_CONFIDENCE_ENABLED:
+        return report
+    log(f"Dynamic confidence optimization source: {report.get('source')}")
+    log(f"Dynamic confidence recommendation: {report.get('recommendation')}")
+    return report
 
 # ======================================================
 # v32 PAPER TRADE TRACKING HELPERS
@@ -4253,6 +4447,7 @@ def send_startup_message():
         {"name": "Discord Terminal", "value": f"Elite Alerts {'On' if BOT_DISCORD_ELITE_ALERTS_ENABLED else 'Off'} | Top Signals {'On' if BOT_SEND_TOP_SIGNALS_SUMMARY else 'Off'} | Daily Report {'On' if BOT_SEND_DAILY_PERFORMANCE_REPORT else 'Off'} | Backtest Scorecard {'On' if BOT_SEND_BACKTEST_SCORECARD else 'Off'}", "inline": False},
         {"name": "Paper Trade Routing", "value": f"Crypto {'Dedicated' if CRYPTO_PAPER_TRADE_WEBHOOK_URL != CRYPTO_TRADE_WEBHOOK_URL else 'Trade fallback'} | Stock {'Dedicated' if STOCK_PAPER_TRADE_WEBHOOK_URL != STOCK_TRADE_WEBHOOK_URL else 'Trade fallback'}", "inline": False},
         {"name": "Paper Trade Quality Gate", "value": f"Max Open {BOT_PAPER_TRADE_MAX_OPEN_TOTAL} | Min PF {BOT_PAPER_TRADE_MIN_BACKTEST_PF} | Min WR {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}% | Min Signals {BOT_PAPER_TRADE_MIN_BACKTEST_SIGNALS} | Avoid {', '.join(BOT_PAPER_TRADE_AVOID_TICKERS) if BOT_PAPER_TRADE_AVOID_TICKERS else 'None'}", "inline": False},
+        {"name": "Dynamic Confidence", "value": f"{'On' if BOT_DYNAMIC_CONFIDENCE_ENABLED else 'Off'} | Current Min {MIN_CONFIDENCE}% | Target PF {BOT_DYNAMIC_CONFIDENCE_TARGET_PF} | Target WR {BOT_DYNAMIC_CONFIDENCE_TARGET_WR}% | Mode Recommendation-Only", "inline": False},
         {"name": "News Sentiment Weighting", "value": "On" if BOT_NEWS_SENTIMENT_WEIGHTING_ENABLED else "Off", "inline": True},
         {"name": "Summaries", "value": "On" if SEND_SUMMARIES else "Off", "inline": True},
         {"name": "News", "value": "On" if SEND_NEWS else "Off", "inline": True},
@@ -4671,6 +4866,7 @@ def backtest_ticker(ticker):
     peak_equity = equity
     max_drawdown = 0
     returns_by_window = [[] for _ in range(BOT_WALK_FORWARD_WINDOWS)]
+    confidence_bucket_returns = {}
 
     start_index = BOT_BACKTEST_LOOKBACK_DAYS
     end_index = len(data) - BOT_BACKTEST_HOLD_DAYS
@@ -4723,6 +4919,7 @@ def backtest_ticker(ticker):
             window_index = min(BOT_WALK_FORWARD_WINDOWS - 1, int(((index - start_index) / window_span) * BOT_WALK_FORWARD_WINDOWS))
             returns_by_window[window_index].append(strategy_return)
         confidence_values.append(confidence)
+        confidence_bucket_returns.setdefault(confidence_bucket_floor(confidence), []).append(strategy_return)
         rr_values.append(safe_float(trade_context.get("risk_reward_2", 0), 0))
 
     if not trade_returns:
@@ -4769,6 +4966,10 @@ def backtest_ticker(ticker):
         "Walk Forward Passed Windows": wf_passed_windows,
         "Walk Forward Pass Rate %": wf_pass_rate,
         "Walk Forward Notes": wf_notes,
+        "Confidence Bucket Rows": summarize_confidence_bucket_returns(confidence_bucket_returns),
+        "Confidence Bucket Summary": format_confidence_bucket_summary(summarize_confidence_bucket_returns(confidence_bucket_returns)),
+        "Dynamic Confidence Recommendation": choose_dynamic_confidence_recommendation(summarize_confidence_bucket_returns(confidence_bucket_returns)).get("recommendation", "N/A"),
+        "Recommended Min Confidence": choose_dynamic_confidence_recommendation(summarize_confidence_bucket_returns(confidence_bucket_returns)).get("recommended_min_confidence", MIN_CONFIDENCE),
         "Notes": "OK" if total >= BOT_BACKTEST_MIN_SIGNALS else "low sample size",
     }
 
@@ -6294,6 +6495,9 @@ def run_scan():
     backtest_results, step_error = run_safe_step("Advanced backtest review", maybe_run_backtest_review)
     post_scan_errors += int(step_error)
     backtest_results = backtest_results or []
+
+    _, step_error = run_safe_step("Dynamic confidence optimization", log_dynamic_confidence_report, backtest_results)
+    post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Top signals Discord summary", send_top_signals_summary, scanned_rows, candidates, sent_count)
     post_scan_errors += int(step_error)
