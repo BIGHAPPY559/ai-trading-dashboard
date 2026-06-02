@@ -116,7 +116,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.13_trade_lifecycle_analytics_dashboard"
+APP_VERSION = "v32.13.2_diagnostics_display_fix_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -581,6 +581,152 @@ def load_paper_equity_df():
     except Exception as error:
         st.warning(f"Could not load paper_trade_equity_curve.csv: {error}")
     return pd.DataFrame()
+
+
+def dashboard_file_modified_text(file_path):
+    try:
+        if not os.path.exists(file_path):
+            return "Missing"
+        return datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as error:
+        return f"Unavailable: {error}"
+
+
+def dashboard_file_size_bytes(file_path):
+    try:
+        return os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    except Exception:
+        return 0
+
+
+def build_dashboard_file_diagnostics():
+    trades_df = load_paper_trades_df()
+    equity_df = load_paper_equity_df()
+    diagnostics = {
+        "Dashboard DATA_DIR": DATA_DIR,
+        "Dashboard BOT_DATA_DIR env": os.getenv("BOT_DATA_DIR", ""),
+        "Dashboard DASHBOARD_DATA_DIR env": os.getenv("DASHBOARD_DATA_DIR", ""),
+        "paper_trades.csv path": PAPER_TRADES_FILE,
+        "paper_trades.csv exists": os.path.exists(PAPER_TRADES_FILE),
+        "paper_trades.csv size bytes": dashboard_file_size_bytes(PAPER_TRADES_FILE),
+        "paper_trades.csv modified": dashboard_file_modified_text(PAPER_TRADES_FILE),
+        "paper_trades.csv rows visible to dashboard": int(len(trades_df)) if trades_df is not None else 0,
+        "paper_trade_equity_curve.csv path": PAPER_EQUITY_FILE,
+        "paper_trade_equity_curve.csv exists": os.path.exists(PAPER_EQUITY_FILE),
+        "paper_trade_equity_curve.csv size bytes": dashboard_file_size_bytes(PAPER_EQUITY_FILE),
+        "paper_trade_equity_curve.csv modified": dashboard_file_modified_text(PAPER_EQUITY_FILE),
+        "paper_trade_equity_curve.csv rows visible to dashboard": int(len(equity_df)) if equity_df is not None else 0,
+    }
+    if trades_df is not None and not trades_df.empty and "status" in trades_df.columns:
+        status_series = trades_df["status"].astype(str)
+        diagnostics["Open rows visible"] = int(status_series.isin(["OPEN", "TP1_HIT"]).sum())
+        diagnostics["Closed rows visible"] = int(status_series.isin(["TP2_HIT", "STOPPED", "CLOSED"]).sum())
+        diagnostics["Status counts visible"] = {str(k): int(v) for k, v in status_series.value_counts().to_dict().items()}
+    else:
+        diagnostics["Open rows visible"] = 0
+        diagnostics["Closed rows visible"] = 0
+        diagnostics["Status counts visible"] = {}
+    return diagnostics
+
+
+# ======================================================
+# v32.13.2 PAPER TRADE DATA-FLOW DIAGNOSTICS DISPLAY
+# ======================================================
+
+def normalize_dashboard_path(value):
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return os.path.normpath(text)
+    except Exception:
+        return str(value or "").strip()
+
+
+def bool_status_text(value):
+    return "YES" if bool(value) else "NO"
+
+
+def build_paper_trade_data_flow_diagnostics(bot_status):
+    """Compare bot-written diagnostics with dashboard-visible files so data-flow issues are obvious."""
+    bot_status = bot_status or {}
+    bot_diag = bot_status.get("paper_trade_file_diagnostics", {}) or {}
+    dashboard_diag = build_dashboard_file_diagnostics()
+
+    bot_file = normalize_dashboard_path(bot_diag.get("paper_trades_file", ""))
+    dashboard_file = normalize_dashboard_path(dashboard_diag.get("paper_trades.csv path", ""))
+    bot_rows = safe_float_dashboard(bot_diag.get("paper_trades_rows", 0), 0)
+    dashboard_rows = safe_float_dashboard(dashboard_diag.get("paper_trades.csv rows visible to dashboard", 0), 0)
+    bot_open = safe_float_dashboard(bot_diag.get("paper_trades_open_rows", 0), 0)
+    dashboard_open = safe_float_dashboard(dashboard_diag.get("Open rows visible", 0), 0)
+    bot_closed = safe_float_dashboard(bot_diag.get("paper_trades_closed_rows", 0), 0)
+    dashboard_closed = safe_float_dashboard(dashboard_diag.get("Closed rows visible", 0), 0)
+    bot_tp1 = safe_float_dashboard(bot_diag.get("paper_trades_tp1_rows", 0), 0)
+
+    has_bot_diag = bool(bot_diag)
+    path_match = bool(bot_file and dashboard_file and bot_file == dashboard_file)
+    rows_match = bool(has_bot_diag and int(bot_rows) == int(dashboard_rows))
+    open_match = bool(has_bot_diag and int(bot_open) == int(dashboard_open))
+    closed_match = bool(has_bot_diag and int(bot_closed) == int(dashboard_closed))
+    file_exists_match = bool(
+        has_bot_diag
+        and bool(bot_diag.get("paper_trades_file_exists")) == bool(dashboard_diag.get("paper_trades.csv exists"))
+    )
+
+    warnings = []
+    if not has_bot_diag:
+        warnings.append("Bot has not written v32.13.1+ paper-trade diagnostics yet. Let the bot complete one scan after deploy.")
+    if has_bot_diag and not path_match:
+        warnings.append("Bot and dashboard are not pointing at the same paper_trades.csv path.")
+    if has_bot_diag and path_match and not rows_match:
+        warnings.append("Bot row count and dashboard row count do not match. Check shared Railway volume / BOT_DATA_DIR / DASHBOARD_DATA_DIR.")
+    if has_bot_diag and not bool(bot_diag.get("paper_trades_file_exists")):
+        warnings.append("Bot does not see paper_trades.csv yet. This is normal before the first paper trade is created.")
+    if has_bot_diag and bool(bot_diag.get("paper_trades_file_exists")) and int(bot_rows) == 0:
+        warnings.append("paper_trades.csv exists but has 0 visible rows. Evidence collection has not started yet.")
+    if has_bot_diag and int(bot_rows) > 0 and int(bot_open + bot_closed) == 0:
+        warnings.append("Paper-trade rows exist, but no OPEN/TP1_HIT/TP2_HIT/STOPPED/CLOSED statuses were detected.")
+
+    if not has_bot_diag:
+        health = "WAITING FOR BOT DIAGNOSTICS"
+    elif warnings and (not path_match or not rows_match):
+        health = "DATA FLOW MISMATCH"
+    elif int(bot_rows) == 0:
+        health = "CONNECTED - WAITING FOR PAPER TRADES"
+    else:
+        health = "HEALTHY - DATA FLOW CONNECTED"
+
+    summary = {
+        "Health": health,
+        "Bot Diagnostics Present": bool_status_text(has_bot_diag),
+        "Path Match": bool_status_text(path_match),
+        "File Exists Match": bool_status_text(file_exists_match),
+        "Rows Match": bool_status_text(rows_match),
+        "Open Rows Match": bool_status_text(open_match),
+        "Closed Rows Match": bool_status_text(closed_match),
+        "Bot Rows": int(bot_rows),
+        "Dashboard Rows": int(dashboard_rows),
+        "Bot Open Rows": int(bot_open),
+        "Dashboard Open Rows": int(dashboard_open),
+        "Bot Closed Rows": int(bot_closed),
+        "Dashboard Closed Rows": int(dashboard_closed),
+        "Bot TP1 Rows": int(bot_tp1),
+        "Bot Open Tickers": ", ".join(bot_diag.get("paper_trades_tickers_open", []) or []) or "None",
+        "Warnings": " | ".join(warnings) if warnings else "None",
+    }
+
+    rows = [
+        {"Check": "Bot diagnostics present", "Bot": bool_status_text(has_bot_diag), "Dashboard": "Required", "Match": bool_status_text(has_bot_diag), "Meaning": "Bot wrote paper_trade_file_diagnostics into bot_last_status.json."},
+        {"Check": "paper_trades.csv path", "Bot": bot_file or "Missing", "Dashboard": dashboard_file or "Missing", "Match": bool_status_text(path_match), "Meaning": "Both services should point to the same shared Railway volume path."},
+        {"Check": "paper_trades.csv exists", "Bot": bool_status_text(bot_diag.get("paper_trades_file_exists")) if has_bot_diag else "Unknown", "Dashboard": bool_status_text(dashboard_diag.get("paper_trades.csv exists")), "Match": bool_status_text(file_exists_match), "Meaning": "Confirms both services can see the same trade file."},
+        {"Check": "paper_trades.csv rows", "Bot": int(bot_rows), "Dashboard": int(dashboard_rows), "Match": bool_status_text(rows_match), "Meaning": "Main evidence counter. Rows should match."},
+        {"Check": "Open rows", "Bot": int(bot_open), "Dashboard": int(dashboard_open), "Match": bool_status_text(open_match), "Meaning": "Active paper trades visible to both services."},
+        {"Check": "Closed rows", "Bot": int(bot_closed), "Dashboard": int(dashboard_closed), "Match": bool_status_text(closed_match), "Meaning": "Completed evidence trades visible to both services."},
+        {"Check": "TP1 rows", "Bot": int(bot_tp1), "Dashboard": dashboard_diag.get("Status counts visible", {}).get("TP1_HIT", 0), "Match": "INFO", "Meaning": "Trades that reached TP1 and are still being tracked."},
+        {"Check": "Bot status counts", "Bot": json.dumps(bot_diag.get("paper_trades_status_counts", {}), sort_keys=True), "Dashboard": json.dumps(dashboard_diag.get("Status counts visible", {}), sort_keys=True), "Match": "INFO", "Meaning": "Quick status distribution comparison."},
+    ]
+
+    return summary, pd.DataFrame(rows), dashboard_diag, bot_diag, warnings
 
 
 def load_signal_history_df():
@@ -4078,6 +4224,45 @@ with bot_status_tab:
         else:
             st.success("Last scan completed normally.")
 
+        st.subheader("Paper Trade Data Flow Diagnostics")
+        diag_summary, diag_df, dashboard_diag, bot_diag, diag_warnings = build_paper_trade_data_flow_diagnostics(bot_status)
+
+        health = diag_summary.get("Health", "UNKNOWN")
+        if health == "HEALTHY - DATA FLOW CONNECTED":
+            st.success(health)
+        elif health == "CONNECTED - WAITING FOR PAPER TRADES":
+            st.info(health)
+        elif health == "WAITING FOR BOT DIAGNOSTICS":
+            st.warning(health)
+        else:
+            st.error(health)
+
+        dcol1, dcol2, dcol3, dcol4 = st.columns(4)
+        dcol1.metric("Path Match", diag_summary.get("Path Match", "NO"))
+        dcol2.metric("Rows Match", diag_summary.get("Rows Match", "NO"))
+        dcol3.metric("Bot Rows", diag_summary.get("Bot Rows", 0))
+        dcol4.metric("Dashboard Rows", diag_summary.get("Dashboard Rows", 0))
+
+        dcol5, dcol6, dcol7, dcol8 = st.columns(4)
+        dcol5.metric("Open Trades", diag_summary.get("Bot Open Rows", 0))
+        dcol6.metric("Closed Trades", diag_summary.get("Bot Closed Rows", 0))
+        dcol7.metric("TP1 Trades", diag_summary.get("Bot TP1 Rows", 0))
+        dcol8.metric("Open Tickers", diag_summary.get("Bot Open Tickers", "None"))
+
+        if diag_warnings:
+            for warning in diag_warnings:
+                st.warning(warning)
+        else:
+            st.success("Bot and dashboard paper-trade data flow looks connected.")
+
+        st.dataframe(diag_df, width="stretch")
+
+        with st.expander("Dashboard file diagnostics"):
+            st.json(dashboard_diag)
+
+        with st.expander("Bot paper-trade file diagnostics"):
+            st.json(bot_diag)
+
         with st.expander("Raw bot status JSON"):
             st.json(bot_status)
 
@@ -4108,8 +4293,16 @@ with settings_tab:
     st.header("Settings")
     st.caption(f"Running {APP_VERSION}")
     st.write("Dashboard data dir:", DATA_DIR)
+    st.write("Paper trades file:", PAPER_TRADES_FILE)
+    st.write("Paper trades file exists:", os.path.exists(PAPER_TRADES_FILE))
+    st.write("Paper trades visible rows:", len(load_paper_trades_df()))
     st.write("Dashboard timezone:", BOT_TIMEZONE)
     st.write("Discord message limit:", DISCORD_MESSAGE_LIMIT)
+
+    st.subheader("Paper Trade File Diagnostics")
+    settings_diag_summary, settings_diag_df, settings_dashboard_diag, settings_bot_diag, settings_warnings = build_paper_trade_data_flow_diagnostics(load_bot_status())
+    st.caption(settings_diag_summary.get("Health", "UNKNOWN"))
+    st.dataframe(settings_diag_df, width="stretch")
 
     st.subheader("Active Watchlists")
 

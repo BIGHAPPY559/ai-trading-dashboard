@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.13-trade-lifecycle-analytics"
+BOT_VERSION = "google-sheets-100-production-v32.13.2-diagnostics-display-ready"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -4090,7 +4090,7 @@ def save_paper_trades_df(df):
         for column in PAPER_TRADE_HEADERS:
             if column not in df.columns:
                 df[column] = ""
-        df = normalize_paper_trade_dtypes(df[PAPER_TRADE_HEADERS])
+        df = normalize_paper_trade_dtypes(df)
         temp_path = f"{PAPER_TRADES_FILE}.tmp"
         df[PAPER_TRADE_HEADERS].to_csv(temp_path, index=False)
         os.replace(temp_path, PAPER_TRADES_FILE)
@@ -4098,6 +4098,86 @@ def save_paper_trades_df(df):
     except Exception as error:
         log(f"Paper trades save error: {error}")
         return False
+
+
+def safe_file_modified_text(file_path):
+    try:
+        if not os.path.exists(file_path):
+            return "Missing"
+        return datetime.fromtimestamp(os.path.getmtime(file_path), ZoneInfo(BOT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as error:
+        return f"Unavailable: {error}"
+
+
+def safe_file_size_bytes(file_path):
+    try:
+        return os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    except Exception:
+        return 0
+
+
+def build_paper_trade_file_diagnostics(df=None):
+    """Return file-level diagnostics so the dashboard can verify paper-trade data flow."""
+    diagnostics = {
+        "bot_data_dir": BOT_DATA_DIR,
+        "paper_trades_file": PAPER_TRADES_FILE,
+        "paper_trades_file_exists": os.path.exists(PAPER_TRADES_FILE),
+        "paper_trades_file_size_bytes": safe_file_size_bytes(PAPER_TRADES_FILE),
+        "paper_trades_file_modified": safe_file_modified_text(PAPER_TRADES_FILE),
+        "paper_equity_file": PAPER_EQUITY_FILE,
+        "paper_equity_file_exists": os.path.exists(PAPER_EQUITY_FILE),
+        "paper_equity_file_size_bytes": safe_file_size_bytes(PAPER_EQUITY_FILE),
+        "paper_equity_file_modified": safe_file_modified_text(PAPER_EQUITY_FILE),
+        "paper_trading_enabled": BOT_PAPER_TRADING_ENABLED,
+        "paper_trade_monitor_enabled": BOT_PAPER_TRADE_MONITOR_ENABLED,
+        "paper_trade_max_open_total": BOT_PAPER_TRADE_MAX_OPEN_TOTAL,
+        "paper_trade_max_open_per_ticker": BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER,
+    }
+    try:
+        working_df = load_paper_trades_df() if df is None else df
+        if working_df is None or working_df.empty:
+            diagnostics.update({
+                "paper_trades_rows": 0,
+                "paper_trades_open_rows": 0,
+                "paper_trades_closed_rows": 0,
+                "paper_trades_tp1_rows": 0,
+                "paper_trades_latest_update": "None",
+                "paper_trades_latest_opened": "None",
+                "paper_trades_status_counts": {},
+                "paper_trades_tickers_open": [],
+            })
+            return diagnostics
+        status_series = working_df.get("status", pd.Series(dtype=str)).astype(str)
+        open_mask = status_series.isin(["OPEN", "TP1_HIT"])
+        closed_mask = status_series.isin(["TP2_HIT", "STOPPED", "CLOSED"])
+        diagnostics.update({
+            "paper_trades_rows": int(len(working_df)),
+            "paper_trades_open_rows": int(open_mask.sum()),
+            "paper_trades_closed_rows": int(closed_mask.sum()),
+            "paper_trades_tp1_rows": int((status_series == "TP1_HIT").sum()),
+            "paper_trades_latest_update": str(working_df.get("last_updated", pd.Series(["None"])).astype(str).replace("nan", "").max() or "None"),
+            "paper_trades_latest_opened": str(working_df.get("date_opened", pd.Series(["None"])).astype(str).replace("nan", "").max() or "None"),
+            "paper_trades_status_counts": {str(k): int(v) for k, v in status_series.value_counts().to_dict().items()},
+            "paper_trades_tickers_open": sorted(working_df.loc[open_mask, "ticker"].astype(str).unique().tolist()) if "ticker" in working_df.columns else [],
+        })
+    except Exception as error:
+        diagnostics["paper_trade_diagnostics_error"] = str(error)
+    return diagnostics
+
+
+def log_paper_trade_file_diagnostics(prefix="Paper trade diagnostics"):
+    diagnostics = build_paper_trade_file_diagnostics()
+    log(f"{prefix}: data_dir={diagnostics.get('bot_data_dir')} | file={diagnostics.get('paper_trades_file')}")
+    log(
+        f"{prefix}: exists={diagnostics.get('paper_trades_file_exists')} | "
+        f"size={diagnostics.get('paper_trades_file_size_bytes')} bytes | "
+        f"rows={diagnostics.get('paper_trades_rows', 0)} | "
+        f"open={diagnostics.get('paper_trades_open_rows', 0)} | "
+        f"closed={diagnostics.get('paper_trades_closed_rows', 0)} | "
+        f"tp1={diagnostics.get('paper_trades_tp1_rows', 0)}"
+    )
+    log(f"{prefix}: status_counts={diagnostics.get('paper_trades_status_counts', {})} | open_tickers={diagnostics.get('paper_trades_tickers_open', [])}")
+    return diagnostics
 
 
 def paper_trade_id(row):
@@ -4333,7 +4413,11 @@ def create_paper_trade_from_signal(row):
         df = pd.concat([df, pd.DataFrame([trade])], ignore_index=True)
         saved = save_paper_trades_df(df)
         if saved:
+            log(f"Paper trade opened and saved: {ticker} | {signal} | file={PAPER_TRADES_FILE}")
+            log_paper_trade_file_diagnostics("Paper trade save diagnostics")
             send_paper_trade_event(trade, "opened")
+        else:
+            log(f"Paper trade save failed: {ticker} | {signal} | file={PAPER_TRADES_FILE}")
         return saved
     except Exception as error:
         log(f"Create paper trade error: {error}")
@@ -7320,6 +7404,7 @@ def run_scan():
 
     paper_monitor_result = monitor_open_paper_trades()
     log(f"Paper trade monitor: {paper_monitor_result}")
+    paper_file_diagnostics = log_paper_trade_file_diagnostics("Paper trade data flow")
     run_safe_step("Paper trade summary", send_paper_trade_summary_if_due)
 
     for ticker in ALL_TICKERS:
@@ -7403,6 +7488,7 @@ def run_scan():
             "duration_seconds": round(time.time() - scan_started_at, 2),
             "max_scan_seconds": BOT_MAX_SCAN_SECONDS,
             "interrupted": True,
+            "paper_trade_file_diagnostics": build_paper_trade_file_diagnostics(),
         }
         write_status_file(result)
         return result
@@ -7503,6 +7589,8 @@ def run_scan():
         "duration_seconds": round(time.time() - scan_started_at, 2),
         "max_scan_seconds": BOT_MAX_SCAN_SECONDS,
         "interrupted": False,
+        "paper_trade_monitor": paper_monitor_result,
+        "paper_trade_file_diagnostics": paper_file_diagnostics,
     }
     write_status_file(result)
     return result
@@ -7616,6 +7704,9 @@ def main():
     log(f"Dedicated heartbeat webhook configured: {bool_text(HEARTBEAT_WEBHOOK_URL)}")
     log(f"Bot data dir: {BOT_DATA_DIR}")
     log(f"Bot status file: {BOT_STATUS_FILE}")
+    log(f"Paper trades file: {PAPER_TRADES_FILE}")
+    log(f"Paper equity file: {PAPER_EQUITY_FILE}")
+    log_paper_trade_file_diagnostics("Startup paper trade diagnostics")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
     log(f"Heartbeat interval hours: {BOT_HEARTBEAT_INTERVAL_HOURS}")
     ensure_data_dir()
