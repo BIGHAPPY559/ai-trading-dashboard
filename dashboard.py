@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.18.2_shared_sync_final_hardening_dashboard"
+APP_VERSION = "v32.21.1_watchlist_discovery_fixed_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -333,7 +333,8 @@ def get_stock_market_status(current_dt):
 # Add or remove tickers here
 CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
-    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD"
+    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD",
+    "LINK-USD", "SUI-USD", "ONDO-USD", "INJ-USD", "SEI-USD", "UNI-USD"
 ]
 
 STOCK_TICKERS = [

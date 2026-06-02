@@ -44,7 +44,8 @@ except Exception:
 
 CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
-    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD"
+    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD",
+    "LINK-USD", "SUI-USD", "ONDO-USD", "INJ-USD", "SEI-USD", "UNI-USD"
 ]
 
 STOCK_TICKERS = [
@@ -220,7 +221,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.18.2-shared-sync-final-hardening"
+BOT_VERSION = "google-sheets-100-production-v32.21.1-watchlist-discovery-fixed"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -245,6 +246,25 @@ BOT_SEND_BACKTEST_SCORECARD = get_env_bool("BOT_SEND_BACKTEST_SCORECARD", True)
 TOP_SIGNALS_WEBHOOK_URL = os.getenv("TOP_SIGNALS_WEBHOOK_URL", "")
 DAILY_REPORT_WEBHOOK_URL = os.getenv("DAILY_REPORT_WEBHOOK_URL", "")
 BACKTEST_WEBHOOK_URL = os.getenv("BACKTEST_WEBHOOK_URL", "")
+
+# v32.21.1 Watchlist Discovery Engine.
+# Recommendation-only scanner that posts new market opportunities to a dedicated Discord channel.
+WATCHLIST_SCANNER_WEBHOOK_URL = os.getenv("WATCHLIST_SCANNER_WEBHOOK_URL", "")
+BOT_WATCHLIST_DISCOVERY_ENABLED = get_env_bool("BOT_WATCHLIST_DISCOVERY_ENABLED", True)
+BOT_WATCHLIST_DISCOVERY_INTERVAL_HOURS = max(1, get_env_float("BOT_WATCHLIST_DISCOVERY_INTERVAL_HOURS", 6))
+BOT_WATCHLIST_DISCOVERY_MAX_CANDIDATES = max(1, get_env_int("BOT_WATCHLIST_DISCOVERY_MAX_CANDIDATES", 5))
+BOT_WATCHLIST_DISCOVERY_MIN_SCORE = max(0, min(get_env_float("BOT_WATCHLIST_DISCOVERY_MIN_SCORE", 70), 100))
+BOT_WATCHLIST_DISCOVERY_MIN_RELATIVE_VOLUME = max(0.1, get_env_float("BOT_WATCHLIST_DISCOVERY_MIN_RELATIVE_VOLUME", 1.2))
+BOT_WATCHLIST_DISCOVERY_MIN_DAILY_CHANGE_PCT = get_env_float("BOT_WATCHLIST_DISCOVERY_MIN_DAILY_CHANGE_PCT", 0.0)
+BOT_WATCHLIST_DISCOVERY_PERIOD = os.getenv("BOT_WATCHLIST_DISCOVERY_PERIOD", "6mo")
+BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS = clean_ticker_list(get_env_list("BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS", [
+    "FET-USD", "AAVE-USD", "NEAR-USD", "DOT-USD", "APT-USD", "ARB-USD",
+    "OP-USD", "TAO-USD", "RNDR-USD", "LDO-USD", "MKR-USD", "GRT-USD"
+]))
+BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS = clean_ticker_list(get_env_list("BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS", [
+    "SMCI", "AVGO", "CRM", "ORCL", "CRWD", "NET", "COIN", "MSTR",
+    "HOOD", "SOFI", "ARM", "PANW", "NOW", "SHOP"
+]))
 
 SCAN_INTERVAL_MINUTES = max(1, get_env_int("BOT_SCAN_INTERVAL_MINUTES", 15))
 MIN_CONFIDENCE = max(
@@ -430,6 +450,7 @@ BOT_HEARTBEAT_ENABLED = get_env_bool("BOT_HEARTBEAT_ENABLED", True)
 BOT_HEARTBEAT_INTERVAL_HOURS = max(1, get_env_float("BOT_HEARTBEAT_INTERVAL_HOURS", 12))
 HEARTBEAT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_heartbeat_log.txt")
 DAILY_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_daily_report_log.txt")
+WATCHLIST_DISCOVERY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_watchlist_discovery_log.txt")
 
 YFINANCE_TICKER_DELAY_SECONDS = max(0, get_env_float("YFINANCE_TICKER_DELAY_SECONDS", 0.25))
 YFINANCE_HISTORY_RETRIES = max(0, get_env_int("YFINANCE_HISTORY_RETRIES", 2))
@@ -1247,6 +1268,191 @@ def send_top_signals_summary(rows, candidates=0, sent_count=0):
     return sent
 
 
+# ======================================================
+# v32.21.1 WATCHLIST DISCOVERY ENGINE
+# ======================================================
+
+def get_watchlist_discovery_webhook():
+    return WATCHLIST_SCANNER_WEBHOOK_URL or TOP_SIGNALS_WEBHOOK_URL or BACKTEST_WEBHOOK_URL
+
+
+def get_watchlist_discovery_key():
+    bucket_seconds = max(1, int(BOT_WATCHLIST_DISCOVERY_INTERVAL_HOURS * 3600))
+    bucket = int(time.time() // bucket_seconds)
+    return f"watchlist_discovery_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+
+def watchlist_discovery_already_sent():
+    return get_watchlist_discovery_key() in load_log(WATCHLIST_DISCOVERY_LOG_FILE)
+
+
+def mark_watchlist_discovery_sent():
+    items = load_log(WATCHLIST_DISCOVERY_LOG_FILE)
+    items.add(get_watchlist_discovery_key())
+    save_log(WATCHLIST_DISCOVERY_LOG_FILE, items)
+
+
+def discovery_candidate_universe():
+    core = set(clean_ticker_list(ALL_TICKERS))
+    candidates = []
+    for ticker in BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS + BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS:
+        ticker = str(ticker or "").strip().upper()
+        if ticker and ticker not in core and ticker not in candidates:
+            candidates.append(ticker)
+    return candidates
+
+
+def score_watchlist_discovery_candidate(ticker):
+    data = get_price_data(ticker, BOT_WATCHLIST_DISCOVERY_PERIOD, "1d")
+    if data is None or data.empty or len(data) < 60:
+        return None
+
+    data = calculate_indicators(data)
+    latest = data.iloc[-1]
+    current_price = safe_latest_value(latest, "Close", 0)
+    previous_price = safe_float(data["Close"].iloc[-2], 0) if len(data) >= 2 else 0
+    if current_price <= 0 or previous_price <= 0:
+        return None
+
+    daily_change_pct = ((current_price - previous_price) / previous_price) * 100
+    close = pd.to_numeric(data["Close"], errors="coerce").dropna()
+    if len(close) >= 21 and close.iloc[-21] > 0:
+        twenty_day_change_pct = ((close.iloc[-1] - close.iloc[-21]) / close.iloc[-21]) * 100
+    else:
+        twenty_day_change_pct = 0
+
+    volume_context = calculate_volume_context(data, timeframe_trend_from_score(calculate_technical_score_from_latest(latest, current_price)))
+    relative_volume = safe_float(volume_context.get("relative_volume", 0), 0)
+    technical_score = calculate_technical_score_from_latest(latest, current_price)
+    trend = timeframe_trend_from_score(technical_score)
+
+    rsi = safe_latest_value(latest, "RSI", 50)
+    ma50 = safe_latest_value(latest, "MA50", 0)
+    ma200 = safe_latest_value(latest, "MA200", 0)
+
+    score = 0
+    reasons = []
+
+    if trend == "Bullish":
+        score += 30
+        reasons.append("bullish daily trend")
+    elif trend == "Neutral":
+        score += 12
+        reasons.append("neutral trend")
+    else:
+        reasons.append("bearish trend")
+
+    if ma50 and current_price > ma50:
+        score += 10
+        reasons.append("above MA50")
+    if ma200 and current_price > ma200:
+        score += 10
+        reasons.append("above MA200")
+
+    if relative_volume >= 2.0:
+        score += 20
+        reasons.append(f"strong volume spike {relative_volume}x")
+    elif relative_volume >= BOT_WATCHLIST_DISCOVERY_MIN_RELATIVE_VOLUME:
+        score += 12
+        reasons.append(f"volume above average {relative_volume}x")
+
+    if daily_change_pct >= 5:
+        score += 12
+        reasons.append(f"daily move {round(daily_change_pct, 2)}%")
+    elif daily_change_pct >= BOT_WATCHLIST_DISCOVERY_MIN_DAILY_CHANGE_PCT:
+        score += 6
+        reasons.append(f"positive daily move {round(daily_change_pct, 2)}%")
+
+    if twenty_day_change_pct >= 15:
+        score += 12
+        reasons.append(f"20D strength {round(twenty_day_change_pct, 2)}%")
+    elif twenty_day_change_pct >= 5:
+        score += 6
+        reasons.append(f"20D improving {round(twenty_day_change_pct, 2)}%")
+
+    if 45 <= rsi <= 70:
+        score += 6
+        reasons.append(f"healthy RSI {round(rsi, 2)}")
+    elif rsi > 70:
+        score += 2
+        reasons.append(f"hot RSI {round(rsi, 2)}")
+
+    score = round(max(0, min(score, 100)), 2)
+    action = "ADD TO CORE WATCHLIST CANDIDATE" if score >= 85 else "WATCH FOR REPEAT STRENGTH" if score >= BOT_WATCHLIST_DISCOVERY_MIN_SCORE else "IGNORE FOR NOW"
+
+    return {
+        "Ticker": ticker,
+        "Market": get_asset_type(ticker),
+        "Price": round(current_price, 4),
+        "Discovery Score": score,
+        "Daily Change %": round(daily_change_pct, 2),
+        "20D Change %": round(twenty_day_change_pct, 2),
+        "Relative Volume": round(relative_volume, 2),
+        "Trend": trend,
+        "RSI": round(rsi, 2),
+        "Action": action,
+        "Reason": "; ".join(reasons[:6]) if reasons else "No strong reason detected",
+    }
+
+
+def build_watchlist_discovery_candidates():
+    rows = []
+    for ticker in discovery_candidate_universe():
+        if SHUTDOWN_REQUESTED:
+            break
+        try:
+            row = score_watchlist_discovery_candidate(ticker)
+            if not row:
+                continue
+            if safe_float(row.get("Discovery Score", 0), 0) >= BOT_WATCHLIST_DISCOVERY_MIN_SCORE:
+                rows.append(row)
+        except Exception as error:
+            log(f"Watchlist discovery candidate error for {ticker}: {error}")
+        if not SHUTDOWN_REQUESTED:
+            interruptible_sleep(max(0, YFINANCE_TICKER_DELAY_SECONDS))
+    rows = sorted(rows, key=lambda item: safe_float(item.get("Discovery Score", 0), 0), reverse=True)
+    return rows[:BOT_WATCHLIST_DISCOVERY_MAX_CANDIDATES]
+
+
+def send_watchlist_discovery_report_if_due():
+    if not BOT_WATCHLIST_DISCOVERY_ENABLED:
+        log("Watchlist discovery skipped: disabled.")
+        return False
+    if watchlist_discovery_already_sent():
+        log(f"Watchlist discovery skipped: cooldown active for {BOT_WATCHLIST_DISCOVERY_INTERVAL_HOURS} hours.")
+        return False
+    webhook_url = get_watchlist_discovery_webhook()
+    if not webhook_url:
+        log("Watchlist discovery skipped: WATCHLIST_SCANNER_WEBHOOK_URL is missing.")
+        return False
+
+    candidates = build_watchlist_discovery_candidates()
+    if not candidates:
+        log("Watchlist discovery: no candidates passed filters.")
+        mark_watchlist_discovery_sent()
+        return False
+
+    lines = []
+    for index, row in enumerate(candidates, start=1):
+        lines.append(
+            f"#{index} {row['Ticker']} | {row['Market']} | Score {row['Discovery Score']} | "
+            f"1D {row['Daily Change %']}% | 20D {row['20D Change %']}% | RVOL {row['Relative Volume']}x | {row['Action']}\n"
+            f"Reason: {row['Reason']}"
+        )
+
+    fields = [
+        {"name": "Purpose", "value": "Recommendation-only scanner. These are not auto-added to paper trading until you approve them.", "inline": False},
+        {"name": "Candidates", "value": compact_text("\n\n".join(lines), 1000), "inline": False},
+        {"name": "Core Watchlist Protection", "value": "Candidates exclude your active bot watchlist so evidence collection stays clean.", "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🔎 Market Opportunity Scanner | Watchlist Candidates", 5793266, fields)
+    if sent:
+        mark_watchlist_discovery_sent()
+        log(f"Watchlist discovery sent: {len(candidates)} candidate(s).")
+    return sent
+
+
 def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
     if not should_send_daily_report():
         return False
@@ -1309,6 +1515,9 @@ def validate_runtime_config():
 
     if BOT_SEND_BACKTEST_SCORECARD and not BACKTEST_WEBHOOK_URL and not TOP_SIGNALS_WEBHOOK_URL:
         warnings.append("Backtest Scorecard is enabled but BACKTEST_WEBHOOK_URL/TOP_SIGNALS_WEBHOOK_URL is missing. It will be skipped instead of posting to daily-summary channels.")
+
+    if BOT_WATCHLIST_DISCOVERY_ENABLED and not WATCHLIST_SCANNER_WEBHOOK_URL and not TOP_SIGNALS_WEBHOOK_URL and not BACKTEST_WEBHOOK_URL:
+        warnings.append("Watchlist Discovery is enabled but WATCHLIST_SCANNER_WEBHOOK_URL/TOP_SIGNALS_WEBHOOK_URL/BACKTEST_WEBHOOK_URL is missing. It will be skipped.")
 
     if BOT_MARKET_TREND_FILTER_ENABLED:
         if not BOT_CRYPTO_MARKET_TICKERS:
@@ -7945,6 +8154,10 @@ def run_scan():
     post_scan_errors += int(step_error)
     interruptible_sleep(1)
 
+    _, step_error = run_safe_step("Watchlist Discovery Engine", send_watchlist_discovery_report_if_due)
+    post_scan_errors += int(step_error)
+    interruptible_sleep(1)
+
     _, step_error = run_safe_step(
         "Daily performance Discord report",
         send_daily_performance_report,
@@ -8078,6 +8291,8 @@ def main():
     log(f"Top signals summary enabled: {BOT_SEND_TOP_SIGNALS_SUMMARY} | count={BOT_TOP_SIGNALS_COUNT} | cooldown={BOT_TOP_SIGNALS_MIN_INTERVAL_MINUTES} min")
     log(f"Daily performance report enabled: {BOT_SEND_DAILY_PERFORMANCE_REPORT} | hour={BOT_DAILY_REPORT_HOUR}")
     log(f"Backtest scorecard enabled: {BOT_SEND_BACKTEST_SCORECARD}")
+    log(f"Watchlist discovery enabled: {BOT_WATCHLIST_DISCOVERY_ENABLED} | interval={BOT_WATCHLIST_DISCOVERY_INTERVAL_HOURS}h | max candidates={BOT_WATCHLIST_DISCOVERY_MAX_CANDIDATES} | min score={BOT_WATCHLIST_DISCOVERY_MIN_SCORE}")
+    log(f"Watchlist discovery webhook configured: {'YES' if bool(get_watchlist_discovery_webhook()) else 'NO'}")
     log(f"Summary max lines per section: {SUMMARY_MAX_LINES_PER_SECTION}")
     log(f"Crypto tickers: {', '.join(CRYPTO_TICKERS)}")
     log(f"Stock tickers: {', '.join(STOCK_TICKERS)}")
