@@ -45,7 +45,7 @@ except Exception:
 CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
     "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD",
-    "LINK-USD", "SUI-USD", "ONDO-USD", "INJ-USD", "SEI-USD", "UNI-USD"
+    "LINK-USD", "ONDO-USD", "INJ-USD", "SEI-USD"
 ]
 
 STOCK_TICKERS = [
@@ -141,8 +141,28 @@ def clean_ticker_list(tickers):
     return cleaned
 
 
-CRYPTO_TICKERS = clean_ticker_list(CRYPTO_TICKERS)
-STOCK_TICKERS = clean_ticker_list(STOCK_TICKERS)
+# v32.21.2 Yahoo Finance symbol guard.
+# These symbols repeatedly returned no usable yfinance data in production logs.
+# Keep this enabled so bad feed mappings do not waste retries or create noisy Railway logs.
+BOT_SKIP_UNSUPPORTED_TICKERS = get_env_bool("BOT_SKIP_UNSUPPORTED_TICKERS", True)
+BOT_YFINANCE_DISABLED_TICKERS = clean_ticker_list(get_env_list("BOT_YFINANCE_DISABLED_TICKERS", [
+    "SUI-USD", "UNI-USD", "APT-USD", "TAO-USD", "RNDR-USD", "GRT-USD"
+]))
+
+
+def is_yfinance_disabled_ticker(ticker):
+    return BOT_SKIP_UNSUPPORTED_TICKERS and str(ticker or "").strip().upper() in set(BOT_YFINANCE_DISABLED_TICKERS)
+
+
+def filter_yfinance_disabled_tickers(tickers):
+    cleaned = clean_ticker_list(tickers)
+    if not BOT_SKIP_UNSUPPORTED_TICKERS:
+        return cleaned
+    return [ticker for ticker in cleaned if ticker not in set(BOT_YFINANCE_DISABLED_TICKERS)]
+
+
+CRYPTO_TICKERS = filter_yfinance_disabled_tickers(CRYPTO_TICKERS)
+STOCK_TICKERS = filter_yfinance_disabled_tickers(STOCK_TICKERS)
 ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 
 
@@ -221,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.21.1-watchlist-discovery-fixed"
+BOT_VERSION = "google-sheets-100-production-v32.21.2-yfinance-symbol-guard"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -257,9 +277,9 @@ BOT_WATCHLIST_DISCOVERY_MIN_SCORE = max(0, min(get_env_float("BOT_WATCHLIST_DISC
 BOT_WATCHLIST_DISCOVERY_MIN_RELATIVE_VOLUME = max(0.1, get_env_float("BOT_WATCHLIST_DISCOVERY_MIN_RELATIVE_VOLUME", 1.2))
 BOT_WATCHLIST_DISCOVERY_MIN_DAILY_CHANGE_PCT = get_env_float("BOT_WATCHLIST_DISCOVERY_MIN_DAILY_CHANGE_PCT", 0.0)
 BOT_WATCHLIST_DISCOVERY_PERIOD = os.getenv("BOT_WATCHLIST_DISCOVERY_PERIOD", "6mo")
-BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS = clean_ticker_list(get_env_list("BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS", [
-    "FET-USD", "AAVE-USD", "NEAR-USD", "DOT-USD", "APT-USD", "ARB-USD",
-    "OP-USD", "TAO-USD", "RNDR-USD", "LDO-USD", "MKR-USD", "GRT-USD"
+BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS = filter_yfinance_disabled_tickers(get_env_list("BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS", [
+    "FET-USD", "AAVE-USD", "NEAR-USD", "DOT-USD", "ARB-USD",
+    "OP-USD", "LDO-USD", "MKR-USD"
 ]))
 BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS = clean_ticker_list(get_env_list("BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS", [
     "SMCI", "AVGO", "CRM", "ORCL", "CRWD", "NET", "COIN", "MSTR",
@@ -1297,12 +1317,18 @@ def discovery_candidate_universe():
     candidates = []
     for ticker in BOT_WATCHLIST_DISCOVERY_CRYPTO_TICKERS + BOT_WATCHLIST_DISCOVERY_STOCK_TICKERS:
         ticker = str(ticker or "").strip().upper()
+        if is_yfinance_disabled_ticker(ticker):
+            continue
         if ticker and ticker not in core and ticker not in candidates:
             candidates.append(ticker)
     return candidates
 
 
 def score_watchlist_discovery_candidate(ticker):
+    if is_yfinance_disabled_ticker(ticker):
+        log(f"{ticker}: discovery skipped by unsupported ticker guard.")
+        return None
+
     data = get_price_data(ticker, BOT_WATCHLIST_DISCOVERY_PERIOD, "1d")
     if data is None or data.empty or len(data) < 60:
         return None
@@ -1489,6 +1515,12 @@ def validate_runtime_config():
     if not ALL_TICKERS:
         warnings.append("No tickers are configured. Check BOT_CRYPTO_TICKERS and BOT_STOCK_TICKERS.")
 
+    if BOT_SKIP_UNSUPPORTED_TICKERS and BOT_YFINANCE_DISABLED_TICKERS:
+        removed_from_core = [ticker for ticker in BOT_YFINANCE_DISABLED_TICKERS if ticker in CRYPTO_TICKERS + STOCK_TICKERS]
+        # Normally empty because filtering already removed them. This warning catches env override mistakes.
+        if removed_from_core:
+            warnings.append("Unsupported yfinance tickers remain in the active core watchlist: " + ", ".join(removed_from_core))
+
     if not CRYPTO_TRADE_WEBHOOK_URL:
         warnings.append("CRYPTO_TRADE_WEBHOOK_URL is missing. Crypto trade alerts cannot be sent.")
 
@@ -1575,6 +1607,10 @@ def normalize_price_data(data):
 
 def get_price_data(ticker, period="1y", interval="1d"):
     if not BOT_SCAN_MARKET_DATA_ENABLED:
+        return pd.DataFrame()
+
+    if is_yfinance_disabled_ticker(ticker):
+        log(f"{ticker}: skipped by BOT_YFINANCE_DISABLED_TICKERS guard.")
         return pd.DataFrame()
 
     # Prefer yf.download because it supports timeout. Ticker.history can hang in
@@ -2752,6 +2788,10 @@ def calculate_signal_and_confidence(final_score):
 
 
 def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentiment_contexts=None):
+    if is_yfinance_disabled_ticker(ticker):
+        log(f"{ticker}: skipped by unsupported ticker guard.")
+        return None
+
     daily_data = get_price_data(ticker, "1y", "1d")
 
     if daily_data.empty or len(daily_data) < 50:
@@ -8295,6 +8335,7 @@ def main():
     log(f"Watchlist discovery webhook configured: {'YES' if bool(get_watchlist_discovery_webhook()) else 'NO'}")
     log(f"Summary max lines per section: {SUMMARY_MAX_LINES_PER_SECTION}")
     log(f"Crypto tickers: {', '.join(CRYPTO_TICKERS)}")
+    log(f"YFinance unsupported ticker guard: {'ON' if BOT_SKIP_UNSUPPORTED_TICKERS else 'OFF'} | disabled={', '.join(BOT_YFINANCE_DISABLED_TICKERS) if BOT_YFINANCE_DISABLED_TICKERS else 'None'}")
     log(f"Stock tickers: {', '.join(STOCK_TICKERS)}")
     log(f"Scan interval: {SCAN_INTERVAL_MINUTES} minutes")
     log(f"Minimum confidence: {MIN_CONFIDENCE}%")

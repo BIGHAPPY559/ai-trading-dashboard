@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.21.1_watchlist_discovery_fixed_dashboard"
+APP_VERSION = "v32.21.2_yfinance_symbol_guard_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -334,7 +334,7 @@ def get_stock_market_status(current_dt):
 CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
     "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD",
-    "LINK-USD", "SUI-USD", "ONDO-USD", "INJ-USD", "SEI-USD", "UNI-USD"
+    "LINK-USD", "ONDO-USD", "INJ-USD", "SEI-USD"
 ]
 
 STOCK_TICKERS = [
@@ -342,8 +342,27 @@ STOCK_TICKERS = [
     "PLTR", "SPY", "QQQ"
 ]
 
-CRYPTO_TICKERS = get_env_list("BOT_CRYPTO_TICKERS", CRYPTO_TICKERS)
-STOCK_TICKERS = get_env_list("BOT_STOCK_TICKERS", STOCK_TICKERS)
+# v32.21.2 Yahoo Finance symbol guard. Mirrors bot.py so dashboard scans
+# do not waste time on tickers that repeatedly returned no yfinance data.
+BOT_SKIP_UNSUPPORTED_TICKERS = get_env_bool("BOT_SKIP_UNSUPPORTED_TICKERS", True)
+BOT_YFINANCE_DISABLED_TICKERS = get_env_list("BOT_YFINANCE_DISABLED_TICKERS", [
+    "SUI-USD", "UNI-USD", "APT-USD", "TAO-USD", "RNDR-USD", "GRT-USD"
+])
+
+
+def is_yfinance_disabled_ticker(ticker):
+    return BOT_SKIP_UNSUPPORTED_TICKERS and str(ticker or "").strip().upper() in set(BOT_YFINANCE_DISABLED_TICKERS)
+
+
+def filter_yfinance_disabled_tickers(tickers):
+    cleaned = get_env_list("__unused__", tickers) if False else list(tickers)
+    if not BOT_SKIP_UNSUPPORTED_TICKERS:
+        return cleaned
+    return [str(ticker).strip().upper() for ticker in cleaned if str(ticker).strip().upper() not in set(BOT_YFINANCE_DISABLED_TICKERS)]
+
+
+CRYPTO_TICKERS = filter_yfinance_disabled_tickers(get_env_list("BOT_CRYPTO_TICKERS", CRYPTO_TICKERS))
+STOCK_TICKERS = filter_yfinance_disabled_tickers(get_env_list("BOT_STOCK_TICKERS", STOCK_TICKERS))
 ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 
 # Discord webhook URLs should be added to your environment variables.
@@ -391,6 +410,9 @@ BEARISH_WORDS = [
 
 @st.cache_data(ttl=60)
 def get_price_data(ticker, period="6mo"):
+    if is_yfinance_disabled_ticker(ticker):
+        return pd.DataFrame()
+
     try:
         data = yf.download(
             ticker,
