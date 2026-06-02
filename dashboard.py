@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.13.3.1_shared_status_sync_dashboard"
+APP_VERSION = "v32.13.3.2_google_sheets_hardening_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -583,6 +583,7 @@ def save_records(file_path, records):
 
 DASHBOARD_GOOGLE_CLIENT = None
 DASHBOARD_GOOGLE_SPREADSHEET = None
+DASHBOARD_GOOGLE_WORKSHEET_CACHE = {}
 
 
 def dashboard_google_available():
@@ -620,16 +621,29 @@ def get_dashboard_google_spreadsheet():
         return None
 
 
-def load_google_worksheet_records(title):
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_google_worksheet_records(sheet_id, title, cache_buster_minute):
+    # cache_buster_minute intentionally changes once per minute so the dashboard
+    # stays fresh without hammering Google Sheets on every Streamlit rerun.
     spreadsheet = get_dashboard_google_spreadsheet()
     if spreadsheet is None:
         return []
     try:
-        worksheet = spreadsheet.worksheet(title)
+        worksheet = DASHBOARD_GOOGLE_WORKSHEET_CACHE.get(title)
+        if worksheet is None:
+            worksheet = spreadsheet.worksheet(title)
+            DASHBOARD_GOOGLE_WORKSHEET_CACHE[title] = worksheet
         return worksheet.get_all_records()
     except Exception as error:
         print(f"Dashboard Google worksheet load error for {title}: {error}")
         return []
+
+
+def load_google_worksheet_records(title):
+    if not dashboard_google_available():
+        return []
+    cache_buster_minute = int(time.time() // 60)
+    return _cached_google_worksheet_records(GOOGLE_SHEET_ID, title, cache_buster_minute)
 
 
 def load_shared_bot_status_from_google_sheets():

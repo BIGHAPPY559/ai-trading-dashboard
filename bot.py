@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.13.3.1-shared-status-sync-fix"
+BOT_VERSION = "google-sheets-100-production-v32.13.3.2-google-sheets-hardening"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -567,6 +567,8 @@ LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME = 0
 LAST_ERROR_ALERT_TIME = 0
 SHUTDOWN_REQUESTED = False
 FORMATTED_WORKSHEETS = set()
+GOOGLE_WORKSHEET_CACHE = {}
+GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID = None
 
 
 def request_shutdown(signum=None, frame=None):
@@ -6662,26 +6664,87 @@ def get_google_spreadsheet():
         return None
 
 
+def is_google_rate_limit_error(error):
+    text = str(error or "")
+    return "429" in text or "Quota exceeded" in text or "RESOURCE_EXHAUSTED" in text
+
+
+def is_google_sheet_exists_error(error):
+    text = str(error or "").lower()
+    return "already exists" in text or "duplicate" in text
+
+
+def reset_google_worksheet_cache_if_needed(spreadsheet):
+    global GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID
+    try:
+        spreadsheet_id = getattr(spreadsheet, "id", None) or GOOGLE_SHEET_ID
+        if GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID != spreadsheet_id:
+            GOOGLE_WORKSHEET_CACHE.clear()
+            GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID = spreadsheet_id
+    except Exception:
+        pass
+
+
 def get_or_create_worksheet(spreadsheet, title, headers):
+    """
+    Quota-safe worksheet resolver for v32.13.3.2.
+
+    The previous version called worksheet(), row_values(), and formatting checks
+    repeatedly for many tabs every sync. That worked, but it could hit Google
+    Sheets read quotas and sometimes tried add_worksheet after an API read error,
+    producing false duplicate-sheet errors. This version caches worksheet objects
+    per runtime, only writes headers on first creation, and treats 429s as a
+    temporary skip instead of trying to create duplicate tabs.
+    """
+    reset_google_worksheet_cache_if_needed(spreadsheet)
+
+    cache_key = str(title)
+    cached = GOOGLE_WORKSHEET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    created = False
     try:
         worksheet = spreadsheet.worksheet(title)
-    except Exception:
-        worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(headers) + 2))
+    except Exception as lookup_error:
+        if is_google_rate_limit_error(lookup_error):
+            log(f"Google Sheets worksheet lookup rate-limited for {title}. Skipping this tab this cycle.")
+            raise lookup_error
+        try:
+            worksheet = spreadsheet.add_worksheet(
+                title=title,
+                rows=1000,
+                cols=max(20, len(headers) + 2)
+            )
+            created = True
+        except Exception as add_error:
+            if is_google_sheet_exists_error(add_error):
+                try:
+                    worksheet = spreadsheet.worksheet(title)
+                    created = False
+                except Exception as second_lookup_error:
+                    log(f"Google Sheets worksheet recovery failed for {title}: {second_lookup_error}")
+                    raise second_lookup_error
+            else:
+                log(f"Google Sheets worksheet create error for {title}: {add_error}")
+                raise add_error
+
+    GOOGLE_WORKSHEET_CACHE[cache_key] = worksheet
+
+    # Avoid row_values(1) on every scan. Header repair can be done by recreating
+    # the tab or manually editing row 1; normal operation only needs a header
+    # write when the tab is first created.
+    if created:
+        try:
+            safe_sheet_update(worksheet, "A1", [headers])
+        except Exception as error:
+            log(f"Google Sheets header create error for {title}: {error}")
 
     try:
-        current_headers = worksheet.row_values(1)
-
-        if current_headers != headers:
-            safe_sheet_update(worksheet, "A1", [headers])
-
-        try:
-            if worksheet.col_count < len(headers):
-                worksheet.resize(rows=worksheet.row_count, cols=len(headers))
-        except Exception:
-            pass
-
-    except Exception as error:
-        log(f"Google Sheets header update error for {title}: {error}")
+        if getattr(worksheet, "col_count", len(headers)) < len(headers):
+            worksheet.resize(rows=worksheet.row_count, cols=len(headers))
+    except Exception:
+        pass
 
     format_worksheet_for_readability(worksheet, title, headers)
     return worksheet
