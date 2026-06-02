@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.26.1-dynamic-trade-filter-hardening"
+BOT_VERSION = "google-sheets-100-production-v32.26.2-evidence-learning-loader-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -1521,7 +1521,10 @@ def mark_evidence_learning_report_sent():
     save_log(EVIDENCE_LEARNING_REPORT_LOG_FILE, items)
 
 def closed_paper_trade_rows_for_learning():
-    df = load_paper_trades()
+    # v32.26.2 fix: use the existing paper-trade loader.
+    # Previous v32.26.1 code called load_paper_trades(), which was never defined
+    # and caused the Evidence + Auto Learning report to fail after scans completed.
+    df = load_paper_trades_df()
     if df is None or df.empty or "status" not in df.columns:
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
     return df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
@@ -4911,6 +4914,12 @@ def load_paper_trades_df():
         log(f"Paper trades load error: {error}")
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
 
+
+
+
+def load_paper_trades():
+    """Backward-compatible alias for older evidence-learning helpers."""
+    return load_paper_trades_df()
 
 def save_paper_trades_df(df):
     try:
