@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.13.3.2-google-sheets-hardening"
+BOT_VERSION = "google-sheets-100-production-v32.18.1-shared-sync-restore-outcome-intelligence"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -537,17 +537,29 @@ BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY = get_env_float("BOT_TRADE_LIFECYCLE_S
 BOT_SEND_TRADE_LIFECYCLE_REPORT = get_env_bool("BOT_SEND_TRADE_LIFECYCLE_REPORT", True)
 BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS", 24))
 
-# v32.13.3 Shared Status Sync.
+# v32.18.1 Shared Status Sync Restore.
 # Publishes bot status and paper-trade evidence into Google Sheets so a dashboard
 # running in a separate Railway project can still read the bot's live status.
 BOT_SHARED_STATUS_SYNC_ENABLED = get_env_bool("BOT_SHARED_STATUS_SYNC_ENABLED", True)
 BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED = get_env_bool("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", True)
+
+# v32.14-v32.18 Outcome Intelligence Suite.
+# Recommendation-only evidence layer: explains why paper trades win/lose, ranks setups,
+# calibrates confidence buckets, and prepares signal intelligence before v33 automation.
+BOT_OUTCOME_ATTRIBUTION_ENABLED = get_env_bool("BOT_OUTCOME_ATTRIBUTION_ENABLED", True)
+BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE = max(1, get_env_int("BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE", 5))
+BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE = max(1, get_env_int("BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE", 5))
+BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE = max(1, get_env_int("BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE", 5))
+BOT_REGIME_PERFORMANCE_MIN_SAMPLE = max(1, get_env_int("BOT_REGIME_PERFORMANCE_MIN_SAMPLE", 5))
+BOT_SEND_OUTCOME_INTELLIGENCE_REPORT = get_env_bool("BOT_SEND_OUTCOME_INTELLIGENCE_REPORT", True)
+BOT_OUTCOME_INTELLIGENCE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_OUTCOME_INTELLIGENCE_REPORT_INTERVAL_HOURS", 24))
 
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
 AUTOMATION_READINESS_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_report_log.txt")
 TRADE_LIFECYCLE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_trade_lifecycle_report_log.txt")
+OUTCOME_INTELLIGENCE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_outcome_intelligence_report_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -557,6 +569,9 @@ PAPER_TRADE_HEADERS = [
     "setup_name", "setup_tags", "setup_score",
     "date_tp1", "date_tp2", "date_stopped",
     "hours_open", "days_open", "hours_to_tp1", "hours_to_tp2", "hours_to_stop", "lifecycle_stage",
+    "outcome", "outcome_bucket", "attribution_score", "primary_driver", "secondary_driver",
+    "weakness_driver", "mtf_aligned", "volume_confirmed", "market_aligned", "sr_confirmed",
+    "news_confirmed", "rr_confirmed", "confidence_bucket", "regime_bucket", "attribution_notes",
     "notes", "tp1_notified", "tp2_notified", "stop_notified", "closed_notified",
 ]
 
@@ -567,8 +582,6 @@ LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME = 0
 LAST_ERROR_ALERT_TIME = 0
 SHUTDOWN_REQUESTED = False
 FORMATTED_WORKSHEETS = set()
-GOOGLE_WORKSHEET_CACHE = {}
-GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID = None
 
 
 def request_shutdown(signum=None, frame=None):
@@ -792,7 +805,7 @@ def write_status_file(status):
     payload["shutdown_requested"] = SHUTDOWN_REQUESTED
     save_json_atomic(BOT_STATUS_FILE, payload)
 
-    # v32.13.3: publish live status to Google Sheets so a dashboard in a
+    # v32.18.1: publish live status to Google Sheets so a dashboard in a
     # separate Railway project can read the bot without shared local storage.
     try:
         if globals().get("BOT_SHARED_STATUS_SYNC_ENABLED", False):
@@ -1064,10 +1077,10 @@ def normalize_paper_trade_dtypes(df):
     numeric_columns = [
         "entry_price", "current_price", "stop_loss", "tp1", "tp2", "confidence",
         "position_size", "position_value", "pnl_percent", "pnl_dollars",
-        "risk_reward_2", "signal_rank", "quality_score", "setup_score",
+        "risk_reward_2", "signal_rank", "quality_score", "setup_score", "attribution_score",
         "hours_open", "days_open", "hours_to_tp1", "hours_to_tp2", "hours_to_stop",
     ]
-    bool_columns = ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified"]
+    bool_columns = ["tp1_notified", "tp2_notified", "stop_notified", "closed_notified", "mtf_aligned", "volume_confirmed", "market_aligned", "sr_confirmed", "news_confirmed", "rr_confirmed"]
     text_columns = [column for column in PAPER_TRADE_HEADERS if column not in numeric_columns + bool_columns]
 
     for column in numeric_columns:
@@ -4038,6 +4051,227 @@ def log_trade_lifecycle_report():
     summary = report.get("summary", {})
     log(f"Trade lifecycle analytics: closed {summary.get('closed_trades', 0)} | avg open {summary.get('avg_days_open', 0)} days | TP1 {summary.get('avg_hours_to_tp1', 0)}h | return/day {summary.get('avg_return_per_day', 0)}%")
 
+
+
+# ======================================================
+# v32.14-v32.18 OUTCOME INTELLIGENCE SUITE
+# ======================================================
+
+def bucket_confidence_value(value):
+    confidence = safe_float(value, 0)
+    if confidence >= 90:
+        return "90-100"
+    if confidence >= 80:
+        return "80-89"
+    if confidence >= 70:
+        return "70-79"
+    if confidence >= 60:
+        return "60-69"
+    return "<60"
+
+
+def text_has_any(value, words):
+    text = str(value or "").lower()
+    return any(str(word).lower() in text for word in words)
+
+
+def stored_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ["1", "true", "yes", "y", "on"]
+
+
+def build_outcome_attribution_fields(row):
+    """Create v32.14 attribution fields from either a live scanner row or stored paper-trade row."""
+    signal = str(row.get("AI Signal", row.get("signal", ""))).upper()
+    notes = " ".join([
+        str(row.get("Exposure Notes", "")), str(row.get("notes", "")), str(row.get("setup_name", "")),
+        str(row.get("setup_tags", "")), str(row.get("MTF Alignment", "")), str(row.get("Market Alignment", "")),
+        str(row.get("S/R Notes", "")), str(row.get("News Notes", "")), str(row.get("Regime Notes", "")),
+    ])
+    mtf_aligned = safe_float(row.get("MTF Confidence", 0), 0) >= 70 or text_has_any(notes, ["mtf"])
+    volume_confirmed = safe_float(row.get("Volume Confidence", 0), 0) >= 70 or text_has_any(notes, ["volume", "spike"])
+    market_aligned = safe_float(row.get("Market Confidence", 0), 0) >= 70 or text_has_any(notes, ["market", "risk-on", "risk-off", "bull trend", "bear trend"])
+    sr_confirmed = safe_float(row.get("S/R Confidence", 0), 0) >= 70 or text_has_any(notes, ["s/r", "support", "resistance", "breakout", "breakdown"])
+    news_confirmed = safe_float(row.get("News Confidence", 0), 0) >= 70 or text_has_any(notes, ["news"])
+    rr_confirmed = safe_float(row.get("Risk/Reward Confidence", 0), 0) >= 70 or safe_float(row.get("Risk/Reward 2", row.get("risk_reward_2", 0)), 0) >= 2
+    confidence = safe_float(row.get("AI Confidence %", row.get("confidence", 0)), 0)
+    quality = safe_float(row.get("Signal Quality Score", row.get("quality_score", 0)), 0)
+    status = str(row.get("status", "OPEN")).upper()
+    pnl_pct = safe_float(row.get("pnl_percent", 0), 0)
+    if status in ["TP2_HIT", "CLOSED"] or pnl_pct > 0:
+        outcome = "WIN"
+        outcome_bucket = "Strong Win" if pnl_pct >= 2 else "Small Win"
+    elif status == "STOPPED" or pnl_pct < 0:
+        outcome = "LOSS"
+        outcome_bucket = "Large Loss" if pnl_pct <= -2 else "Small Loss"
+    elif status == "TP1_HIT":
+        outcome = "PARTIAL_WIN"
+        outcome_bucket = "TP1 Open"
+    else:
+        outcome = "OPEN"
+        outcome_bucket = "Open / Monitoring"
+    drivers = []
+    if mtf_aligned: drivers.append("MTF")
+    if volume_confirmed: drivers.append("Volume")
+    if market_aligned: drivers.append("Market")
+    if sr_confirmed: drivers.append("S/R")
+    if news_confirmed: drivers.append("News")
+    if rr_confirmed: drivers.append("Risk/Reward")
+    if confidence >= 80: drivers.append("High Confidence")
+    if quality >= 80: drivers.append("High Quality")
+    weak = []
+    if not mtf_aligned: weak.append("No MTF")
+    if not volume_confirmed: weak.append("No Volume")
+    if not market_aligned: weak.append("Market Unclear")
+    if not sr_confirmed: weak.append("No S/R")
+    if not rr_confirmed: weak.append("Weak R/R")
+    score = min(100, len(drivers) * 12 + max(0, confidence - 50) * 0.5 + max(0, quality - 50) * 0.3)
+    regime_bucket = str(row.get("Advanced Market Regime", row.get("market_regime", row.get("regime_bucket", "Unknown"))) or "Unknown")
+    if regime_bucket in ["", "nan", "None"]:
+        regime_bucket = str(row.get("Risk Mode", row.get("risk_mode", "Unknown")) or "Unknown")
+    return {
+        "outcome": outcome,
+        "outcome_bucket": outcome_bucket,
+        "attribution_score": round(score, 2),
+        "primary_driver": drivers[0] if drivers else "Needs Data",
+        "secondary_driver": drivers[1] if len(drivers) > 1 else "None",
+        "weakness_driver": weak[0] if weak else "None",
+        "mtf_aligned": bool(mtf_aligned),
+        "volume_confirmed": bool(volume_confirmed),
+        "market_aligned": bool(market_aligned),
+        "sr_confirmed": bool(sr_confirmed),
+        "news_confirmed": bool(news_confirmed),
+        "rr_confirmed": bool(rr_confirmed),
+        "confidence_bucket": bucket_confidence_value(confidence),
+        "regime_bucket": regime_bucket,
+        "attribution_notes": compact_text("Drivers: " + (", ".join(drivers) if drivers else "Needs Data") + " | Weakness: " + (", ".join(weak[:3]) if weak else "None"), 500),
+    }
+
+
+def enrich_outcome_attribution_df(df=None):
+    if not BOT_OUTCOME_ATTRIBUTION_ENABLED:
+        return normalize_paper_trade_dtypes(df if df is not None else load_paper_trades_df())
+    trades = load_paper_trades_df() if df is None else df
+    if trades is None or trades.empty:
+        return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    out = trades.copy()
+    for column in PAPER_TRADE_HEADERS:
+        if column not in out.columns:
+            out[column] = False if column in ["mtf_aligned", "volume_confirmed", "market_aligned", "sr_confirmed", "news_confirmed", "rr_confirmed"] else ""
+    for idx, row in out.iterrows():
+        fields = build_outcome_attribution_fields(row)
+        for key, value in fields.items():
+            if key in out.columns:
+                out.at[idx, key] = value
+    return normalize_paper_trade_dtypes(out)
+
+
+def closed_outcome_trades(df=None):
+    trades = enrich_outcome_attribution_df(df)
+    if trades.empty or "status" not in trades.columns:
+        return pd.DataFrame()
+    return trades[trades["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+
+
+def outcome_profit_factor(pnl):
+    pnl = pd.to_numeric(pnl, errors="coerce").fillna(0)
+    wins = pnl[pnl > 0].sum()
+    losses = abs(pnl[pnl < 0].sum())
+    if losses > 0:
+        return round(wins / losses, 2)
+    return round(wins, 2) if wins > 0 else 0
+
+
+def outcome_win_rate(pnl):
+    pnl = pd.to_numeric(pnl, errors="coerce").fillna(0)
+    return round((len(pnl[pnl > 0]) / len(pnl)) * 100, 2) if len(pnl) else 0
+
+
+def build_outcome_group_table(df, group_col, min_sample=1):
+    closed = closed_outcome_trades(df)
+    if closed.empty or group_col not in closed.columns:
+        return []
+    rows = []
+    for group_name, group in closed.groupby(group_col):
+        pnl_d = pd.to_numeric(group.get("pnl_dollars", 0), errors="coerce").fillna(0)
+        pnl_p = pd.to_numeric(group.get("pnl_percent", 0), errors="coerce").fillna(0)
+        trades = len(group)
+        rows.append({
+            "Group": str(group_name),
+            "Trades": int(trades),
+            "Win Rate %": outcome_win_rate(pnl_d),
+            "Profit Factor": outcome_profit_factor(pnl_d),
+            "Total P/L $": round(float(pnl_d.sum()), 2),
+            "Avg Return %": round(float(pnl_p.mean()), 2) if trades else 0,
+            "Avg Attribution Score": round(float(pd.to_numeric(group.get("attribution_score", 0), errors="coerce").fillna(0).mean()), 2) if trades else 0,
+            "Sample Status": "Reliable" if trades >= min_sample else "Needs More Data",
+        })
+    return sorted(rows, key=lambda r: (r["Profit Factor"], r["Win Rate %"], r["Total P/L $"]), reverse=True)
+
+
+def build_v32_14_to_18_report(df=None):
+    trades = enrich_outcome_attribution_df(df)
+    closed = closed_outcome_trades(trades)
+    summary = {
+        "total_trades": int(len(trades)),
+        "open_trades": int(len(trades[trades["status"].astype(str).isin(["OPEN", "TP1_HIT"])])) if not trades.empty and "status" in trades.columns else 0,
+        "closed_trades": int(len(closed)),
+        "win_rate": outcome_win_rate(closed.get("pnl_dollars", pd.Series(dtype=float))) if not closed.empty else 0,
+        "profit_factor": outcome_profit_factor(closed.get("pnl_dollars", pd.Series(dtype=float))) if not closed.empty else 0,
+    }
+    groups = {
+        "attribution": build_outcome_group_table(trades, "primary_driver", BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE),
+        "setup_db": build_outcome_group_table(trades, "setup_name", BOT_SETUP_ANALYTICS_MIN_SAMPLE),
+        "regime": build_outcome_group_table(trades, "regime_bucket", BOT_REGIME_PERFORMANCE_MIN_SAMPLE),
+        "confidence": build_outcome_group_table(trades, "confidence_bucket", BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE),
+        "signal": build_outcome_group_table(trades, "signal", BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE),
+        "ticker": build_outcome_group_table(trades, "ticker", BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE),
+    }
+    recommendations = []
+    if summary["closed_trades"] < BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE:
+        recommendations.append(f"Collect more closed trades before trusting attribution ({summary['closed_trades']}/{BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE}).")
+    for label, rows in [("setup", groups["setup_db"]), ("confidence", groups["confidence"]), ("regime", groups["regime"]), ("signal", groups["signal"])]:
+        reliable = [r for r in rows if r.get("Sample Status") == "Reliable"]
+        if reliable:
+            top = reliable[0]
+            recommendations.append(f"Best {label}: {top['Group']} | PF {top['Profit Factor']} | WR {top['Win Rate %']}% | P/L ${top['Total P/L $']}.")
+    if not recommendations:
+        recommendations.append("Outcome intelligence is armed and waiting for closed paper trades.")
+    return {"summary": summary, "groups": groups, "recent": trades.tail(25).to_dict("records") if not trades.empty else [], "recommendations": recommendations[:8]}
+
+
+def log_v32_14_to_18_report():
+    if not BOT_OUTCOME_ATTRIBUTION_ENABLED:
+        return
+    report = build_v32_14_to_18_report()
+    summary = report.get("summary", {})
+    log(f"Outcome intelligence v32.14-v32.18: closed {summary.get('closed_trades', 0)} | WR {summary.get('win_rate', 0)}% | PF {summary.get('profit_factor', 0)} | open {summary.get('open_trades', 0)}")
+    if report.get("recommendations"):
+        log("Outcome intelligence recommendation: " + report["recommendations"][0])
+
+
+def sync_v32_14_to_18_to_google_sheets(spreadsheet):
+    if not GOOGLE_SHEETS_ENABLED or not BOT_OUTCOME_ATTRIBUTION_ENABLED:
+        return False
+    try:
+        report = build_v32_14_to_18_report()
+        summary = report.get("summary", {})
+        summary_headers = ["Time", "Metric", "Value"]
+        summary_rows = [[now_text(), key, value] for key, value in summary.items()]
+        summary_rows.append([now_text(), "recommendation", " | ".join(report.get("recommendations", []))])
+        safe_sheet_update(get_or_create_worksheet(spreadsheet, "Outcome Intelligence Summary", summary_headers), "A1", [summary_headers] + sanitize_sheet_values(summary_rows))
+        group_headers = ["Category", "Group", "Trades", "Win Rate %", "Profit Factor", "Total P/L $", "Avg Return %", "Avg Attribution Score", "Sample Status"]
+        group_rows = []
+        for category, rows in report.get("groups", {}).items():
+            for row in rows:
+                group_rows.append([category, row.get("Group", ""), row.get("Trades", 0), row.get("Win Rate %", 0), row.get("Profit Factor", 0), row.get("Total P/L $", 0), row.get("Avg Return %", 0), row.get("Avg Attribution Score", 0), row.get("Sample Status", "")])
+        safe_sheet_update(get_or_create_worksheet(spreadsheet, "Outcome Intelligence Groups", group_headers), "A1", [group_headers] + sanitize_sheet_values(group_rows))
+        return True
+    except Exception as error:
+        log(f"Outcome intelligence sync error: {error}")
+        return False
+
     return report
 
 def strategy_ranking_check(row):
@@ -4103,6 +4337,10 @@ def load_paper_trades_df():
 def save_paper_trades_df(df):
     try:
         ensure_data_dir()
+        if globals().get("BOT_OUTCOME_ATTRIBUTION_ENABLED", False) and "enrich_outcome_attribution_df" in globals():
+            df = enrich_outcome_attribution_df(df)
+        else:
+            df = normalize_paper_trade_dtypes(df)
         for column in PAPER_TRADE_HEADERS:
             if column not in df.columns:
                 df[column] = ""
@@ -4420,6 +4658,7 @@ def create_paper_trade_from_signal(row):
             "hours_to_tp2": 0,
             "hours_to_stop": 0,
             "lifecycle_stage": "OPEN",
+            **build_outcome_attribution_fields(row),
             "notes": compact_text(f"{row.get('Exposure Notes', '')} | {quality_note}", 500),
             "tp1_notified": False,
             "tp2_notified": False,
@@ -6180,11 +6419,11 @@ SYSTEM_STATUS_HEADERS = [
 ]
 
 SHARED_BOT_STATUS_HEADERS = [
-    "Metric", "Value", "Updated At"
+    "Metric", "Value", "Updated"
 ]
 
 SHARED_PAPER_EQUITY_HEADERS = [
-    "timestamp", "equity", "realized_pnl", "open_trades", "closed_trades", "notes"
+    "timestamp", "equity", "open_pnl", "closed_pnl", "total_pnl"
 ]
 
 GOOGLE_SHEETS_TAB_COLORS = {
@@ -6199,6 +6438,9 @@ GOOGLE_SHEETS_TAB_COLORS = {
     "Dashboard Analytics": "#34A853",
     "Trade Lifecycle": "#8E44AD",
     "System Status": "#CC3333",
+    "Shared Bot Status": "#1F77B4",
+    "Shared Paper Trades": "#2CA02C",
+    "Shared Paper Equity": "#17BECF",
 }
 
 
@@ -6664,87 +6906,26 @@ def get_google_spreadsheet():
         return None
 
 
-def is_google_rate_limit_error(error):
-    text = str(error or "")
-    return "429" in text or "Quota exceeded" in text or "RESOURCE_EXHAUSTED" in text
-
-
-def is_google_sheet_exists_error(error):
-    text = str(error or "").lower()
-    return "already exists" in text or "duplicate" in text
-
-
-def reset_google_worksheet_cache_if_needed(spreadsheet):
-    global GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID
-    try:
-        spreadsheet_id = getattr(spreadsheet, "id", None) or GOOGLE_SHEET_ID
-        if GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID != spreadsheet_id:
-            GOOGLE_WORKSHEET_CACHE.clear()
-            GOOGLE_WORKSHEET_CACHE_SPREADSHEET_ID = spreadsheet_id
-    except Exception:
-        pass
-
-
 def get_or_create_worksheet(spreadsheet, title, headers):
-    """
-    Quota-safe worksheet resolver for v32.13.3.2.
-
-    The previous version called worksheet(), row_values(), and formatting checks
-    repeatedly for many tabs every sync. That worked, but it could hit Google
-    Sheets read quotas and sometimes tried add_worksheet after an API read error,
-    producing false duplicate-sheet errors. This version caches worksheet objects
-    per runtime, only writes headers on first creation, and treats 429s as a
-    temporary skip instead of trying to create duplicate tabs.
-    """
-    reset_google_worksheet_cache_if_needed(spreadsheet)
-
-    cache_key = str(title)
-    cached = GOOGLE_WORKSHEET_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    created = False
     try:
         worksheet = spreadsheet.worksheet(title)
-    except Exception as lookup_error:
-        if is_google_rate_limit_error(lookup_error):
-            log(f"Google Sheets worksheet lookup rate-limited for {title}. Skipping this tab this cycle.")
-            raise lookup_error
-        try:
-            worksheet = spreadsheet.add_worksheet(
-                title=title,
-                rows=1000,
-                cols=max(20, len(headers) + 2)
-            )
-            created = True
-        except Exception as add_error:
-            if is_google_sheet_exists_error(add_error):
-                try:
-                    worksheet = spreadsheet.worksheet(title)
-                    created = False
-                except Exception as second_lookup_error:
-                    log(f"Google Sheets worksheet recovery failed for {title}: {second_lookup_error}")
-                    raise second_lookup_error
-            else:
-                log(f"Google Sheets worksheet create error for {title}: {add_error}")
-                raise add_error
-
-    GOOGLE_WORKSHEET_CACHE[cache_key] = worksheet
-
-    # Avoid row_values(1) on every scan. Header repair can be done by recreating
-    # the tab or manually editing row 1; normal operation only needs a header
-    # write when the tab is first created.
-    if created:
-        try:
-            safe_sheet_update(worksheet, "A1", [headers])
-        except Exception as error:
-            log(f"Google Sheets header create error for {title}: {error}")
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(headers) + 2))
 
     try:
-        if getattr(worksheet, "col_count", len(headers)) < len(headers):
-            worksheet.resize(rows=worksheet.row_count, cols=len(headers))
-    except Exception:
-        pass
+        current_headers = worksheet.row_values(1)
+
+        if current_headers != headers:
+            safe_sheet_update(worksheet, "A1", [headers])
+
+        try:
+            if worksheet.col_count < len(headers):
+                worksheet.resize(rows=worksheet.row_count, cols=len(headers))
+        except Exception:
+            pass
+
+    except Exception as error:
+        log(f"Google Sheets header update error for {title}: {error}")
 
     format_worksheet_for_readability(worksheet, title, headers)
     return worksheet
@@ -6759,7 +6940,7 @@ def json_for_shared_sheet(value):
 
 
 def sync_shared_bot_status_to_google_sheets(status):
-    """v32.13.3 shared source-of-truth status for separate Railway bot/dashboard projects."""
+    """v32.18.1 shared source-of-truth status for separate Railway bot/dashboard projects."""
     if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_ENABLED", False):
         return False
     spreadsheet = get_google_spreadsheet()
@@ -6800,7 +6981,7 @@ def sync_shared_bot_status_to_google_sheets(status):
 
 
 def sync_shared_paper_trades_to_google_sheets(spreadsheet=None):
-    """v32.13.3 publish current paper_trades.csv to Google Sheets for dashboard fallback."""
+    """v32.18.1 publish current paper_trades.csv to Google Sheets for dashboard fallback."""
     if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", False):
         return False
     spreadsheet = spreadsheet or get_google_spreadsheet()
@@ -6825,7 +7006,7 @@ def sync_shared_paper_trades_to_google_sheets(spreadsheet=None):
 
 
 def sync_shared_paper_equity_to_google_sheets(spreadsheet=None):
-    """v32.13.3 publish paper equity curve to Google Sheets for dashboard fallback."""
+    """v32.18.1 publish paper equity curve to Google Sheets for dashboard fallback."""
     if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", False):
         return False
     spreadsheet = spreadsheet or get_google_spreadsheet()
@@ -7328,9 +7509,6 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Automation Readiness", AUTOMATION_READINESS_HEADERS)
         get_or_create_worksheet(spreadsheet, "Trade Lifecycle", TRADE_LIFECYCLE_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
-        get_or_create_worksheet(spreadsheet, "Shared Bot Status", SHARED_BOT_STATUS_HEADERS)
-        get_or_create_worksheet(spreadsheet, "Shared Paper Trades", PAPER_TRADE_HEADERS)
-        get_or_create_worksheet(spreadsheet, "Shared Paper Equity", SHARED_PAPER_EQUITY_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
 
@@ -7356,6 +7534,7 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         sync_strategy_ranking_to_google_sheets(spreadsheet)
         sync_automation_readiness_to_google_sheets(spreadsheet)
         sync_trade_lifecycle_to_google_sheets(spreadsheet)
+        sync_v32_14_to_18_to_google_sheets(spreadsheet)
         sync_shared_paper_trades_to_google_sheets(spreadsheet)
         sync_shared_paper_equity_to_google_sheets(spreadsheet)
         update_system_status(
@@ -7713,6 +7892,9 @@ def run_scan():
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Trade lifecycle analytics", log_trade_lifecycle_report)
     post_scan_errors += int(step_error)
+
+    _, step_error = run_safe_step("Outcome intelligence v32.14-v32.18", log_v32_14_to_18_report)
+    post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Trade lifecycle Discord report", send_trade_lifecycle_report_if_due)
     post_scan_errors += int(step_error)
 
@@ -7844,6 +8026,8 @@ def main():
     log(f"Strategy ranking enabled: {BOT_STRATEGY_RANKING_ENABLED} | min sample={BOT_STRATEGY_RANKING_MIN_SAMPLE} | strong PF={BOT_STRATEGY_RANKING_STRONG_PF} | strong WR={BOT_STRATEGY_RANKING_STRONG_WR}% | weak PF={BOT_STRATEGY_RANKING_WEAK_PF} | weak WR={BOT_STRATEGY_RANKING_WEAK_WR}% | block weak={BOT_STRATEGY_RANKING_BLOCK_WEAK_SETUPS}")
     log(f"Automation readiness enabled: {BOT_AUTOMATION_READINESS_ENABLED} | min closed={BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | target WR={BOT_AUTOMATION_READINESS_TARGET_WR}% | target PF={BOT_AUTOMATION_READINESS_TARGET_PF} | ready score={BOT_AUTOMATION_READINESS_TARGET_SCORE}")
     log(f"Trade lifecycle analytics enabled: {BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED} | min sample={BOT_TRADE_LIFECYCLE_MIN_SAMPLE} | fast TP1={BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS}h | max hold={BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS}d | mode=recommendation-only")
+    log(f"Outcome intelligence v32.14-v32.18 enabled: {BOT_OUTCOME_ATTRIBUTION_ENABLED} | attribution sample={BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE} | confidence sample={BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE} | regime sample={BOT_REGIME_PERFORMANCE_MIN_SAMPLE} | signal sample={BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE}")
+    log(f"Shared status sync enabled: {BOT_SHARED_STATUS_SYNC_ENABLED} | shared paper trades sync: {BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED}")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")
     log(f"Discord message limit: {DISCORD_MESSAGE_LIMIT}")
@@ -7892,7 +8076,6 @@ def main():
     log(f"Bot status file: {BOT_STATUS_FILE}")
     log(f"Paper trades file: {PAPER_TRADES_FILE}")
     log(f"Paper equity file: {PAPER_EQUITY_FILE}")
-    log(f"Shared status sync enabled: {BOT_SHARED_STATUS_SYNC_ENABLED}")
     log_paper_trade_file_diagnostics("Startup paper trade diagnostics")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
     log(f"Heartbeat interval hours: {BOT_HEARTBEAT_INTERVAL_HOURS}")

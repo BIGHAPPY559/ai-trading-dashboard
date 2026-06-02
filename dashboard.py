@@ -15,17 +15,17 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-try:
     import gspread
     from google.oauth2.service_account import Credentials
 except Exception:
     gspread = None
     Credentials = None
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 def get_env_bool(name, default=False):
     value = os.getenv(name)
@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.13.3.2_google_sheets_hardening_dashboard"
+APP_VERSION = "v32.18.1_shared_sync_restore_outcome_intelligence_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -161,7 +161,7 @@ YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
 
-# v32.13.3 Shared Status Sync dashboard settings.
+# v32.18.1 Shared Status Sync dashboard settings.
 # Lets the dashboard read bot status and paper trades from Google Sheets when
 # bot and dashboard run in separate Railway projects.
 GOOGLE_SHEETS_ENABLED = get_env_bool("GOOGLE_SHEETS_ENABLED", True)
@@ -229,6 +229,12 @@ BOT_TRADE_LIFECYCLE_MIN_SAMPLE = get_env_int("BOT_TRADE_LIFECYCLE_MIN_SAMPLE", 5
 BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS = get_env_float("BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS", 24)
 BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS = get_env_float("BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS", 10)
 BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY = get_env_float("BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY", 0.5)
+
+# v32.14-v32.18 Outcome Intelligence dashboard settings.
+BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE = get_env_int("BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE", 5)
+BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE = get_env_int("BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE", 5)
+BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE = get_env_int("BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE", 5)
+BOT_REGIME_PERFORMANCE_MIN_SAMPLE = get_env_int("BOT_REGIME_PERFORMANCE_MIN_SAMPLE", 5)
 
 
 def now_dt():
@@ -706,7 +712,7 @@ def load_shared_paper_equity_from_google_sheets():
 
 
 def load_paper_trades_df():
-    # v32.13.3: prefer Google Sheets when configured so separate Railway projects share evidence.
+    # v32.18.1: prefer Google Sheets when configured so separate Railway projects share evidence.
     if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
         shared = load_shared_paper_trades_from_google_sheets()
         if shared is not None and not shared.empty:
@@ -724,7 +730,7 @@ def load_paper_trades_df():
 
 
 def load_paper_equity_df():
-    # v32.13.3: prefer Google Sheets when configured so separate Railway projects share evidence.
+    # v32.18.1: prefer Google Sheets when configured so separate Railway projects share evidence.
     if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
         shared = load_shared_paper_equity_from_google_sheets()
         if shared is not None and not shared.empty:
@@ -787,16 +793,9 @@ def build_dashboard_file_diagnostics():
     return diagnostics
 
 
-# ======================================================
-# v32.13.2 PAPER TRADE DATA-FLOW DIAGNOSTICS DISPLAY
-# ======================================================
-
 def normalize_dashboard_path(value):
     try:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        return os.path.normpath(text)
+        return os.path.normpath(str(value or "").strip())
     except Exception:
         return str(value or "").strip()
 
@@ -835,7 +834,7 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
 
     warnings = []
     if not has_bot_diag:
-        warnings.append("Bot has not written v32.13.1+ paper-trade diagnostics yet. Let the bot complete one scan after deploy.")
+        warnings.append("Bot has not written paper-trade diagnostics yet. Let the bot complete one scan after deploy.")
     if has_bot_diag and not path_match:
         warnings.append("Bot and dashboard are not pointing at the same paper_trades.csv path.")
     if has_bot_diag and path_match and not rows_match:
@@ -878,7 +877,7 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
 
     rows = [
         {"Check": "Bot diagnostics present", "Bot": bool_status_text(has_bot_diag), "Dashboard": "Required", "Match": bool_status_text(has_bot_diag), "Meaning": "Bot wrote paper_trade_file_diagnostics into bot_last_status.json."},
-        {"Check": "Data source", "Bot": status_source, "Dashboard": "Google Sheets" if using_shared_google else "Local File", "Match": "YES", "Meaning": "v32.13.3 supports separate Railway projects through Google Sheets."},
+        {"Check": "Data source", "Bot": status_source, "Dashboard": "Google Sheets" if using_shared_google else "Local File", "Match": "YES", "Meaning": "v32.18.1 supports separate Railway projects through Google Sheets."},
         {"Check": "paper_trades.csv path", "Bot": bot_file or "Missing", "Dashboard": dashboard_file or "Missing", "Match": bool_status_text(path_match), "Meaning": "Path match is required for local-volume mode; Google Sheets mode can bridge separate projects."},
         {"Check": "paper_trades.csv exists", "Bot": bool_status_text(bot_diag.get("paper_trades_file_exists")) if has_bot_diag else "Unknown", "Dashboard": bool_status_text(dashboard_diag.get("paper_trades.csv exists")), "Match": bool_status_text(file_exists_match), "Meaning": "Confirms both services can see the same trade file."},
         {"Check": "paper_trades.csv rows", "Bot": int(bot_rows), "Dashboard": int(dashboard_rows), "Match": bool_status_text(rows_match), "Meaning": "Main evidence counter. Rows should match."},
@@ -1955,7 +1954,7 @@ def add_quality_badges(df):
     return out
 
 def load_bot_status():
-    # v32.13.3: load status from Google Sheets first when bot/dashboard are separate Railway projects.
+    # v32.18.1: load status from Google Sheets first when bot/dashboard are separate Railway projects.
     if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
         shared_status = load_shared_bot_status_from_google_sheets()
         if shared_status:
@@ -2954,11 +2953,152 @@ if not st.session_state.equity_history or st.session_state.equity_history[-1] !=
     st.session_state.equity_history.append(total_equity)
     save_equity_history(st.session_state.equity_history)
 
+
+# ======================================================
+# v32.14-v32.18 OUTCOME INTELLIGENCE DASHBOARD HELPERS
+# ======================================================
+
+def dashboard_bucket_confidence(value):
+    value = safe_float_dashboard(value, 0)
+    if value >= 90: return "90-100"
+    if value >= 80: return "80-89"
+    if value >= 70: return "70-79"
+    if value >= 60: return "60-69"
+    return "<60"
+
+
+def dashboard_text_has_any(value, words):
+    text = str(value or "").lower()
+    return any(str(word).lower() in text for word in words)
+
+
+def dashboard_stored_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ["1", "true", "yes", "y", "on"]
+
+
+def dashboard_build_outcome_attribution_fields(row):
+    notes = " ".join([str(row.get(c, "")) for c in ["notes", "setup_name", "setup_tags", "attribution_notes", "regime_bucket"]])
+    mtf_aligned = dashboard_stored_bool(row.get("mtf_aligned", False)) or dashboard_text_has_any(notes, ["mtf"])
+    volume_confirmed = dashboard_stored_bool(row.get("volume_confirmed", False)) or dashboard_text_has_any(notes, ["volume", "spike"])
+    market_aligned = dashboard_stored_bool(row.get("market_aligned", False)) or dashboard_text_has_any(notes, ["market", "risk-on", "risk-off", "bull", "bear"])
+    sr_confirmed = dashboard_stored_bool(row.get("sr_confirmed", False)) or dashboard_text_has_any(notes, ["s/r", "support", "resistance"])
+    news_confirmed = dashboard_stored_bool(row.get("news_confirmed", False)) or dashboard_text_has_any(notes, ["news"])
+    rr_confirmed = dashboard_stored_bool(row.get("rr_confirmed", False)) or safe_float_dashboard(row.get("risk_reward_2", 0), 0) >= 2
+    confidence = safe_float_dashboard(row.get("confidence", 0), 0)
+    quality = safe_float_dashboard(row.get("quality_score", 0), 0)
+    status = str(row.get("status", "OPEN")).upper()
+    pnl_pct = safe_float_dashboard(row.get("pnl_percent", 0), 0)
+    if status in ["TP2_HIT", "CLOSED"] or pnl_pct > 0:
+        outcome, bucket = "WIN", "Strong Win" if pnl_pct >= 2 else "Small Win"
+    elif status == "STOPPED" or pnl_pct < 0:
+        outcome, bucket = "LOSS", "Large Loss" if pnl_pct <= -2 else "Small Loss"
+    elif status == "TP1_HIT":
+        outcome, bucket = "PARTIAL_WIN", "TP1 Open"
+    else:
+        outcome, bucket = "OPEN", "Open / Monitoring"
+    drivers=[]
+    if mtf_aligned: drivers.append("MTF")
+    if volume_confirmed: drivers.append("Volume")
+    if market_aligned: drivers.append("Market")
+    if sr_confirmed: drivers.append("S/R")
+    if news_confirmed: drivers.append("News")
+    if rr_confirmed: drivers.append("Risk/Reward")
+    if confidence >= 80: drivers.append("High Confidence")
+    if quality >= 80: drivers.append("High Quality")
+    weak=[]
+    if not mtf_aligned: weak.append("No MTF")
+    if not volume_confirmed: weak.append("No Volume")
+    if not market_aligned: weak.append("Market Unclear")
+    if not sr_confirmed: weak.append("No S/R")
+    if not rr_confirmed: weak.append("Weak R/R")
+    score = min(100, len(drivers)*12 + max(0, confidence-50)*0.5 + max(0, quality-50)*0.3)
+    regime = str(row.get("regime_bucket", "Unknown") or "Unknown")
+    if regime.lower() in ["", "nan", "none"]: regime = "Unknown"
+    return pd.Series({
+        "outcome": outcome, "outcome_bucket": bucket, "attribution_score": round(score,2),
+        "primary_driver": drivers[0] if drivers else "Needs Data",
+        "secondary_driver": drivers[1] if len(drivers)>1 else "None",
+        "weakness_driver": weak[0] if weak else "None",
+        "mtf_aligned": mtf_aligned, "volume_confirmed": volume_confirmed, "market_aligned": market_aligned,
+        "sr_confirmed": sr_confirmed, "news_confirmed": news_confirmed, "rr_confirmed": rr_confirmed,
+        "confidence_bucket": str(row.get("confidence_bucket", "")) if str(row.get("confidence_bucket", "")).strip() else dashboard_bucket_confidence(confidence),
+        "regime_bucket": regime,
+        "attribution_notes": "Drivers: " + (", ".join(drivers) if drivers else "Needs Data") + " | Weakness: " + (", ".join(weak[:3]) if weak else "None"),
+    })
+
+
+def dashboard_enrich_outcome_intelligence(df):
+    trades = normalize_paper_trade_df(df)
+    if trades.empty:
+        return trades
+    needed = ["outcome", "outcome_bucket", "attribution_score", "primary_driver", "secondary_driver", "weakness_driver", "mtf_aligned", "volume_confirmed", "market_aligned", "sr_confirmed", "news_confirmed", "rr_confirmed", "confidence_bucket", "regime_bucket", "attribution_notes"]
+    computed = trades.apply(dashboard_build_outcome_attribution_fields, axis=1)
+    for col in needed:
+        if col not in trades.columns or trades[col].astype(str).replace("nan", "").str.strip().eq("").all():
+            trades[col] = computed[col]
+        else:
+            missing = trades[col].astype(str).replace("nan", "").str.strip().eq("")
+            trades.loc[missing, col] = computed.loc[missing, col]
+    return trades
+
+
+def dashboard_closed_outcome_trades(df):
+    trades = dashboard_enrich_outcome_intelligence(df)
+    if trades.empty or "status" not in trades.columns:
+        return pd.DataFrame()
+    return trades[trades["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+
+
+def dashboard_profit_factor(pnl):
+    pnl = pd.to_numeric(pnl, errors="coerce").fillna(0)
+    wins = pnl[pnl > 0].sum(); losses = abs(pnl[pnl < 0].sum())
+    if losses > 0: return round(wins/losses, 2)
+    return round(wins, 2) if wins > 0 else 0
+
+
+def dashboard_win_rate(pnl):
+    pnl = pd.to_numeric(pnl, errors="coerce").fillna(0)
+    return round((len(pnl[pnl>0])/len(pnl))*100, 2) if len(pnl) else 0
+
+
+def dashboard_group_outcome_performance(df, group_col, min_sample=1):
+    closed = dashboard_closed_outcome_trades(df)
+    if closed.empty or group_col not in closed.columns:
+        return pd.DataFrame()
+    rows=[]
+    for group_name, group in closed.groupby(group_col):
+        pnl_d = pd.to_numeric(group.get("pnl_dollars", 0), errors="coerce").fillna(0)
+        pnl_p = pd.to_numeric(group.get("pnl_percent", 0), errors="coerce").fillna(0)
+        count = len(group)
+        rows.append({
+            "Group": str(group_name), "Trades": count, "Win Rate %": dashboard_win_rate(pnl_d),
+            "Profit Factor": dashboard_profit_factor(pnl_d), "Total P/L $": round(float(pnl_d.sum()),2),
+            "Avg Return %": round(float(pnl_p.mean()),2) if count else 0,
+            "Avg Attribution Score": round(float(pd.to_numeric(group.get("attribution_score",0), errors="coerce").fillna(0).mean()),2) if count else 0,
+            "Sample Status": "Reliable" if count >= min_sample else "Needs More Data",
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(by=["Profit Factor", "Win Rate %", "Total P/L $"], ascending=False) if not out.empty else out
+
+
+def dashboard_outcome_summary(df):
+    trades = dashboard_enrich_outcome_intelligence(df)
+    closed = dashboard_closed_outcome_trades(trades)
+    open_count = len(trades[trades["status"].astype(str).isin(["OPEN", "TP1_HIT"])]) if not trades.empty and "status" in trades.columns else 0
+    return {
+        "total": len(trades), "open": open_count, "closed": len(closed),
+        "win_rate": dashboard_win_rate(closed.get("pnl_dollars", pd.Series(dtype=float))) if not closed.empty else 0,
+        "profit_factor": dashboard_profit_factor(closed.get("pnl_dollars", pd.Series(dtype=float))) if not closed.empty else 0,
+        "total_pnl": round(float(pd.to_numeric(closed.get("pnl_dollars", 0), errors="coerce").fillna(0).sum()), 2) if not closed.empty else 0,
+    }
+
 # ======================================================
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_lifecycle_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_lifecycle_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -2967,6 +3107,11 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Performance Gate",
     "Automation Readiness",
     "Trade Lifecycle",
+    "Outcome Attribution",
+    "Setup Database",
+    "Regime Performance",
+    "Confidence Calibration",
+    "Signal Intelligence",
     "Trade Intelligence",
     "Adaptive Filters",
     "Setup Intelligence",
@@ -3736,7 +3881,113 @@ with trade_lifecycle_tab:
         {"Setting": "Slow hold threshold", "Value": f"> {BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS} days"},
         {"Setting": "Strong return/day threshold", "Value": f">= {BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY}%/day"},
     ])
+
     st.dataframe(arrow_safe_df(guardrail_df), width="stretch")
+
+
+# ======================================================
+# v32.14 OUTCOME ATTRIBUTION TAB
+# ======================================================
+
+with outcome_attribution_tab:
+    st.header("v32.14 Trade Outcome Attribution Engine")
+    st.caption("Explains why paper trades are winning, losing, or still developing.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    summary = dashboard_outcome_summary(trades)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open Trades", summary["open"])
+    c2.metric("Closed Trades", summary["closed"])
+    c3.metric("Win Rate", f"{summary['win_rate']}%")
+    c4.metric("Profit Factor", summary["profit_factor"])
+    driver_df = dashboard_group_outcome_performance(trades, "primary_driver", BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE)
+    st.subheader("Primary Driver Performance")
+    if driver_df.empty:
+        st.info("No closed trades yet. Attribution is active and will rank drivers after outcomes close.")
+    else:
+        st.dataframe(arrow_safe_df(driver_df), width="stretch")
+    st.subheader("Recent Attribution Events")
+    cols = [c for c in ["ticker", "signal", "status", "outcome", "outcome_bucket", "primary_driver", "secondary_driver", "weakness_driver", "confidence_bucket", "regime_bucket", "attribution_score", "pnl_percent", "pnl_dollars", "attribution_notes"] if c in trades.columns]
+    if trades.empty:
+        st.info("No paper trades yet.")
+    else:
+        st.dataframe(arrow_safe_df(trades.tail(25)[cols]), width="stretch")
+
+
+# ======================================================
+# v32.15 SETUP PERFORMANCE DATABASE TAB
+# ======================================================
+
+with setup_db_tab:
+    st.header("v32.15 Setup Performance Database")
+    st.caption("Ranks each setup by closed paper-trade performance and attribution quality.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    setup_df = dashboard_group_outcome_performance(trades, "setup_name", BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+    if setup_df.empty:
+        st.info("No closed setup outcomes yet. Open trades are already being tagged for this database.")
+    else:
+        st.dataframe(arrow_safe_df(setup_df), width="stretch")
+        st.download_button("Download Setup Performance Database CSV", setup_df.to_csv(index=False), "setup_performance_database.csv", "text/csv")
+    st.warning(f"Minimum reliable setup sample: {BOT_SETUP_ANALYTICS_MIN_SAMPLE} closed trades per setup.")
+
+
+# ======================================================
+# v32.16 MARKET REGIME PERFORMANCE TAB
+# ======================================================
+
+with regime_performance_tab:
+    st.header("v32.16 Market Regime Performance Analytics")
+    st.caption("Shows which market regimes and risk modes your strategy performs best in.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    regime_df = dashboard_group_outcome_performance(trades, "regime_bucket", BOT_REGIME_PERFORMANCE_MIN_SAMPLE)
+    if regime_df.empty:
+        st.info("No closed regime outcomes yet.")
+    else:
+        st.dataframe(arrow_safe_df(regime_df), width="stretch")
+    st.info(f"Minimum reliable regime sample: {BOT_REGIME_PERFORMANCE_MIN_SAMPLE} closed trades per regime.")
+
+
+# ======================================================
+# v32.17 CONFIDENCE CALIBRATION TAB
+# ======================================================
+
+with confidence_calibration_tab:
+    st.header("v32.17 Confidence Calibration Engine")
+    st.caption("Checks whether higher confidence scores are actually producing better outcomes.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    conf_df = dashboard_group_outcome_performance(trades, "confidence_bucket", BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE)
+    if conf_df.empty:
+        st.info("No closed confidence-bucket outcomes yet.")
+    else:
+        st.dataframe(arrow_safe_df(conf_df), width="stretch")
+        if "Group" in conf_df.columns:
+            st.bar_chart(conf_df.set_index("Group")[["Win Rate %", "Profit Factor"]])
+    st.warning("Do not raise BOT_SIGNAL_MIN_CONFIDENCE until confidence buckets have enough closed trade evidence.")
+
+
+# ======================================================
+# v32.18 SIGNAL INTELLIGENCE DASHBOARD TAB
+# ======================================================
+
+with signal_intelligence_tab:
+    st.header("v32.18 Signal Intelligence Dashboard")
+    st.caption("Combines ticker, signal, setup, regime, and confidence evidence into one pre-v33 decision center.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    summary = dashboard_outcome_summary(trades)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tracked Trades", summary["total"])
+    c2.metric("Closed Trades", summary["closed"])
+    c3.metric("Total Closed P/L", f"${summary['total_pnl']}")
+    c4.metric("PF", summary["profit_factor"])
+    signal_df = dashboard_group_outcome_performance(trades, "signal", BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE)
+    ticker_df = dashboard_group_outcome_performance(trades, "ticker", BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE)
+    st.subheader("Signal Type Performance")
+    if signal_df.empty: st.info("No closed signal outcomes yet.")
+    else: st.dataframe(arrow_safe_df(signal_df), width="stretch")
+    st.subheader("Ticker Performance")
+    if ticker_df.empty: st.info("No closed ticker outcomes yet.")
+    else: st.dataframe(arrow_safe_df(ticker_df), width="stretch")
+    st.subheader("v33 Automation Rule")
+    st.info("Only automate strategies after 100+ closed paper trades, PF >= 1.5, WR >= 50%, positive equity curve, and no confirmed weak setup/regime/confidence bucket.")
 
 
 # ======================================================
