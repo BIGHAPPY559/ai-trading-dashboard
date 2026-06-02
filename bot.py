@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.21.2-yfinance-symbol-guard"
+BOT_VERSION = "google-sheets-100-production-v32.26.1-dynamic-trade-filter-hardening"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -595,12 +595,35 @@ BOT_REGIME_PERFORMANCE_MIN_SAMPLE = max(1, get_env_int("BOT_REGIME_PERFORMANCE_M
 BOT_SEND_OUTCOME_INTELLIGENCE_REPORT = get_env_bool("BOT_SEND_OUTCOME_INTELLIGENCE_REPORT", True)
 BOT_OUTCOME_INTELLIGENCE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_OUTCOME_INTELLIGENCE_REPORT_INTERVAL_HOURS", 24))
 
+# v32.22-v32.26 Evidence + Learning Suite.
+BOT_EVIDENCE_COLLECTION_CENTER_ENABLED = get_env_bool("BOT_EVIDENCE_COLLECTION_CENTER_ENABLED", True)
+BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED = get_env_bool("BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED", True)
+BOT_SMART_ALERT_FILTER_ENABLED = get_env_bool("BOT_SMART_ALERT_FILTER_ENABLED", True)
+BOT_SMART_ALERT_FILTER_MIN_QUALITY = max(0, min(get_env_float("BOT_SMART_ALERT_FILTER_MIN_QUALITY", 70), 100))
+BOT_SMART_ALERT_FILTER_MIN_RR = max(0, get_env_float("BOT_SMART_ALERT_FILTER_MIN_RR", 1.2))
+BOT_SMART_ALERT_FILTER_USE_BACKTEST = get_env_bool("BOT_SMART_ALERT_FILTER_USE_BACKTEST", True)
+BOT_SMART_ALERT_FILTER_MIN_BACKTEST_SIGNALS = max(1, get_env_int("BOT_SMART_ALERT_FILTER_MIN_BACKTEST_SIGNALS", 20))
+BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF = max(0, get_env_float("BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF", 1.0))
+BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR = max(0, min(get_env_float("BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR", 50), 100))
+BOT_AUTO_LEARNING_ENGINE_ENABLED = get_env_bool("BOT_AUTO_LEARNING_ENGINE_ENABLED", True)
+BOT_AUTO_LEARNING_MIN_SAMPLE = max(1, get_env_int("BOT_AUTO_LEARNING_MIN_SAMPLE", 5))
+BOT_DYNAMIC_TRADE_FILTERING_ENABLED = get_env_bool("BOT_DYNAMIC_TRADE_FILTERING_ENABLED", True)
+BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE = max(1, get_env_int("BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE", 5))
+BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK = get_env_bool("BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK", False)
+BOT_DYNAMIC_TRADE_FILTER_WEAK_PF = max(0, get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_PF", 1.0))
+BOT_DYNAMIC_TRADE_FILTER_WEAK_WR = max(0, min(get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_WR", 45), 100))
+BOT_DYNAMIC_TRADE_FILTER_STRONG_PF = max(0, get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_PF", 1.5))
+BOT_DYNAMIC_TRADE_FILTER_STRONG_WR = max(0, min(get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_WR", 55), 100))
+BOT_SEND_EVIDENCE_LEARNING_REPORT = get_env_bool("BOT_SEND_EVIDENCE_LEARNING_REPORT", True)
+BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS", 24))
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
 AUTOMATION_READINESS_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_report_log.txt")
 TRADE_LIFECYCLE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_trade_lifecycle_report_log.txt")
 OUTCOME_INTELLIGENCE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_outcome_intelligence_report_log.txt")
+EVIDENCE_LEARNING_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_learning_report_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -1478,6 +1501,309 @@ def send_watchlist_discovery_report_if_due():
         log(f"Watchlist discovery sent: {len(candidates)} candidate(s).")
     return sent
 
+
+
+# ======================================================
+# v32.22-v32.26 EVIDENCE + LEARNING SUITE
+# ======================================================
+
+def evidence_learning_report_key():
+    bucket_seconds = max(1, int(BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS * 3600))
+    bucket = int(time.time() // bucket_seconds)
+    return f"evidence_learning_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+def evidence_learning_report_already_sent():
+    return evidence_learning_report_key() in load_log(EVIDENCE_LEARNING_REPORT_LOG_FILE)
+
+def mark_evidence_learning_report_sent():
+    items = load_log(EVIDENCE_LEARNING_REPORT_LOG_FILE)
+    items.add(evidence_learning_report_key())
+    save_log(EVIDENCE_LEARNING_REPORT_LOG_FILE, items)
+
+def closed_paper_trade_rows_for_learning():
+    df = load_paper_trades()
+    if df is None or df.empty or "status" not in df.columns:
+        return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    return df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+
+def pnl_stats_for_learning(df):
+    if df is None or df.empty:
+        return {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0, "profit_factor": 0, "total_pnl": 0}
+    pnl = pd.to_numeric(df.get("pnl_dollars", 0), errors="coerce").fillna(0)
+    wins = pnl[pnl > 0]
+    losses = pnl[pnl < 0]
+    gross_wins = float(wins.sum())
+    gross_losses = abs(float(losses.sum()))
+    return {
+        "trades": int(len(df)),
+        "wins": int(len(wins)),
+        "losses": int(len(losses)),
+        "win_rate": round((len(wins) / len(df)) * 100, 2) if len(df) else 0,
+        "profit_factor": round(gross_wins / gross_losses, 2) if gross_losses > 0 else (round(gross_wins, 2) if gross_wins > 0 else 0),
+        "total_pnl": round(float(pnl.sum()), 2),
+    }
+
+def group_learning_performance(df, group_column, min_sample=1):
+    if df is None or df.empty or group_column not in df.columns:
+        return []
+    rows = []
+    for group_value, group in df.groupby(group_column):
+        stats = pnl_stats_for_learning(group)
+        rows.append({
+            "Group": str(group_value) if str(group_value).strip() else "Unknown",
+            "Trades": stats["trades"],
+            "Win Rate %": stats["win_rate"],
+            "Profit Factor": stats["profit_factor"],
+            "Total P/L $": stats["total_pnl"],
+            "Sample Status": "Reliable" if stats["trades"] >= min_sample else "Needs More Data",
+        })
+    return sorted(rows, key=lambda item: (item["Profit Factor"], item["Win Rate %"], item["Total P/L $"]), reverse=True)
+
+def build_trade_journal_intelligence_rows(limit=25):
+    if not BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED:
+        return []
+    closed = closed_paper_trade_rows_for_learning()
+    if closed.empty:
+        return []
+    rows = []
+    for _, row in closed.tail(limit).iterrows():
+        winning = safe_float(row.get("pnl_dollars", 0), 0) > 0
+        strengths, weaknesses = [], []
+        for label, ok in [
+            ("MTF", row.get("mtf_aligned", False)),
+            ("Volume", row.get("volume_confirmed", False)),
+            ("Market", row.get("market_aligned", False)),
+            ("S/R", row.get("sr_confirmed", False)),
+            ("News", row.get("news_confirmed", False)),
+            ("R/R", row.get("rr_confirmed", False)),
+        ]:
+            if paper_bool(ok):
+                strengths.append(label)
+            else:
+                weaknesses.append(label)
+        rows.append({
+            "Ticker": row.get("ticker", ""),
+            "Signal": row.get("signal", ""),
+            "Outcome": "WIN" if winning else "LOSS",
+            "P/L $": round(safe_float(row.get("pnl_dollars", 0), 0), 2),
+            "P/L %": round(safe_float(row.get("pnl_percent", 0), 0), 2),
+            "Winning Drivers": ", ".join(strengths) if strengths else "None confirmed",
+            "Losing / Weak Drivers": ", ".join(weaknesses[:4]) if weaknesses else "None obvious",
+            "Setup": row.get("setup_name", ""),
+            "Confidence Bucket": row.get("confidence_bucket", ""),
+            "Regime": row.get("regime_bucket", ""),
+        })
+    return rows
+
+def smart_alert_filter_reason(row):
+    if not BOT_SMART_ALERT_FILTER_ENABLED:
+        return True, "smart alert filter disabled"
+    reasons = []
+    quality = safe_float(row.get("Signal Quality Score", row.get("quality_score", 0)), 0)
+    rr = safe_float(row.get("Risk/Reward 2", row.get("risk_reward_2", 0)), 0)
+    if quality < BOT_SMART_ALERT_FILTER_MIN_QUALITY:
+        reasons.append(f"quality {quality} < {BOT_SMART_ALERT_FILTER_MIN_QUALITY}")
+    if rr and rr < BOT_SMART_ALERT_FILTER_MIN_RR:
+        reasons.append(f"R/R {rr} < {BOT_SMART_ALERT_FILTER_MIN_RR}")
+    if BOT_SMART_ALERT_FILTER_USE_BACKTEST:
+        bt_signals = safe_float(row.get("Backtest Quality Signals", 0), 0)
+        bt_pf = safe_float(row.get("Backtest Quality PF", 0), 0)
+        bt_wr = safe_float(row.get("Backtest Quality WR", 0), 0)
+        if bt_signals >= BOT_SMART_ALERT_FILTER_MIN_BACKTEST_SIGNALS:
+            if bt_pf < BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF:
+                reasons.append(f"backtest PF {bt_pf} < {BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF}")
+            if bt_wr < BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR:
+                reasons.append(f"backtest WR {bt_wr}% < {BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR}%")
+    if reasons:
+        return False, "smart filter blocked: " + "; ".join(reasons[:4])
+    return True, "smart filter approved"
+
+def apply_smart_alert_filters(candidate_rows):
+    if not BOT_SMART_ALERT_FILTER_ENABLED:
+        return candidate_rows
+    approved = []
+    for row in candidate_rows:
+        ok, reason = smart_alert_filter_reason(row)
+        notes = str(row.get("Exposure Notes", "") or "")
+        row["Smart Alert Filter"] = reason
+        row["Exposure Notes"] = f"{notes} | {reason}" if notes else reason
+        if ok:
+            approved.append(row)
+        else:
+            row["Alert Approved"] = "NO"
+            append_signal_history(row, "SMART_FILTER_BLOCKED")
+    return approved
+
+def dynamic_trade_filter_action_from_perf(perf_row):
+    trades = int(perf_row.get("Trades", 0) or 0)
+    pf = safe_float(perf_row.get("Profit Factor", 0), 0)
+    wr = safe_float(perf_row.get("Win Rate %", 0), 0)
+    if trades < BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE:
+        return "NEEDS_MORE_DATA"
+    if pf <= BOT_DYNAMIC_TRADE_FILTER_WEAK_PF or wr <= BOT_DYNAMIC_TRADE_FILTER_WEAK_WR:
+        return "REDUCE_OR_BLOCK"
+    if pf >= BOT_DYNAMIC_TRADE_FILTER_STRONG_PF and wr >= BOT_DYNAMIC_TRADE_FILTER_STRONG_WR:
+        return "FAVOR"
+    return "NEUTRAL"
+
+
+def _dynamic_trade_filter_perf_lookup(grouped_rows):
+    lookup = {}
+    for perf in grouped_rows or []:
+        group = str(perf.get("Group", "") or "").strip().upper()
+        if group:
+            lookup[group] = perf
+    return lookup
+
+
+def dynamic_trade_filter_check(row, snapshot=None):
+    """
+    v32.26.1 hardening: evaluate dynamic trade filtering during the actual
+    alert/paper-trade decision path, not just inside recommendation reports.
+
+    Default behavior is recommendation-first. A weak setup only blocks alerts
+    and paper trades when BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK=true and the
+    performance sample is reliable.
+    """
+    if not BOT_DYNAMIC_TRADE_FILTERING_ENABLED:
+        return True, "dynamic trade filter disabled", "DISABLED"
+
+    try:
+        snapshot = snapshot or build_auto_learning_snapshot()
+        checks = []
+
+        ticker = str(row.get("Ticker", "") or row.get("ticker", "")).strip().upper()
+        setup = str(row.get("setup_name", "") or build_setup_profile(row).get("setup_name", "")).strip().upper()
+        confidence = str(row.get("confidence_bucket", "") or bucket_confidence_value(row.get("AI Confidence %", row.get("confidence", 0)))).strip().upper()
+        regime = str(row.get("regime_bucket", "") or row.get("Advanced Market Regime", row.get("Market Regime", ""))).strip().upper()
+
+        lookup_specs = [
+            ("ticker", ticker, _dynamic_trade_filter_perf_lookup(snapshot.get("ticker_perf", []))),
+            ("setup", setup, _dynamic_trade_filter_perf_lookup(snapshot.get("setup_perf", []))),
+            ("confidence", confidence, _dynamic_trade_filter_perf_lookup(snapshot.get("confidence_perf", []))),
+            ("regime", regime, _dynamic_trade_filter_perf_lookup(snapshot.get("regime_perf", []))),
+        ]
+
+        for label, key, lookup in lookup_specs:
+            if not key or key not in lookup:
+                continue
+            perf = lookup[key]
+            action = dynamic_trade_filter_action_from_perf(perf)
+            trades = int(perf.get("Trades", 0) or 0)
+            pf = safe_float(perf.get("Profit Factor", 0), 0)
+            wr = safe_float(perf.get("Win Rate %", 0), 0)
+            checks.append({"label": label, "key": key, "action": action, "trades": trades, "pf": pf, "wr": wr})
+
+        if not checks:
+            return True, f"dynamic filter: needs more closed evidence ({snapshot.get('stats', {}).get('trades', 0)}/{BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE})", "NEEDS_MORE_DATA"
+
+        weak = [item for item in checks if item["action"] == "REDUCE_OR_BLOCK"]
+        strong = [item for item in checks if item["action"] == "FAVOR"]
+
+        if weak:
+            item = weak[0]
+            note = f"dynamic weak {item['label']} {item['key']} | {item['trades']} trades | PF {item['pf']} | WR {item['wr']}%"
+            if BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK:
+                return False, "blocked: " + note, "BLOCKED_WEAK"
+            return True, "warning: " + note, "WEAK_WARNING"
+
+        if strong:
+            item = strong[0]
+            return True, f"dynamic favorite {item['label']} {item['key']} | {item['trades']} trades | PF {item['pf']} | WR {item['wr']}%", "FAVOR"
+
+        return True, "dynamic neutral: no reliable weak groups detected", "NEUTRAL"
+
+    except Exception as error:
+        log(f"Dynamic trade filter check error: {error}")
+        return True, "dynamic filter unavailable; allowed", "ERROR_ALLOWED"
+
+
+def apply_dynamic_trade_filters(candidate_rows):
+    if not BOT_DYNAMIC_TRADE_FILTERING_ENABLED:
+        return candidate_rows
+    snapshot = build_auto_learning_snapshot()
+    approved = []
+    for row in candidate_rows:
+        ok, note, action = dynamic_trade_filter_check(row, snapshot=snapshot)
+        prior_notes = str(row.get("Exposure Notes", "") or "")
+        row["Dynamic Trade Filter"] = action
+        row["Dynamic Trade Filter Note"] = note
+        row["Exposure Notes"] = f"{prior_notes} | {note}" if prior_notes else note
+        if ok:
+            approved.append(row)
+        else:
+            row["Alert Approved"] = "NO"
+            append_signal_history(row, "DYNAMIC_FILTER_BLOCKED")
+            log(f"Dynamic trade filter blocked {row.get('Ticker', '')}: {note}")
+    return approved
+
+def build_auto_learning_snapshot():
+    closed = closed_paper_trade_rows_for_learning()
+    stats = pnl_stats_for_learning(closed)
+    setup_perf = group_learning_performance(closed, "setup_name", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    ticker_perf = group_learning_performance(closed, "ticker", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    confidence_perf = group_learning_performance(closed, "confidence_bucket", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    regime_perf = group_learning_performance(closed, "regime_bucket", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    recommendations = []
+    if stats["trades"] < BOT_AUTO_LEARNING_MIN_SAMPLE:
+        recommendations.append(f"Collect more closed trades before trusting auto-learning ({stats['trades']}/{BOT_AUTO_LEARNING_MIN_SAMPLE}).")
+    for label, table in [("setup", setup_perf), ("ticker", ticker_perf), ("confidence bucket", confidence_perf), ("regime", regime_perf)]:
+        if table:
+            top = table[0]
+            recommendations.append(f"Best {label} so far: {top['Group']} | PF {top['Profit Factor']} | WR {top['Win Rate %']}%.")
+    weak = []
+    for label, table in [("setup", setup_perf), ("ticker", ticker_perf), ("confidence", confidence_perf), ("regime", regime_perf)]:
+        for row in table:
+            if dynamic_trade_filter_action_from_perf(row) == "REDUCE_OR_BLOCK":
+                weak.append(f"{label}:{row['Group']} PF {row['Profit Factor']} WR {row['Win Rate %']}%")
+    if weak:
+        recommendations.append("Dynamic filtering weak areas: " + "; ".join(weak[:3]))
+    if not recommendations:
+        recommendations.append("No decisive learning recommendation yet.")
+    return {
+        "stats": stats,
+        "setup_perf": setup_perf,
+        "ticker_perf": ticker_perf,
+        "confidence_perf": confidence_perf,
+        "regime_perf": regime_perf,
+        "journal": build_trade_journal_intelligence_rows(10),
+        "recommendations": recommendations[:8],
+    }
+
+def log_evidence_learning_report():
+    if not (BOT_EVIDENCE_COLLECTION_CENTER_ENABLED or BOT_AUTO_LEARNING_ENGINE_ENABLED or BOT_DYNAMIC_TRADE_FILTERING_ENABLED):
+        log("Evidence learning suite disabled.")
+        return None
+    snapshot = build_auto_learning_snapshot()
+    stats = snapshot["stats"]
+    log(f"Evidence Learning v32.22-v32.26: closed {stats['trades']} | WR {stats['win_rate']}% | PF {stats['profit_factor']} | P/L ${stats['total_pnl']}")
+    for rec in snapshot["recommendations"]:
+        log(f"Evidence Learning recommendation: {rec}")
+    return snapshot
+
+def send_evidence_learning_report_if_due():
+    if not BOT_SEND_EVIDENCE_LEARNING_REPORT:
+        return False
+    if evidence_learning_report_already_sent():
+        log(f"Evidence learning report skipped: cooldown active for {BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS} hours.")
+        return False
+    webhook_url = get_top_signals_webhook() or get_backtest_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Evidence learning report skipped: no scorecard/heartbeat webhook available.")
+        return False
+    snapshot = build_auto_learning_snapshot()
+    stats = snapshot["stats"]
+    fields = [
+        {"name": "Evidence Snapshot", "value": f"Closed {stats['trades']} | WR {stats['win_rate']}% | PF {stats['profit_factor']} | P/L ${stats['total_pnl']}", "inline": False},
+        {"name": "Learning Recommendations", "value": compact_text("\\n".join(snapshot["recommendations"]) or "No recommendations yet.", 1000), "inline": False},
+        {"name": "Smart Alert Filter", "value": f"Enabled={BOT_SMART_ALERT_FILTER_ENABLED} | Min QS {BOT_SMART_ALERT_FILTER_MIN_QUALITY} | Min R/R {BOT_SMART_ALERT_FILTER_MIN_RR}", "inline": False},
+        {"name": "Mode", "value": "Dynamic filter is wired into alerts and paper trades. Blocking remains off unless BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK=true.", "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🧠 v32.22-v32.26 Evidence + Auto Learning Report", 10181046, fields)
+    if sent:
+        mark_evidence_learning_report_sent()
+    return sent
 
 def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
     if not should_send_daily_report():
@@ -4835,6 +5161,10 @@ def paper_trade_quality_check(row):
     if not strategy_ok:
         return False, strategy_note
 
+    dynamic_ok, dynamic_note, dynamic_action = dynamic_trade_filter_check(row)
+    if not dynamic_ok:
+        return False, dynamic_note
+
     pf = safe_float(row.get("Backtest Quality PF", 0), 0)
     wr = safe_float(row.get("Backtest Quality WR", 0), 0)
     signals = int(safe_float(row.get("Backtest Quality Signals", 0), 0))
@@ -4854,7 +5184,7 @@ def paper_trade_quality_check(row):
     if wr < BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE:
         return False, f"blocked: paper trade WR {wr}% below {BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE}%"
 
-    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals} | {adaptive_note} | {strategy_note}"
+    return True, f"paper trade quality passed PF {pf} WR {wr}% signals {signals} | {adaptive_note} | {strategy_note} | {dynamic_note}"
 
 
 def create_paper_trade_from_signal(row):
@@ -8104,7 +8434,9 @@ def run_scan():
     ]
     candidates = len(raw_candidates)
     quality_candidates = apply_quality_filters(raw_candidates)
-    approved_candidates = apply_exposure_controls(quality_candidates)
+    dynamic_candidates = apply_dynamic_trade_filters(quality_candidates)
+    approved_candidates = apply_exposure_controls(dynamic_candidates)
+    approved_candidates = apply_smart_alert_filters(approved_candidates)
 
     for row in approved_candidates:
         signal = row.get("AI Signal", "")
@@ -8186,6 +8518,10 @@ def run_scan():
     post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Outcome intelligence v32.14-v32.18", log_v32_14_to_18_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Evidence Learning v32.22-v32.26", log_evidence_learning_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Evidence Learning Discord report", send_evidence_learning_report_if_due)
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Trade lifecycle Discord report", send_trade_lifecycle_report_if_due)
     post_scan_errors += int(step_error)
@@ -8323,6 +8659,11 @@ def main():
     log(f"Automation readiness enabled: {BOT_AUTOMATION_READINESS_ENABLED} | min closed={BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES} | target WR={BOT_AUTOMATION_READINESS_TARGET_WR}% | target PF={BOT_AUTOMATION_READINESS_TARGET_PF} | ready score={BOT_AUTOMATION_READINESS_TARGET_SCORE}")
     log(f"Trade lifecycle analytics enabled: {BOT_TRADE_LIFECYCLE_ANALYTICS_ENABLED} | min sample={BOT_TRADE_LIFECYCLE_MIN_SAMPLE} | fast TP1={BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS}h | max hold={BOT_TRADE_LIFECYCLE_MAX_HOLD_DAYS}d | mode=recommendation-only")
     log(f"Outcome intelligence v32.14-v32.18 enabled: {BOT_OUTCOME_ATTRIBUTION_ENABLED} | attribution sample={BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE} | confidence sample={BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE} | regime sample={BOT_REGIME_PERFORMANCE_MIN_SAMPLE} | signal sample={BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE}")
+    log(f"Evidence collection center v32.22 enabled: {BOT_EVIDENCE_COLLECTION_CENTER_ENABLED}")
+    log(f"Trade journal intelligence v32.23 enabled: {BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED}")
+    log(f"Smart alert filter v32.24 enabled: {BOT_SMART_ALERT_FILTER_ENABLED} | min quality={BOT_SMART_ALERT_FILTER_MIN_QUALITY} | min R/R={BOT_SMART_ALERT_FILTER_MIN_RR} | backtest gate={BOT_SMART_ALERT_FILTER_USE_BACKTEST}")
+    log(f"Auto learning engine v32.25 enabled: {BOT_AUTO_LEARNING_ENGINE_ENABLED} | min sample={BOT_AUTO_LEARNING_MIN_SAMPLE}")
+    log(f"Dynamic trade filtering v32.26 enabled: {BOT_DYNAMIC_TRADE_FILTERING_ENABLED} | block weak={BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK} | min sample={BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE}")
     log(f"Shared status sync enabled: {BOT_SHARED_STATUS_SYNC_ENABLED} | shared paper trades sync: {BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED}")
     log(f"Yahoo/yfinance news enabled: {BOT_NEWS_YFINANCE_ENABLED}")
     log(f"Max scan seconds: {BOT_MAX_SCAN_SECONDS}")

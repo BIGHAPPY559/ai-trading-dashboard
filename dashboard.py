@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.21.2_yfinance_symbol_guard_dashboard"
+APP_VERSION = "v32.26.1_dynamic_trade_filter_hardening_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -235,6 +235,22 @@ BOT_OUTCOME_ATTRIBUTION_MIN_SAMPLE = get_env_int("BOT_OUTCOME_ATTRIBUTION_MIN_SA
 BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE = get_env_int("BOT_SIGNAL_INTELLIGENCE_MIN_SAMPLE", 5)
 BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE = get_env_int("BOT_CONFIDENCE_CALIBRATION_MIN_SAMPLE", 5)
 BOT_REGIME_PERFORMANCE_MIN_SAMPLE = get_env_int("BOT_REGIME_PERFORMANCE_MIN_SAMPLE", 5)
+
+# v32.22-v32.26 Evidence + Learning Suite dashboard settings.
+BOT_EVIDENCE_COLLECTION_CENTER_ENABLED = get_env_bool("BOT_EVIDENCE_COLLECTION_CENTER_ENABLED", True)
+BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED = get_env_bool("BOT_TRADE_JOURNAL_INTELLIGENCE_ENABLED", True)
+BOT_SMART_ALERT_FILTER_ENABLED = get_env_bool("BOT_SMART_ALERT_FILTER_ENABLED", True)
+BOT_SMART_ALERT_FILTER_MIN_QUALITY = get_env_float("BOT_SMART_ALERT_FILTER_MIN_QUALITY", 70)
+BOT_SMART_ALERT_FILTER_MIN_RR = get_env_float("BOT_SMART_ALERT_FILTER_MIN_RR", 1.2)
+BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF = get_env_float("BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF", 1.0)
+BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR = get_env_float("BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR", 50)
+BOT_AUTO_LEARNING_MIN_SAMPLE = get_env_int("BOT_AUTO_LEARNING_MIN_SAMPLE", 5)
+BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE = get_env_int("BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE", 5)
+BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK = get_env_bool("BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK", False)
+BOT_DYNAMIC_TRADE_FILTER_WEAK_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_PF", 1.0)
+BOT_DYNAMIC_TRADE_FILTER_WEAK_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_WR", 45)
+BOT_DYNAMIC_TRADE_FILTER_STRONG_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_PF", 1.5)
+BOT_DYNAMIC_TRADE_FILTER_STRONG_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_WR", 55)
 
 
 def now_dt():
@@ -3117,11 +3133,82 @@ def dashboard_outcome_summary(df):
         "total_pnl": round(float(pd.to_numeric(closed.get("pnl_dollars", 0), errors="coerce").fillna(0).sum()), 2) if not closed.empty else 0,
     }
 
+
+# ======================================================
+# v32.22-v32.26 EVIDENCE + LEARNING DASHBOARD HELPERS
+# ======================================================
+
+def dashboard_dynamic_action(row):
+    trades = int(row.get("Trades", 0) or 0)
+    pf = safe_float_dashboard(row.get("Profit Factor", 0), 0)
+    wr = safe_float_dashboard(row.get("Win Rate %", 0), 0)
+    if trades < BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE:
+        return "NEEDS MORE DATA"
+    if pf <= BOT_DYNAMIC_TRADE_FILTER_WEAK_PF or wr <= BOT_DYNAMIC_TRADE_FILTER_WEAK_WR:
+        return "REDUCE / BLOCK"
+    if pf >= BOT_DYNAMIC_TRADE_FILTER_STRONG_PF and wr >= BOT_DYNAMIC_TRADE_FILTER_STRONG_WR:
+        return "FAVOR"
+    return "NEUTRAL"
+
+def build_dashboard_trade_journal_df(trades_df):
+    trades = dashboard_enrich_outcome_intelligence(trades_df)
+    closed = closed_paper_trades(trades)
+    if closed.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in closed.tail(50).iterrows():
+        winning = safe_float_dashboard(row.get("pnl_dollars", 0), 0) > 0
+        strengths, weaknesses = [], []
+        for label, col in [("MTF","mtf_aligned"),("Volume","volume_confirmed"),("Market","market_aligned"),("S/R","sr_confirmed"),("News","news_confirmed"),("R/R","rr_confirmed")]:
+            if str(row.get(col, "")).lower() in ["true", "1", "yes", "y", "on"]:
+                strengths.append(label)
+            else:
+                weaknesses.append(label)
+        rows.append({
+            "Ticker": row.get("ticker", ""),
+            "Signal": row.get("signal", ""),
+            "Outcome": "WIN" if winning else "LOSS",
+            "P/L $": round(safe_float_dashboard(row.get("pnl_dollars", 0), 0), 2),
+            "P/L %": round(safe_float_dashboard(row.get("pnl_percent", 0), 0), 2),
+            "Winning Drivers": ", ".join(strengths) if strengths else "None confirmed",
+            "Weak / Missing Drivers": ", ".join(weaknesses[:4]) if weaknesses else "None obvious",
+            "Setup": row.get("setup_name", ""),
+            "Confidence Bucket": row.get("confidence_bucket", ""),
+            "Regime": row.get("regime_bucket", ""),
+            "Date Closed": row.get("date_closed", ""),
+        })
+    return pd.DataFrame(rows)
+
+def build_dashboard_auto_learning_summary(trades_df):
+    trades = dashboard_enrich_outcome_intelligence(trades_df)
+    summary = dashboard_outcome_summary(trades)
+    setup_df = dashboard_group_outcome_performance(trades, "setup_name", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    ticker_df = dashboard_group_outcome_performance(trades, "ticker", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    confidence_df = dashboard_group_outcome_performance(trades, "confidence_bucket", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    regime_df = dashboard_group_outcome_performance(trades, "regime_bucket", BOT_AUTO_LEARNING_MIN_SAMPLE)
+    recs = []
+    if summary["closed"] < BOT_AUTO_LEARNING_MIN_SAMPLE:
+        recs.append(f"Collect more closed trades before trusting learning results ({summary['closed']}/{BOT_AUTO_LEARNING_MIN_SAMPLE}).")
+    for label, df in [("setup", setup_df), ("ticker", ticker_df), ("confidence bucket", confidence_df), ("regime", regime_df)]:
+        if df is not None and not df.empty:
+            top = df.iloc[0]
+            recs.append(f"Best {label}: {top['Group']} | PF {top['Profit Factor']} | WR {top['Win Rate %']}%.")
+    if not recs:
+        recs.append("No decisive learning recommendation yet.")
+    return {"summary": summary, "setup": setup_df, "ticker": ticker_df, "confidence": confidence_df, "regime": regime_df, "recommendations": recs[:8]}
+
+def add_dynamic_actions(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["Dynamic Action"] = out.apply(dashboard_dynamic_action, axis=1)
+    return out
+
 # ======================================================
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_lifecycle_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -3130,6 +3217,11 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Performance Gate",
     "Automation Readiness",
     "Trade Lifecycle",
+    "Evidence Center",
+    "Trade Journal",
+    "Smart Alert Filter",
+    "Auto Learning",
+    "Dynamic Filtering",
     "Outcome Attribution",
     "Setup Database",
     "Regime Performance",
@@ -3906,6 +3998,114 @@ with trade_lifecycle_tab:
     ])
 
     st.dataframe(arrow_safe_df(guardrail_df), width="stretch")
+
+
+# ======================================================
+# v32.22 EVIDENCE COLLECTION CENTER TAB
+# ======================================================
+
+with evidence_center_tab:
+    st.header("v32.22 Evidence Collection Center")
+    st.caption("One-screen proof tracker for the road to v33 automation.")
+    trades = dashboard_enrich_outcome_intelligence(load_paper_trades_df())
+    equity = load_paper_equity_df()
+    summary = dashboard_outcome_summary(trades)
+    readiness = build_automation_readiness_dashboard_report(trades, equity)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Closed Trades", summary["closed"])
+    c2.metric("Open Trades", summary["open"])
+    c3.metric("Win Rate", f"{summary['win_rate']}%")
+    c4.metric("Profit Factor", summary["profit_factor"])
+    c5.metric("Readiness Score", f"{readiness['score']}/100")
+    st.subheader("Automation Evidence Gates")
+    st.dataframe(arrow_safe_df(readiness["checks"]), width="stretch")
+    st.info(readiness["recommendation"])
+    if equity is not None and not equity.empty and "equity" in equity.columns:
+        st.subheader("Paper Equity Curve")
+        try:
+            st.line_chart(equity.set_index(equity.columns[0])["equity"] if len(equity.columns) > 1 else equity["equity"])
+        except Exception:
+            st.line_chart(equity["equity"])
+    else:
+        st.info("Equity curve will appear after closed paper trades update paper_trade_equity_curve.csv.")
+
+# ======================================================
+# v32.23 TRADE JOURNAL INTELLIGENCE TAB
+# ======================================================
+
+with trade_journal_tab:
+    st.header("v32.23 Trade Journal Intelligence")
+    st.caption("Explains what helped winning trades and what was missing in losing trades.")
+    journal_df = build_dashboard_trade_journal_df(load_paper_trades_df())
+    if journal_df.empty:
+        st.info("No closed paper trades yet. Journal intelligence will populate after TP2/stop closures.")
+    else:
+        st.dataframe(arrow_safe_df(journal_df.sort_values(by="Date Closed", ascending=False)), width="stretch")
+        st.download_button("Download Trade Journal CSV", journal_df.to_csv(index=False), "trade_journal_intelligence.csv", "text/csv")
+
+# ======================================================
+# v32.24 SMART ALERT FILTER TAB
+# ======================================================
+
+with smart_alert_filter_tab:
+    st.header("v32.24 Smart Alert Filtering")
+    st.caption("Shows the active quality gates used before alerts are sent.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Enabled", "YES" if BOT_SMART_ALERT_FILTER_ENABLED else "NO")
+    c2.metric("Min Quality", BOT_SMART_ALERT_FILTER_MIN_QUALITY)
+    c3.metric("Min R/R", BOT_SMART_ALERT_FILTER_MIN_RR)
+    c4.metric("Backtest Gate", f"PF {BOT_SMART_ALERT_FILTER_MIN_BACKTEST_PF} / WR {BOT_SMART_ALERT_FILTER_MIN_BACKTEST_WR}%")
+    st.info("This filter blocks low-quality alerts before Discord notification. It does not force close open trades and does not change historical evidence.")
+    signal_history = load_signal_history_df()
+    if signal_history is not None and not signal_history.empty:
+        cols = [c for c in ["Time", "Ticker", "Signal", "Confidence %", "Quality Score", "Risk/Reward 2", "Alert Status", "Approval Notes"] if c in signal_history.columns]
+        st.subheader("Recent Alert Decisions")
+        st.dataframe(arrow_safe_df(signal_history.tail(50)[cols]), width="stretch")
+    else:
+        st.info("Signal history will show smart-filter decisions after the next bot scan.")
+
+# ======================================================
+# v32.25 AUTO LEARNING ENGINE TAB
+# ======================================================
+
+with auto_learning_tab:
+    st.header("v32.25 Auto Learning Engine")
+    st.caption("Learns which tickers, setups, confidence buckets, and regimes are actually producing results.")
+    learning = build_dashboard_auto_learning_summary(load_paper_trades_df())
+    summary = learning["summary"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Closed Trades", summary["closed"])
+    c2.metric("Win Rate", f"{summary['win_rate']}%")
+    c3.metric("Profit Factor", summary["profit_factor"])
+    c4.metric("Total P/L", f"${summary['total_pnl']}")
+    st.subheader("Learning Recommendations")
+    for rec in learning["recommendations"]:
+        st.write("• " + rec)
+    for title, df in [("Setup Learning", learning["setup"]), ("Ticker Learning", learning["ticker"]), ("Confidence Learning", learning["confidence"]), ("Regime Learning", learning["regime"])]:
+        st.subheader(title)
+        if df is None or df.empty:
+            st.info("Needs more closed trades.")
+        else:
+            st.dataframe(arrow_safe_df(df), width="stretch")
+
+# ======================================================
+# v32.26 DYNAMIC TRADE FILTERING TAB
+# ======================================================
+
+with dynamic_filtering_tab:
+    st.header("v32.26.1 Dynamic Trade Filtering")
+    st.caption("Fully wired filter engine. The bot evaluates these groups during alert approval and paper-trade opening; hard blocking only activates if BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK=true.")
+    st.metric("Hard Blocking Mode", "ON" if BOT_DYNAMIC_TRADE_FILTER_BLOCK_WEAK else "OFF")
+    st.caption(f"Thresholds: min sample {BOT_DYNAMIC_TRADE_FILTER_MIN_SAMPLE} | weak PF <= {BOT_DYNAMIC_TRADE_FILTER_WEAK_PF} or WR <= {BOT_DYNAMIC_TRADE_FILTER_WEAK_WR}% | strong PF >= {BOT_DYNAMIC_TRADE_FILTER_STRONG_PF} and WR >= {BOT_DYNAMIC_TRADE_FILTER_STRONG_WR}%")
+    learning = build_dashboard_auto_learning_summary(load_paper_trades_df())
+    for title, df in [("Setup Actions", learning["setup"]), ("Ticker Actions", learning["ticker"]), ("Confidence Bucket Actions", learning["confidence"]), ("Regime Actions", learning["regime"])]:
+        st.subheader(title)
+        action_df = add_dynamic_actions(df)
+        if action_df.empty:
+            st.info("Needs more closed trades before actions are reliable.")
+        else:
+            st.dataframe(arrow_safe_df(action_df), width="stretch")
+    st.warning("Default mode is recommendation-first. Because v32.26.1 is now wired into the bot decision flow, keep hard blocking OFF until the weak groups have enough closed-trade evidence.")
 
 
 # ======================================================
