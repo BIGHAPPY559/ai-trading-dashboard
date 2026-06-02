@@ -20,6 +20,13 @@ try:
 except Exception:
     pass
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
+    Credentials = None
+
 def get_env_bool(name, default=False):
     value = os.getenv(name)
     if value is None:
@@ -116,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.13.2_diagnostics_display_fix_dashboard"
+APP_VERSION = "v32.13.3_shared_status_sync_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -153,6 +160,15 @@ DASHBOARD_YFINANCE_NEWS_ENABLED = get_env_bool("DASHBOARD_YFINANCE_NEWS_ENABLED"
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
+
+# v32.13.3 Shared Status Sync dashboard settings.
+# Lets the dashboard read bot status and paper trades from Google Sheets when
+# bot and dashboard run in separate Railway projects.
+GOOGLE_SHEETS_ENABLED = get_env_bool("GOOGLE_SHEETS_ENABLED", True)
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+DASHBOARD_SHARED_STATUS_SYNC_ENABLED = get_env_bool("DASHBOARD_SHARED_STATUS_SYNC_ENABLED", True)
+DASHBOARD_SHARED_STATUS_PREFER_GOOGLE = get_env_bool("DASHBOARD_SHARED_STATUS_PREFER_GOOGLE", True)
 
 # v32.3 Paper Trade Quality dashboard settings.
 # These mirror the v32.2 bot variables so the dashboard can show the active guardrails.
@@ -565,21 +581,149 @@ def save_records(file_path, records):
     pd.DataFrame(records).to_csv(file_path, index=False)
 
 
+DASHBOARD_GOOGLE_CLIENT = None
+DASHBOARD_GOOGLE_SPREADSHEET = None
+
+
+def dashboard_google_available():
+    return bool(
+        DASHBOARD_SHARED_STATUS_SYNC_ENABLED
+        and GOOGLE_SHEETS_ENABLED
+        and GOOGLE_SHEET_ID
+        and GOOGLE_SERVICE_ACCOUNT_JSON
+        and gspread is not None
+        and Credentials is not None
+    )
+
+
+def get_dashboard_google_spreadsheet():
+    global DASHBOARD_GOOGLE_CLIENT
+    global DASHBOARD_GOOGLE_SPREADSHEET
+    if not dashboard_google_available():
+        return None
+    if DASHBOARD_GOOGLE_SPREADSHEET is not None:
+        return DASHBOARD_GOOGLE_SPREADSHEET
+    try:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        credentials = Credentials.from_service_account_info(info, scopes=scopes)
+        DASHBOARD_GOOGLE_CLIENT = gspread.authorize(credentials)
+        DASHBOARD_GOOGLE_SPREADSHEET = DASHBOARD_GOOGLE_CLIENT.open_by_key(GOOGLE_SHEET_ID)
+        return DASHBOARD_GOOGLE_SPREADSHEET
+    except Exception as error:
+        print("Dashboard Google Sheets connection error:", error)
+        DASHBOARD_GOOGLE_CLIENT = None
+        DASHBOARD_GOOGLE_SPREADSHEET = None
+        return None
+
+
+def load_google_worksheet_records(title):
+    spreadsheet = get_dashboard_google_spreadsheet()
+    if spreadsheet is None:
+        return []
+    try:
+        worksheet = spreadsheet.worksheet(title)
+        return worksheet.get_all_records()
+    except Exception as error:
+        print(f"Dashboard Google worksheet load error for {title}: {error}")
+        return []
+
+
+def load_shared_bot_status_from_google_sheets():
+    records = load_google_worksheet_records("Shared Bot Status")
+    if not records:
+        return {}
+    fallback = {}
+    for row in records:
+        metric = str(row.get("Metric", "")).strip()
+        value = row.get("Value", "")
+        if metric == "Status JSON":
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    parsed["_shared_status_source"] = "Google Sheets"
+                    return parsed
+            except Exception:
+                pass
+        if metric:
+            fallback[metric] = value
+    if not fallback:
+        return {}
+    return {
+        "bot_version": fallback.get("Bot Version", "Unknown"),
+        "timestamp": fallback.get("Timestamp", "Unknown"),
+        "timestamp_utc": fallback.get("Timestamp UTC", ""),
+        "uptime_minutes": fallback.get("Uptime Minutes", ""),
+        "scanned": fallback.get("Scanned", 0),
+        "candidates": fallback.get("Candidates", 0),
+        "sent": fallback.get("Sent", 0),
+        "skipped_duplicates": fallback.get("Skipped Duplicates", 0),
+        "ticker_errors": fallback.get("Ticker Errors", 0),
+        "post_scan_errors": fallback.get("Post Scan Errors", 0),
+        "interrupted": str(fallback.get("Interrupted", "False")).lower() == "true",
+        "paper_trade_file_diagnostics": {
+            "paper_trades_file": fallback.get("Paper Trades File", ""),
+            "paper_trades_file_exists": str(fallback.get("Paper Trades Exists", "False")).lower() == "true",
+            "paper_trades_rows": fallback.get("Paper Trades Rows", 0),
+            "paper_trades_open_rows": fallback.get("Paper Trades Open Rows", 0),
+            "paper_trades_closed_rows": fallback.get("Paper Trades Closed Rows", 0),
+            "paper_trades_tp1_rows": fallback.get("Paper Trades TP1 Rows", 0),
+            "paper_trades_tickers_open": [item.strip() for item in str(fallback.get("Paper Trades Open Tickers", "")).split(",") if item.strip()],
+        },
+        "_shared_status_source": "Google Sheets",
+    }
+
+
+def load_shared_paper_trades_from_google_sheets():
+    records = load_google_worksheet_records("Shared Paper Trades")
+    if not records:
+        return pd.DataFrame()
+    return normalize_paper_trade_df(pd.DataFrame(records))
+
+
+def load_shared_paper_equity_from_google_sheets():
+    records = load_google_worksheet_records("Shared Paper Equity")
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
+
+
 def load_paper_trades_df():
+    # v32.13.3: prefer Google Sheets when configured so separate Railway projects share evidence.
+    if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared = load_shared_paper_trades_from_google_sheets()
+        if shared is not None and not shared.empty:
+            return normalize_paper_trade_df(shared)
     try:
         if os.path.exists(PAPER_TRADES_FILE) and os.path.getsize(PAPER_TRADES_FILE) > 0:
             return normalize_paper_trade_df(pd.read_csv(PAPER_TRADES_FILE))
     except Exception as error:
         st.warning(f"Could not load paper_trades.csv: {error}")
+    if not DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared = load_shared_paper_trades_from_google_sheets()
+        if shared is not None and not shared.empty:
+            return normalize_paper_trade_df(shared)
     return pd.DataFrame()
 
 
 def load_paper_equity_df():
+    # v32.13.3: prefer Google Sheets when configured so separate Railway projects share evidence.
+    if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared = load_shared_paper_equity_from_google_sheets()
+        if shared is not None and not shared.empty:
+            return shared
     try:
         if os.path.exists(PAPER_EQUITY_FILE) and os.path.getsize(PAPER_EQUITY_FILE) > 0:
             return pd.read_csv(PAPER_EQUITY_FILE)
     except Exception as error:
         st.warning(f"Could not load paper_trade_equity_curve.csv: {error}")
+    if not DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared = load_shared_paper_equity_from_google_sheets()
+        if shared is not None and not shared.empty:
+            return shared
     return pd.DataFrame()
 
 
@@ -664,7 +808,9 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
     bot_tp1 = safe_float_dashboard(bot_diag.get("paper_trades_tp1_rows", 0), 0)
 
     has_bot_diag = bool(bot_diag)
-    path_match = bool(bot_file and dashboard_file and bot_file == dashboard_file)
+    status_source = str(bot_status.get("_shared_status_source", "Local File"))
+    using_shared_google = status_source == "Google Sheets"
+    path_match = True if using_shared_google else bool(bot_file and dashboard_file and bot_file == dashboard_file)
     rows_match = bool(has_bot_diag and int(bot_rows) == int(dashboard_rows))
     open_match = bool(has_bot_diag and int(bot_open) == int(dashboard_open))
     closed_match = bool(has_bot_diag and int(bot_closed) == int(dashboard_closed))
@@ -679,7 +825,7 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
     if has_bot_diag and not path_match:
         warnings.append("Bot and dashboard are not pointing at the same paper_trades.csv path.")
     if has_bot_diag and path_match and not rows_match:
-        warnings.append("Bot row count and dashboard row count do not match. Check shared Railway volume / BOT_DATA_DIR / DASHBOARD_DATA_DIR.")
+        warnings.append("Bot row count and dashboard row count do not match. Check Google Sheets Shared Paper Trades sync or local shared volume settings.")
     if has_bot_diag and not bool(bot_diag.get("paper_trades_file_exists")):
         warnings.append("Bot does not see paper_trades.csv yet. This is normal before the first paper trade is created.")
     if has_bot_diag and bool(bot_diag.get("paper_trades_file_exists")) and int(bot_rows) == 0:
@@ -698,6 +844,7 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
 
     summary = {
         "Health": health,
+        "Status Source": status_source,
         "Bot Diagnostics Present": bool_status_text(has_bot_diag),
         "Path Match": bool_status_text(path_match),
         "File Exists Match": bool_status_text(file_exists_match),
@@ -717,7 +864,8 @@ def build_paper_trade_data_flow_diagnostics(bot_status):
 
     rows = [
         {"Check": "Bot diagnostics present", "Bot": bool_status_text(has_bot_diag), "Dashboard": "Required", "Match": bool_status_text(has_bot_diag), "Meaning": "Bot wrote paper_trade_file_diagnostics into bot_last_status.json."},
-        {"Check": "paper_trades.csv path", "Bot": bot_file or "Missing", "Dashboard": dashboard_file or "Missing", "Match": bool_status_text(path_match), "Meaning": "Both services should point to the same shared Railway volume path."},
+        {"Check": "Data source", "Bot": status_source, "Dashboard": "Google Sheets" if using_shared_google else "Local File", "Match": "YES", "Meaning": "v32.13.3 supports separate Railway projects through Google Sheets."},
+        {"Check": "paper_trades.csv path", "Bot": bot_file or "Missing", "Dashboard": dashboard_file or "Missing", "Match": bool_status_text(path_match), "Meaning": "Path match is required for local-volume mode; Google Sheets mode can bridge separate projects."},
         {"Check": "paper_trades.csv exists", "Bot": bool_status_text(bot_diag.get("paper_trades_file_exists")) if has_bot_diag else "Unknown", "Dashboard": bool_status_text(dashboard_diag.get("paper_trades.csv exists")), "Match": bool_status_text(file_exists_match), "Meaning": "Confirms both services can see the same trade file."},
         {"Check": "paper_trades.csv rows", "Bot": int(bot_rows), "Dashboard": int(dashboard_rows), "Match": bool_status_text(rows_match), "Meaning": "Main evidence counter. Rows should match."},
         {"Check": "Open rows", "Bot": int(bot_open), "Dashboard": int(dashboard_open), "Match": bool_status_text(open_match), "Meaning": "Active paper trades visible to both services."},
@@ -1793,12 +1941,23 @@ def add_quality_badges(df):
     return out
 
 def load_bot_status():
+    # v32.13.3: load status from Google Sheets first when bot/dashboard are separate Railway projects.
+    if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared_status = load_shared_bot_status_from_google_sheets()
+        if shared_status:
+            return shared_status
     try:
         if os.path.exists(BOT_STATUS_FILE) and os.path.getsize(BOT_STATUS_FILE) > 0:
             with open(BOT_STATUS_FILE, "r", encoding="utf-8") as file:
-                return json.load(file)
+                status = json.load(file)
+                status["_shared_status_source"] = "Local File"
+                return status
     except Exception as error:
         print("Bot status load error:", error)
+    if not DASHBOARD_SHARED_STATUS_PREFER_GOOGLE:
+        shared_status = load_shared_bot_status_from_google_sheets()
+        if shared_status:
+            return shared_status
     return {}
 
 
@@ -4200,8 +4359,9 @@ with bot_status_tab:
 
     if not bot_status:
         st.warning(
-            "No bot_last_status.json file found yet. If your bot is running on Railway, "
-            "set the same BOT_DATA_DIR / DASHBOARD_DATA_DIR volume path for both apps so the dashboard can read live bot status."
+            "No local bot_last_status.json or Google Sheets Shared Bot Status data found yet. "
+            "For separate Railway projects, add GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON, "
+            "GOOGLE_SHEETS_ENABLED=true, and DASHBOARD_SHARED_STATUS_SYNC_ENABLED=true to the dashboard service."
         )
     else:
         age_minutes = status_age_minutes(bot_status)
@@ -4210,6 +4370,7 @@ with bot_status_tab:
         col2.metric("Last Status", bot_status.get("timestamp", "Unknown"))
         col3.metric("Status Age", f"{age_minutes} min" if age_minutes is not None else "Unknown")
         col4.metric("Scanned", bot_status.get("scanned", 0))
+        st.caption(f"Status source: {bot_status.get('_shared_status_source', 'Local File')}")
 
         col5, col6, col7, col8 = st.columns(4)
         col5.metric("Candidates", bot_status.get("candidates", 0))
@@ -4238,7 +4399,7 @@ with bot_status_tab:
             st.error(health)
 
         dcol1, dcol2, dcol3, dcol4 = st.columns(4)
-        dcol1.metric("Path Match", diag_summary.get("Path Match", "NO"))
+        dcol1.metric("Status Source", diag_summary.get("Status Source", "Unknown"))
         dcol2.metric("Rows Match", diag_summary.get("Rows Match", "NO"))
         dcol3.metric("Bot Rows", diag_summary.get("Bot Rows", 0))
         dcol4.metric("Dashboard Rows", diag_summary.get("Dashboard Rows", 0))
@@ -4294,6 +4455,10 @@ with settings_tab:
     st.caption(f"Running {APP_VERSION}")
     st.write("Dashboard data dir:", DATA_DIR)
     st.write("Paper trades file:", PAPER_TRADES_FILE)
+    st.write("Shared status sync enabled:", DASHBOARD_SHARED_STATUS_SYNC_ENABLED)
+    st.write("Shared status source preference:", "Google Sheets first" if DASHBOARD_SHARED_STATUS_PREFER_GOOGLE else "Local files first")
+    st.write("Google Sheet ID configured:", bool(GOOGLE_SHEET_ID))
+    st.write("Google service account JSON configured:", bool(GOOGLE_SERVICE_ACCOUNT_JSON))
     st.write("Paper trades file exists:", os.path.exists(PAPER_TRADES_FILE))
     st.write("Paper trades visible rows:", len(load_paper_trades_df()))
     st.write("Dashboard timezone:", BOT_TIMEZONE)

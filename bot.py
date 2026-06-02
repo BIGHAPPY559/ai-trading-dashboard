@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.13.2-diagnostics-display-ready"
+BOT_VERSION = "google-sheets-100-production-v32.13.3-shared-status-sync"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -537,6 +537,12 @@ BOT_TRADE_LIFECYCLE_STRONG_RETURN_PER_DAY = get_env_float("BOT_TRADE_LIFECYCLE_S
 BOT_SEND_TRADE_LIFECYCLE_REPORT = get_env_bool("BOT_SEND_TRADE_LIFECYCLE_REPORT", True)
 BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_TRADE_LIFECYCLE_REPORT_INTERVAL_HOURS", 24))
 
+# v32.13.3 Shared Status Sync.
+# Publishes bot status and paper-trade evidence into Google Sheets so a dashboard
+# running in a separate Railway project can still read the bot's live status.
+BOT_SHARED_STATUS_SYNC_ENABLED = get_env_bool("BOT_SHARED_STATUS_SYNC_ENABLED", True)
+BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED = get_env_bool("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", True)
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -783,6 +789,14 @@ def write_status_file(status):
     payload["uptime_minutes"] = bot_uptime_minutes()
     payload["shutdown_requested"] = SHUTDOWN_REQUESTED
     save_json_atomic(BOT_STATUS_FILE, payload)
+
+    # v32.13.3: publish live status to Google Sheets so a dashboard in a
+    # separate Railway project can read the bot without shared local storage.
+    try:
+        if globals().get("BOT_SHARED_STATUS_SYNC_ENABLED", False):
+            sync_shared_bot_status_to_google_sheets(payload)
+    except Exception as error:
+        log(f"Shared bot status sync skipped: {error}")
 
 
 def safe_get_json(url, params=None, headers=None, timeout=10, max_retries=1):
@@ -6163,6 +6177,14 @@ SYSTEM_STATUS_HEADERS = [
     "Metric", "Value"
 ]
 
+SHARED_BOT_STATUS_HEADERS = [
+    "Metric", "Value", "Updated At"
+]
+
+SHARED_PAPER_EQUITY_HEADERS = [
+    "timestamp", "equity", "realized_pnl", "open_trades", "closed_trades", "notes"
+]
+
 GOOGLE_SHEETS_TAB_COLORS = {
     "Live Scanner": "#3399FF",
     "Scan History": "#666666",
@@ -6666,6 +6688,102 @@ def get_or_create_worksheet(spreadsheet, title, headers):
 
 
 
+def json_for_shared_sheet(value):
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except Exception:
+        return str(value)
+
+
+def sync_shared_bot_status_to_google_sheets(status):
+    """v32.13.3 shared source-of-truth status for separate Railway bot/dashboard projects."""
+    if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_ENABLED", False):
+        return False
+    spreadsheet = get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Shared Bot Status", SHARED_BOT_STATUS_HEADERS)
+        status = dict(status or {})
+        diag = status.get("paper_trade_file_diagnostics", {}) or {}
+        rows = [
+            ["Status JSON", json_for_shared_sheet(status), now_text()],
+            ["Bot Version", status.get("bot_version", BOT_VERSION), now_text()],
+            ["Timestamp", status.get("timestamp", now_text()), now_text()],
+            ["Timestamp UTC", status.get("timestamp_utc", ""), now_text()],
+            ["Uptime Minutes", status.get("uptime_minutes", ""), now_text()],
+            ["Scanned", status.get("scanned", 0), now_text()],
+            ["Candidates", status.get("candidates", 0), now_text()],
+            ["Sent", status.get("sent", 0), now_text()],
+            ["Skipped Duplicates", status.get("skipped_duplicates", 0), now_text()],
+            ["Ticker Errors", status.get("ticker_errors", 0), now_text()],
+            ["Post Scan Errors", status.get("post_scan_errors", 0), now_text()],
+            ["Interrupted", status.get("interrupted", False), now_text()],
+            ["Paper Trades File", diag.get("paper_trades_file", PAPER_TRADES_FILE), now_text()],
+            ["Paper Trades Exists", diag.get("paper_trades_file_exists", False), now_text()],
+            ["Paper Trades Rows", diag.get("paper_trades_rows", 0), now_text()],
+            ["Paper Trades Open Rows", diag.get("paper_trades_open_rows", 0), now_text()],
+            ["Paper Trades Closed Rows", diag.get("paper_trades_closed_rows", 0), now_text()],
+            ["Paper Trades TP1 Rows", diag.get("paper_trades_tp1_rows", 0), now_text()],
+            ["Paper Trades Status Counts", json_for_shared_sheet(diag.get("paper_trades_status_counts", {})), now_text()],
+            ["Paper Trades Open Tickers", ", ".join(diag.get("paper_trades_tickers_open", []) or []), now_text()],
+        ]
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [SHARED_BOT_STATUS_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Shared bot status sync error: {error}")
+        return False
+
+
+def sync_shared_paper_trades_to_google_sheets(spreadsheet=None):
+    """v32.13.3 publish current paper_trades.csv to Google Sheets for dashboard fallback."""
+    if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", False):
+        return False
+    spreadsheet = spreadsheet or get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+    try:
+        worksheet = get_or_create_worksheet(spreadsheet, "Shared Paper Trades", PAPER_TRADE_HEADERS)
+        trades = load_paper_trades()
+        trades = normalize_paper_trade_dtypes(trades)
+        rows = []
+        if trades is not None and not trades.empty:
+            for column in PAPER_TRADE_HEADERS:
+                if column not in trades.columns:
+                    trades[column] = ""
+            rows = trades[PAPER_TRADE_HEADERS].fillna("").astype(str).values.tolist()
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [PAPER_TRADE_HEADERS] + rows)
+        return True
+    except Exception as error:
+        log(f"Shared paper trades sync error: {error}")
+        return False
+
+
+def sync_shared_paper_equity_to_google_sheets(spreadsheet=None):
+    """v32.13.3 publish paper equity curve to Google Sheets for dashboard fallback."""
+    if not GOOGLE_SHEETS_ENABLED or not globals().get("BOT_SHARED_STATUS_SYNC_PAPER_TRADES_ENABLED", False):
+        return False
+    spreadsheet = spreadsheet or get_google_spreadsheet()
+    if spreadsheet is None:
+        return False
+    try:
+        headers = SHARED_PAPER_EQUITY_HEADERS
+        rows = []
+        if os.path.exists(PAPER_EQUITY_FILE) and os.path.getsize(PAPER_EQUITY_FILE) > 0:
+            equity = pd.read_csv(PAPER_EQUITY_FILE)
+            headers = list(equity.columns) if list(equity.columns) else headers
+            rows = equity.fillna("").astype(str).values.tolist()
+        worksheet = get_or_create_worksheet(spreadsheet, "Shared Paper Equity", headers)
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [headers] + rows)
+        return True
+    except Exception as error:
+        log(f"Shared paper equity sync error: {error}")
+        return False
+
+
 def row_from_scan(row):
     return [
         now_text(),
@@ -7147,6 +7265,9 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         get_or_create_worksheet(spreadsheet, "Automation Readiness", AUTOMATION_READINESS_HEADERS)
         get_or_create_worksheet(spreadsheet, "Trade Lifecycle", TRADE_LIFECYCLE_HEADERS)
         get_or_create_worksheet(spreadsheet, "System Status", SYSTEM_STATUS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Shared Bot Status", SHARED_BOT_STATUS_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Shared Paper Trades", PAPER_TRADE_HEADERS)
+        get_or_create_worksheet(spreadsheet, "Shared Paper Equity", SHARED_PAPER_EQUITY_HEADERS)
 
         live_rows = [row_from_scan(row) for row in scanned_rows]
 
@@ -7172,6 +7293,8 @@ def sync_google_sheets(scanned_rows, alerted_rows, candidates=0, sent_count=0, s
         sync_strategy_ranking_to_google_sheets(spreadsheet)
         sync_automation_readiness_to_google_sheets(spreadsheet)
         sync_trade_lifecycle_to_google_sheets(spreadsheet)
+        sync_shared_paper_trades_to_google_sheets(spreadsheet)
+        sync_shared_paper_equity_to_google_sheets(spreadsheet)
         update_system_status(
             spreadsheet,
             len(scanned_rows),
@@ -7706,6 +7829,7 @@ def main():
     log(f"Bot status file: {BOT_STATUS_FILE}")
     log(f"Paper trades file: {PAPER_TRADES_FILE}")
     log(f"Paper equity file: {PAPER_EQUITY_FILE}")
+    log(f"Shared status sync enabled: {BOT_SHARED_STATUS_SYNC_ENABLED}")
     log_paper_trade_file_diagnostics("Startup paper trade diagnostics")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
     log(f"Heartbeat interval hours: {BOT_HEARTBEAT_INTERVAL_HOURS}")
