@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.13.3-shared-status-sync"
+BOT_VERSION = "google-sheets-100-production-v32.13.3.1-shared-status-sync-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -6745,7 +6745,7 @@ def sync_shared_paper_trades_to_google_sheets(spreadsheet=None):
         return False
     try:
         worksheet = get_or_create_worksheet(spreadsheet, "Shared Paper Trades", PAPER_TRADE_HEADERS)
-        trades = load_paper_trades()
+        trades = load_paper_trades_df()
         trades = normalize_paper_trade_dtypes(trades)
         rows = []
         if trades is not None and not trades.empty:

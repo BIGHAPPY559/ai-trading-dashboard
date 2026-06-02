@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.13.3_shared_status_sync_dashboard"
+APP_VERSION = "v32.13.3.1_shared_status_sync_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
