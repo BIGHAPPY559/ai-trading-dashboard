@@ -220,7 +220,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.18.1-shared-sync-restore-outcome-intelligence"
+BOT_VERSION = "google-sheets-100-production-v32.18.2-shared-sync-final-hardening"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -582,6 +582,9 @@ LAST_GOOGLE_SHEETS_CONNECTION_ERROR_TIME = 0
 LAST_ERROR_ALERT_TIME = 0
 SHUTDOWN_REQUESTED = False
 FORMATTED_WORKSHEETS = set()
+GOOGLE_WORKSHEET_CACHE = {}
+GOOGLE_WORKSHEET_HEADER_CACHE = set()
+GOOGLE_WORKSHEET_CREATE_RETRY_CACHE = set()
 
 
 def request_shutdown(signum=None, frame=None):
@@ -6907,29 +6910,75 @@ def get_google_spreadsheet():
 
 
 def get_or_create_worksheet(spreadsheet, title, headers):
-    try:
-        worksheet = spreadsheet.worksheet(title)
-    except Exception:
-        worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(headers) + 2))
+    """
+    v32.18.2 Google Sheets hardening.
+    - Reuses cached worksheet handles to reduce read calls.
+    - If add_worksheet races or Google says the sheet already exists, re-fetches instead of logging a duplicate-sheet failure.
+    - Avoids row_values(1) on every scan; header writes are only attempted once per process/title.
+    """
+    global GOOGLE_WORKSHEET_CACHE
+    global GOOGLE_WORKSHEET_HEADER_CACHE
+    cache_key = str(title)
 
-    try:
-        current_headers = worksheet.row_values(1)
-
-        if current_headers != headers:
-            safe_sheet_update(worksheet, "A1", [headers])
-
+    worksheet = GOOGLE_WORKSHEET_CACHE.get(cache_key)
+    if worksheet is None:
         try:
-            if worksheet.col_count < len(headers):
-                worksheet.resize(rows=worksheet.row_count, cols=len(headers))
-        except Exception:
-            pass
+            worksheet = spreadsheet.worksheet(title)
+            GOOGLE_WORKSHEET_CACHE[cache_key] = worksheet
+        except Exception as lookup_error:
+            try:
+                worksheet = spreadsheet.add_worksheet(
+                    title=title,
+                    rows=1000,
+                    cols=max(20, len(headers) + 2)
+                )
+                GOOGLE_WORKSHEET_CACHE[cache_key] = worksheet
+            except Exception as create_error:
+                message = str(create_error)
+                if "already exists" in message or "duplicate" in message.lower():
+                    try:
+                        worksheet = spreadsheet.worksheet(title)
+                        GOOGLE_WORKSHEET_CACHE[cache_key] = worksheet
+                        log(f"Google Sheets worksheet reused after duplicate create response: {title}")
+                    except Exception as refetch_error:
+                        log(f"Google Sheets worksheet refetch error for {title}: {refetch_error}")
+                        raise create_error
+                else:
+                    log(f"Google Sheets worksheet create error for {title}: {create_error} | lookup={lookup_error}")
+                    raise create_error
 
-    except Exception as error:
-        log(f"Google Sheets header update error for {title}: {error}")
+    if cache_key not in GOOGLE_WORKSHEET_HEADER_CACHE:
+        try:
+            # Do not read headers every scan. A single A1 update is cheaper and avoids read quota pressure.
+            safe_sheet_update(worksheet, "A1", [headers])
+            try:
+                if getattr(worksheet, "col_count", 0) < len(headers):
+                    worksheet.resize(rows=worksheet.row_count, cols=len(headers))
+            except Exception:
+                pass
+            GOOGLE_WORKSHEET_HEADER_CACHE.add(cache_key)
+        except Exception as error:
+            # Header update failure should not break scan/sync. Most common cause is temporary 429 quota.
+            log(f"Google Sheets header update deferred for {title}: {error}")
 
     format_worksheet_for_readability(worksheet, title, headers)
     return worksheet
 
+
+
+def safe_replace_worksheet_values(worksheet, headers, rows, title="worksheet"):
+    """Clear + replace sheet values with 429-safe logging."""
+    try:
+        worksheet.clear()
+        safe_sheet_update(worksheet, "A1", [headers] + sanitize_sheet_values(rows))
+        return True
+    except Exception as error:
+        message = str(error)
+        if "429" in message or "Quota exceeded" in message:
+            log(f"Google Sheets replace deferred by quota for {title}: {error}")
+        else:
+            log(f"Google Sheets replace error for {title}: {error}")
+        return False
 
 
 def json_for_shared_sheet(value):
@@ -6972,9 +7021,7 @@ def sync_shared_bot_status_to_google_sheets(status):
             ["Paper Trades Status Counts", json_for_shared_sheet(diag.get("paper_trades_status_counts", {})), now_text()],
             ["Paper Trades Open Tickers", ", ".join(diag.get("paper_trades_tickers_open", []) or []), now_text()],
         ]
-        worksheet.clear()
-        safe_sheet_update(worksheet, "A1", [SHARED_BOT_STATUS_HEADERS] + rows)
-        return True
+        return safe_replace_worksheet_values(worksheet, SHARED_BOT_STATUS_HEADERS, rows, "Shared Bot Status")
     except Exception as error:
         log(f"Shared bot status sync error: {error}")
         return False
@@ -6997,9 +7044,7 @@ def sync_shared_paper_trades_to_google_sheets(spreadsheet=None):
                 if column not in trades.columns:
                     trades[column] = ""
             rows = trades[PAPER_TRADE_HEADERS].fillna("").astype(str).values.tolist()
-        worksheet.clear()
-        safe_sheet_update(worksheet, "A1", [PAPER_TRADE_HEADERS] + rows)
-        return True
+        return safe_replace_worksheet_values(worksheet, PAPER_TRADE_HEADERS, rows, "Shared Paper Trades")
     except Exception as error:
         log(f"Shared paper trades sync error: {error}")
         return False
@@ -7020,9 +7065,7 @@ def sync_shared_paper_equity_to_google_sheets(spreadsheet=None):
             headers = list(equity.columns) if list(equity.columns) else headers
             rows = equity.fillna("").astype(str).values.tolist()
         worksheet = get_or_create_worksheet(spreadsheet, "Shared Paper Equity", headers)
-        worksheet.clear()
-        safe_sheet_update(worksheet, "A1", [headers] + rows)
-        return True
+        return safe_replace_worksheet_values(worksheet, headers, rows, "Shared Paper Equity")
     except Exception as error:
         log(f"Shared paper equity sync error: {error}")
         return False
