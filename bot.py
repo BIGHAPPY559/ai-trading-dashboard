@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.26.6.1-trade-closure-diagnostics-runtime-fix"
+BOT_VERSION = "google-sheets-100-production-v32.28.2-evidence-integrity-readiness-wiring-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -365,14 +365,6 @@ BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER = max(1, get_env_int("BOT_NEWS_SENTIMENT
 BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS = max(1, get_env_int("BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS", 6))
 BOT_NEWS_SENTIMENT_USE_MARKET_NEWS = get_env_bool("BOT_NEWS_SENTIMENT_USE_MARKET_NEWS", True)
 BOT_NEWS_SENTIMENT_TIME_GUARD_SECONDS = max(10, get_env_int("BOT_NEWS_SENTIMENT_TIME_GUARD_SECONDS", 60))
-
-# v32.26.5 News Sentiment Hardening.
-# Improves ticker-level news scoring so alerts do not show "Unavailable" simply
-# because a provider cannot recognize a ticker symbol such as SEI-USD.
-BOT_NEWS_SENTIMENT_FORCE_YFINANCE_FALLBACK = get_env_bool("BOT_NEWS_SENTIMENT_FORCE_YFINANCE_FALLBACK", True)
-BOT_NEWS_SENTIMENT_USE_TICKER_NEWSAPI = get_env_bool("BOT_NEWS_SENTIMENT_USE_TICKER_NEWSAPI", True)
-BOT_NEWS_SENTIMENT_CACHE_MINUTES = max(5, get_env_int("BOT_NEWS_SENTIMENT_CACHE_MINUTES", 240))
-BOT_NEWS_SENTIMENT_LOG_DIAGNOSTICS = get_env_bool("BOT_NEWS_SENTIMENT_LOG_DIAGNOSTICS", True)
 BOT_CONFIDENCE_NEWS_WEIGHT = max(0, get_env_float("BOT_CONFIDENCE_NEWS_WEIGHT", 0.10))
 
 # Full professional confidence engine weights. These are normalized automatically.
@@ -456,14 +448,6 @@ NEWS_MAX_ARTICLES_PER_MARKET = max(1, get_env_int("BOT_NEWS_MAX_ARTICLES_PER_MAR
 NEWS_ARTICLES_PER_TICKER = max(1, get_env_int("BOT_NEWS_ARTICLES_PER_TICKER", 2))
 NEWS_BREAKING_ONLY = get_env_bool("BOT_NEWS_BREAKING_ONLY", False)
 
-# v32.26.4 News Delivery Hardening.
-# These make Discord news delivery observable and reliable even when one provider
-# returns no articles. Scheduled digests can still post a "no major news found"
-# status message so you know the news loop is alive.
-BOT_NEWS_SEND_EMPTY_STATUS = get_env_bool("BOT_NEWS_SEND_EMPTY_STATUS", True)
-BOT_NEWS_INCLUDE_EMPTY_BREAKING_STATUS = get_env_bool("BOT_NEWS_INCLUDE_EMPTY_BREAKING_STATUS", False)
-BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK = get_env_bool("BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK", True)
-
 SEND_BREAKING_NEWS = get_env_bool("BOT_SEND_BREAKING_NEWS", True)
 BREAKING_NEWS_INTERVAL_MINUTES = max(5, get_env_int("BOT_BREAKING_NEWS_INTERVAL_MINUTES", 60))
 BREAKING_NEWS_MAX_ARTICLES_PER_MARKET = max(1, get_env_int("BOT_BREAKING_NEWS_MAX_ARTICLES_PER_MARKET", 3))
@@ -492,24 +476,6 @@ YFINANCE_TICKER_DELAY_SECONDS = max(0, get_env_float("YFINANCE_TICKER_DELAY_SECO
 YFINANCE_HISTORY_RETRIES = max(0, get_env_int("YFINANCE_HISTORY_RETRIES", 2))
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
 YFINANCE_USE_HISTORY_FALLBACK = get_env_bool("YFINANCE_USE_HISTORY_FALLBACK", False)
-
-# v32.26.3 Trade Closure Logic Hardening.
-# Paper trade monitoring now uses intraday high/low ranges so TP1, TP2,
-# and stop-loss events can trigger when price touches a level instead of
-# waiting for the latest candle close to cross it.
-BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW = get_env_bool("BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW", True)
-BOT_PAPER_TRADE_MONITOR_PERIOD = os.getenv("BOT_PAPER_TRADE_MONITOR_PERIOD", "15d")
-BOT_PAPER_TRADE_MONITOR_INTERVAL = os.getenv("BOT_PAPER_TRADE_MONITOR_INTERVAL", "1h")
-
-# v32.26.6 Trade Closure Diagnostics + Forced Reconciliation.
-# These keep paper-trade closure logic observable without forcing premature
-# automation. Conservative conflict mode counts a stop first when TP and SL
-# are both touched inside the same unknown candle/window.
-BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED = get_env_bool("BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED", True)
-BOT_TRADE_CLOSURE_CONFLICT_MODE = os.getenv("BOT_TRADE_CLOSURE_CONFLICT_MODE", "conservative").strip().lower() or "conservative"
-BOT_TRADE_CLOSURE_STALE_DAYS = max(1, get_env_float("BOT_TRADE_CLOSURE_STALE_DAYS", 10))
-BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER = get_env_bool("BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER", True)
-BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS = max(1, get_env_int("BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS", 8))
 BOT_SLEEP_CHUNK_SECONDS = max(5, get_env_int("BOT_SLEEP_CHUNK_SECONDS", 30))
 LOG_MAX_ITEMS = max(100, get_env_int("BOT_LOG_MAX_ITEMS", 5000))
 BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
@@ -651,6 +617,21 @@ BOT_DYNAMIC_TRADE_FILTER_STRONG_WR = max(0, min(get_env_float("BOT_DYNAMIC_TRADE
 BOT_SEND_EVIDENCE_LEARNING_REPORT = get_env_bool("BOT_SEND_EVIDENCE_LEARNING_REPORT", True)
 BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_EVIDENCE_LEARNING_REPORT_INTERVAL_HOURS", 24))
 
+# v32.27 Evidence Integrity Monitor + v32.28 Automation Readiness Engine.
+# Read-only certification layer. It audits evidence quality and scores v33 readiness
+# without changing signal generation, paper-trade creation, dynamic filters, or live automation.
+BOT_EVIDENCE_INTEGRITY_ENABLED = get_env_bool("BOT_EVIDENCE_INTEGRITY_ENABLED", True)
+BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES = max(1, get_env_int("BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES", 100))
+BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE = max(0, min(get_env_float("BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE", 95), 100))
+BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS = max(1, get_env_float("BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS", 10))
+BOT_SEND_EVIDENCE_INTEGRITY_REPORT = get_env_bool("BOT_SEND_EVIDENCE_INTEGRITY_REPORT", True)
+BOT_EVIDENCE_INTEGRITY_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_EVIDENCE_INTEGRITY_REPORT_INTERVAL_HOURS", 24))
+
+BOT_AUTOMATION_READINESS_V32_28_ENABLED = get_env_bool("BOT_AUTOMATION_READINESS_V32_28_ENABLED", True)
+BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE = max(0, min(get_env_float("BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE", 80), 100))
+BOT_SEND_AUTOMATION_READINESS_V32_28_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_V32_28_REPORT", True)
+BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS", 24))
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -658,6 +639,8 @@ AUTOMATION_READINESS_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_auto
 TRADE_LIFECYCLE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_trade_lifecycle_report_log.txt")
 OUTCOME_INTELLIGENCE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_outcome_intelligence_report_log.txt")
 EVIDENCE_LEARNING_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_learning_report_log.txt")
+EVIDENCE_INTEGRITY_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_integrity_report_log.txt")
+AUTOMATION_READINESS_V32_28_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_v32_28_report_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -683,17 +666,6 @@ FORMATTED_WORKSHEETS = set()
 GOOGLE_WORKSHEET_CACHE = {}
 GOOGLE_WORKSHEET_HEADER_CACHE = set()
 GOOGLE_WORKSHEET_CREATE_RETRY_CACHE = set()
-
-# v32.26.5 in-memory cache for ticker-level news sentiment lookups.
-# This reduces API pressure while still refreshing throughout the day.
-NEWS_SENTIMENT_CONTEXT_CACHE = {}
-
-# v32.26.6 latest trade-closure diagnostics for logs/status/dashboard.
-LAST_TRADE_CLOSURE_DIAGNOSTICS = {
-    "mode": "high_low" if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else "close_only",
-    "nearest_trigger": "N/A",
-    "rows": [],
-}
 
 
 def request_shutdown(signum=None, frame=None):
@@ -1566,10 +1538,7 @@ def mark_evidence_learning_report_sent():
     save_log(EVIDENCE_LEARNING_REPORT_LOG_FILE, items)
 
 def closed_paper_trade_rows_for_learning():
-    # v32.26.2+ fix preserved: use the existing paper-trade loader.
-    # Older code called load_paper_trades(), which may not exist in every file
-    # version and caused Evidence + Auto Learning reports to fail after scans.
-    df = load_paper_trades_df()
+    df = load_paper_trades()
     if df is None or df.empty or "status" not in df.columns:
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
     return df[df["status"].astype(str).isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
@@ -1852,6 +1821,386 @@ def send_evidence_learning_report_if_due():
     if sent:
         mark_evidence_learning_report_sent()
     return sent
+
+
+# ======================================================
+# v32.27 EVIDENCE INTEGRITY + v32.28 AUTOMATION READINESS SUITE
+# ======================================================
+
+def evidence_integrity_report_key():
+    bucket_seconds = max(1, int(BOT_EVIDENCE_INTEGRITY_REPORT_INTERVAL_HOURS * 3600))
+    bucket = int(time.time() // bucket_seconds)
+    return f"evidence_integrity_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+
+def evidence_integrity_report_already_sent():
+    return evidence_integrity_report_key() in load_log(EVIDENCE_INTEGRITY_REPORT_LOG_FILE)
+
+
+def mark_evidence_integrity_report_sent():
+    items = load_log(EVIDENCE_INTEGRITY_REPORT_LOG_FILE)
+    items.add(evidence_integrity_report_key())
+    save_log(EVIDENCE_INTEGRITY_REPORT_LOG_FILE, items)
+
+
+def automation_readiness_v32_28_report_key():
+    bucket_seconds = max(1, int(BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS * 3600))
+    bucket = int(time.time() // bucket_seconds)
+    return f"automation_readiness_v32_28_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+
+def automation_readiness_v32_28_report_already_sent():
+    return automation_readiness_v32_28_report_key() in load_log(AUTOMATION_READINESS_V32_28_REPORT_LOG_FILE)
+
+
+def mark_automation_readiness_v32_28_report_sent():
+    items = load_log(AUTOMATION_READINESS_V32_28_REPORT_LOG_FILE)
+    items.add(automation_readiness_v32_28_report_key())
+    save_log(AUTOMATION_READINESS_V32_28_REPORT_LOG_FILE, items)
+
+
+def _v32_28_present(value):
+    text = str(value or "").strip()
+    return bool(text and text.lower() not in ["nan", "none", "null", "n/a", "unknown"])
+
+
+def _v32_28_trade_age_days(row):
+    opened = str(row.get("date_opened", "") or "").strip()
+    if not opened:
+        return 0
+    try:
+        parsed = pd.to_datetime(opened, errors="coerce")
+        if pd.isna(parsed):
+            return 0
+        if getattr(parsed, "tzinfo", None) is not None:
+            parsed = parsed.tz_convert(None)
+        return round(max(0, (pd.Timestamp.now() - parsed).total_seconds() / 86400), 2)
+    except Exception:
+        return 0
+
+
+def build_evidence_integrity_report():
+    if not BOT_EVIDENCE_INTEGRITY_ENABLED:
+        return {
+            "summary": {
+                "health_score": 0,
+                "confidence": "DISABLED",
+                "status": "DISABLED",
+                "recommendation": "Evidence Integrity Monitor is disabled.",
+                "issue_count": 0,
+                "closed_trades": 0,
+                "open_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "setups": 0,
+            },
+            "issues": [],
+        }
+
+    df = load_paper_trades_df()
+    if df is None or df.empty:
+        return {
+            "summary": {
+                "health_score": 0,
+                "confidence": "LOW",
+                "status": "WAITING_FOR_EVIDENCE",
+                "recommendation": "No paper-trade evidence yet. Let the bot collect open and closed trades.",
+                "issue_count": 0,
+                "closed_trades": 0,
+                "open_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "setups": 0,
+            },
+            "issues": [],
+        }
+
+    df = normalize_paper_trade_dtypes(df)
+    statuses = df.get("status", pd.Series(dtype=str)).astype(str).str.upper()
+    closed = df[statuses.isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+    open_df = df[statuses.isin(["OPEN", "TP1_HIT"])].copy()
+
+    issues = []
+
+    def add_issue(severity, issue_type, detail, ticker="", trade_id=""):
+        issues.append({
+            "Severity": severity,
+            "Issue": issue_type,
+            "Ticker": str(ticker or ""),
+            "Trade ID": str(trade_id or ""),
+            "Detail": compact_text(detail, 500),
+        })
+
+    if "trade_id" in df.columns:
+        duplicated = df[df["trade_id"].astype(str).duplicated(keep=False)]
+        for _, row in duplicated.head(20).iterrows():
+            add_issue("HIGH", "Duplicate Trade ID", "Same trade_id appears more than once.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    required_closed_fields = ["trade_id", "ticker", "signal", "entry_price", "stop_loss", "tp1", "tp2", "confidence", "status", "pnl_dollars", "pnl_percent", "setup_name", "confidence_bucket", "regime_bucket"]
+    for _, row in closed.iterrows():
+        for field in required_closed_fields:
+            if field not in closed.columns or not _v32_28_present(row.get(field, "")):
+                add_issue("MEDIUM", f"Missing {field}", "Closed trade is missing a field needed for learning/automation readiness.", row.get("ticker", ""), row.get("trade_id", ""))
+        status = str(row.get("status", "")).upper()
+        pnl = safe_float(row.get("pnl_dollars", 0), 0)
+        if status == "TP2_HIT" and pnl < 0:
+            add_issue("HIGH", "Outcome/PnL Conflict", "TP2_HIT trade has negative P&L.", row.get("ticker", ""), row.get("trade_id", ""))
+        if status == "STOPPED" and pnl > 0:
+            add_issue("HIGH", "Outcome/PnL Conflict", "STOPPED trade has positive P&L.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    for _, row in open_df.iterrows():
+        for field in ["trade_id", "ticker", "signal", "entry_price", "stop_loss", "tp1", "tp2", "status"]:
+            if field not in open_df.columns or not _v32_28_present(row.get(field, "")):
+                add_issue("MEDIUM", f"Missing {field}", "Open trade is missing a field needed for monitoring.", row.get("ticker", ""), row.get("trade_id", ""))
+        age_days = _v32_28_trade_age_days(row)
+        if age_days >= BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS:
+            add_issue("LOW", "Stale Open Trade", f"Open trade age is {age_days} days; review if it should still be active.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    pnl = pd.to_numeric(closed.get("pnl_dollars", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    wins = int((pnl > 0).sum()) if not closed.empty else 0
+    losses = int((pnl < 0).sum()) if not closed.empty else 0
+    setups = int(closed.get("setup_name", pd.Series(dtype=str)).astype(str).replace("", pd.NA).dropna().nunique()) if not closed.empty and "setup_name" in closed.columns else 0
+    tickers = int(closed.get("ticker", pd.Series(dtype=str)).astype(str).replace("", pd.NA).dropna().nunique()) if not closed.empty and "ticker" in closed.columns else 0
+    confidence_buckets = int(closed.get("confidence_bucket", pd.Series(dtype=str)).astype(str).replace("", pd.NA).dropna().nunique()) if not closed.empty and "confidence_bucket" in closed.columns else 0
+    regime_buckets = int(closed.get("regime_bucket", pd.Series(dtype=str)).astype(str).replace("", pd.NA).dropna().nunique()) if not closed.empty and "regime_bucket" in closed.columns else 0
+
+    high = sum(1 for issue in issues if issue["Severity"] == "HIGH")
+    medium = sum(1 for issue in issues if issue["Severity"] == "MEDIUM")
+    low = sum(1 for issue in issues if issue["Severity"] == "LOW")
+    health_score = 100
+    health_score -= high * 12
+    health_score -= medium * 5
+    health_score -= low * 2
+    if len(closed) < BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES:
+        sample_gap = BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES - len(closed)
+        health_score -= min(25, round(sample_gap / BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES * 25, 2))
+    if wins == 0 and len(closed) > 0:
+        health_score -= 5
+    if losses == 0 and len(closed) > 0:
+        health_score -= 5
+    health_score = round(max(0, min(100, health_score)), 2)
+
+    if len(closed) >= BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES and health_score >= BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE and high == 0:
+        confidence = "VERIFIED"
+        status = "HEALTHY"
+        recommendation = "Evidence is clean enough to support v33 readiness review."
+    elif len(closed) >= max(25, BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES * 0.5) and health_score >= 85:
+        confidence = "HIGH"
+        status = "GOOD"
+        recommendation = "Evidence quality is good. Keep collecting more closed trades before automation."
+    elif len(closed) >= 10 and health_score >= 70:
+        confidence = "MEDIUM"
+        status = "BUILDING"
+        recommendation = "Evidence is usable for monitoring, but not enough for automation decisions."
+    else:
+        confidence = "LOW"
+        status = "INSUFFICIENT_EVIDENCE"
+        recommendation = "Continue collecting closed paper trades. Do not enable v33 automation yet."
+
+    return {
+        "summary": {
+            "health_score": health_score,
+            "confidence": confidence,
+            "status": status,
+            "recommendation": recommendation,
+            "issue_count": len(issues),
+            "high_issues": high,
+            "medium_issues": medium,
+            "low_issues": low,
+            "total_trades": int(len(df)),
+            "closed_trades": int(len(closed)),
+            "open_trades": int(len(open_df)),
+            "wins": wins,
+            "losses": losses,
+            "setups": setups,
+            "tickers": tickers,
+            "confidence_buckets": confidence_buckets,
+            "regime_buckets": regime_buckets,
+        },
+        "issues": issues[:100],
+    }
+
+
+def log_evidence_integrity_report():
+    report = build_evidence_integrity_report()
+    summary = report.get("summary", {})
+    log(f"Evidence Integrity v32.27: health {summary.get('health_score', 0)}/100 | confidence {summary.get('confidence', 'N/A')} | issues {summary.get('issue_count', 0)} | closed {summary.get('closed_trades', 0)}")
+    for issue in report.get("issues", [])[:5]:
+        log(f"Evidence Integrity issue: {issue.get('Severity')} | {issue.get('Issue')} | {issue.get('Ticker')} | {issue.get('Detail')}")
+    return report
+
+
+def send_evidence_integrity_report_if_due():
+    if not BOT_SEND_EVIDENCE_INTEGRITY_REPORT:
+        return False
+    if evidence_integrity_report_already_sent():
+        log(f"Evidence integrity report skipped: cooldown active for {BOT_EVIDENCE_INTEGRITY_REPORT_INTERVAL_HOURS} hours.")
+        return False
+    webhook_url = get_top_signals_webhook() or get_backtest_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Evidence integrity report skipped: no scorecard/heartbeat webhook available.")
+        return False
+    report = build_evidence_integrity_report()
+    summary = report.get("summary", {})
+    fields = [
+        {"name": "Evidence Health", "value": f"{summary.get('health_score', 0)}/100 | {summary.get('confidence', 'N/A')} | {summary.get('status', 'N/A')}", "inline": False},
+        {"name": "Sample", "value": f"Closed {summary.get('closed_trades', 0)}/{BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES} | Open {summary.get('open_trades', 0)} | Wins {summary.get('wins', 0)} | Losses {summary.get('losses', 0)}", "inline": False},
+        {"name": "Issues", "value": f"Total {summary.get('issue_count', 0)} | High {summary.get('high_issues', 0)} | Medium {summary.get('medium_issues', 0)} | Low {summary.get('low_issues', 0)}", "inline": False},
+        {"name": "Recommendation", "value": compact_text(summary.get("recommendation", "Keep collecting evidence."), 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🧾 v32.27 Evidence Integrity Monitor", 3066993, fields)
+    if sent:
+        mark_evidence_integrity_report_sent()
+    return sent
+
+
+def _v32_28_readiness_points(value, target, max_points, higher_is_better=True):
+    value = safe_float(value, 0)
+    target = safe_float(target, 0)
+    max_points = safe_float(max_points, 0)
+    if max_points <= 0:
+        return 0
+    if target <= 0:
+        return max_points if value > 0 else 0
+    if higher_is_better:
+        return round(max(0, min(max_points, (value / target) * max_points)), 2)
+    if value <= target:
+        return max_points
+    if value <= 0:
+        return max_points
+    return round(max(0, min(max_points, (target / value) * max_points)), 2)
+
+
+def build_automation_readiness_v32_28_report():
+    if not BOT_AUTOMATION_READINESS_V32_28_ENABLED:
+        return {
+            "score": 0,
+            "status": "DISABLED",
+            "recommendation": "Automation Readiness v32.28 is disabled.",
+            "rows": [],
+        }
+
+    df = load_paper_trades_df()
+    if df is None:
+        df = pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    df = normalize_paper_trade_dtypes(df)
+    closed = df[df.get("status", pd.Series(dtype=str)).astype(str).str.upper().isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy() if not df.empty else pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+    stats = pnl_stats_for_learning(closed)
+    equity = calculate_equity_curve_summary()
+    integrity = build_evidence_integrity_report()
+    integrity_summary = integrity.get("summary", {})
+
+    setup_perf = group_learning_performance(closed, "setup_name", BOT_SETUP_ANALYTICS_MIN_SAMPLE)
+    strong_setups = [row for row in setup_perf if row.get("Trades", 0) >= BOT_SETUP_ANALYTICS_MIN_SAMPLE and safe_float(row.get("Profit Factor", 0), 0) >= BOT_SETUP_ANALYTICS_STRONG_PF and safe_float(row.get("Win Rate %", 0), 0) >= BOT_SETUP_ANALYTICS_STRONG_WR]
+    weak_setups = [row for row in setup_perf if row.get("Trades", 0) >= BOT_SETUP_ANALYTICS_MIN_SAMPLE and (safe_float(row.get("Profit Factor", 0), 0) <= BOT_DYNAMIC_TRADE_FILTER_WEAK_PF or safe_float(row.get("Win Rate %", 0), 0) <= BOT_DYNAMIC_TRADE_FILTER_WEAK_WR)]
+
+    performance_score = round(
+        _v32_28_readiness_points(stats.get("trades", 0), BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, 25)
+        + _v32_28_readiness_points(stats.get("win_rate", 0), BOT_AUTOMATION_READINESS_TARGET_WR, 25)
+        + _v32_28_readiness_points(stats.get("profit_factor", 0), BOT_AUTOMATION_READINESS_TARGET_PF, 25)
+        + (15 if equity.get("positive_equity") else 0)
+        + _v32_28_readiness_points(equity.get("max_drawdown_pct", 0), BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, 10, higher_is_better=False),
+        2
+    )
+    evidence_score = round(safe_float(integrity_summary.get("health_score", 0), 0), 2)
+    stability_score = round(min(100, (20 if strong_setups else 0) + (40 if not weak_setups else 15) + _v32_28_readiness_points(len(setup_perf), max(1, BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES), 40)), 2)
+    operations_score = 100
+    if not GOOGLE_SHEETS_ENABLED:
+        operations_score -= 20
+    if not (CRYPTO_TRADE_WEBHOOK_URL and STOCK_TRADE_WEBHOOK_URL):
+        operations_score -= 20
+    if not BOT_PAPER_TRADING_ENABLED or not BOT_PAPER_TRADE_MONITOR_ENABLED:
+        operations_score -= 30
+    operations_score = max(0, operations_score)
+
+    final_score = round(
+        performance_score * 0.40
+        + evidence_score * 0.30
+        + stability_score * 0.20
+        + operations_score * 0.10,
+        2
+    )
+
+    blockers = []
+    if stats.get("trades", 0) < BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES:
+        blockers.append(f"Need {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES - stats.get('trades', 0)} more closed trades.")
+    if stats.get("win_rate", 0) < BOT_AUTOMATION_READINESS_TARGET_WR:
+        blockers.append("Win rate is below target.")
+    if stats.get("profit_factor", 0) < BOT_AUTOMATION_READINESS_TARGET_PF:
+        blockers.append("Profit factor is below target.")
+    if not equity.get("positive_equity"):
+        blockers.append("Equity curve is not positive yet.")
+    if evidence_score < BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE:
+        blockers.append("Evidence health score is below target.")
+    if weak_setups:
+        blockers.append(f"{len(weak_setups)} weak setup(s) should not be automated.")
+
+    if final_score >= BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE and not blockers:
+        status = "READY_FOR_V33_PAPER_AUTOMATION"
+        recommendation = "Proceed to v33 planning only if you still have 100+ closed trades and stable results."
+    elif final_score >= 60:
+        status = "NEARLY_READY"
+        recommendation = "Continue collecting evidence. Do not enable v33 yet: " + " ".join(blockers[:4])
+    else:
+        status = "NOT_READY"
+        recommendation = "Do not build v33 automation yet. " + (" ".join(blockers[:4]) if blockers else "Continue collecting paper-trade evidence.")
+
+    rows = [
+        {"Category": "Performance", "Score": performance_score, "Status": "PASS" if performance_score >= 80 else "WAIT", "Details": f"Closed {stats.get('trades', 0)} | WR {stats.get('win_rate', 0)}% | PF {stats.get('profit_factor', 0)} | Equity +{equity.get('return_pct', 0)}%"},
+        {"Category": "Evidence Integrity", "Score": evidence_score, "Status": integrity_summary.get("confidence", "N/A"), "Details": f"Issues {integrity_summary.get('issue_count', 0)} | Health {evidence_score}/100"},
+        {"Category": "Strategy Stability", "Score": stability_score, "Status": "PASS" if stability_score >= 80 else "WAIT", "Details": f"Strong setups {len(strong_setups)} | Weak setups {len(weak_setups)}"},
+        {"Category": "Operations", "Score": operations_score, "Status": "PASS" if operations_score >= 80 else "REVIEW", "Details": f"Google Sheets {GOOGLE_SHEETS_ENABLED} | Paper trading {BOT_PAPER_TRADING_ENABLED} | Monitor {BOT_PAPER_TRADE_MONITOR_ENABLED}"},
+    ]
+
+    return {
+        "score": final_score,
+        "performance_score": performance_score,
+        "evidence_score": evidence_score,
+        "stability_score": stability_score,
+        "operations_score": operations_score,
+        "status": status,
+        "recommendation": recommendation,
+        "blockers": blockers,
+        "rows": rows,
+        "integrity": integrity,
+        "stats": stats,
+        "equity": equity,
+    }
+
+
+def log_automation_readiness_v32_28_report():
+    report = build_automation_readiness_v32_28_report()
+    log(f"Automation Readiness v32.28: score {report.get('score', 0)}/100 | status {report.get('status', 'N/A')}")
+    for row in report.get("rows", [])[:4]:
+        log(f"Automation Readiness category: {row.get('Category')} | {row.get('Score')}/100 | {row.get('Details')}")
+    return report
+
+
+def send_automation_readiness_v32_28_report_if_due():
+    if not BOT_SEND_AUTOMATION_READINESS_V32_28_REPORT:
+        return False
+    if automation_readiness_v32_28_report_already_sent():
+        log(f"Automation readiness v32.28 report skipped: cooldown active for {BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS} hours.")
+        return False
+    webhook_url = get_top_signals_webhook() or get_backtest_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Automation readiness v32.28 report skipped: no scorecard/heartbeat webhook available.")
+        return False
+    report = build_automation_readiness_v32_28_report()
+    rows_text = "\n".join([f"{row['Category']}: {row['Score']}/100 | {row['Status']}" for row in report.get("rows", [])])
+    fields = [
+        {"name": "Final Readiness", "value": f"{report.get('score', 0)}/100 | {report.get('status', 'N/A')}", "inline": False},
+        {"name": "Category Scores", "value": compact_text(rows_text or "No category rows.", 1000), "inline": False},
+        {"name": "Recommendation", "value": compact_text(report.get("recommendation", "Keep collecting evidence."), 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    sent = send_discord_embed(webhook_url, "🤖 v32.28 Automation Readiness Engine", 7419530, fields)
+    if sent:
+        mark_automation_readiness_v32_28_report_sent()
+    return sent
+
+
 
 def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
     if not should_send_daily_report():
@@ -3344,7 +3693,6 @@ def score_ticker(ticker, scan_started_at=None, market_contexts=None, news_sentim
         "News Score Adj": news_adjustment,
         "News Headlines": news_sentiment_context.get("news_headlines", "None"),
         "News Notes": news_sentiment_context.get("news_notes", "news sentiment unavailable"),
-        "News Sources Detail": news_sentiment_context.get("news_sources", "N/A"),
         "RSI Confidence": confidence_context.get("rsi_confidence", 0),
         "MACD Confidence": confidence_context.get("macd_confidence", 0),
         "Trend Confidence": confidence_context.get("trend_confidence", 0),
@@ -4961,11 +5309,6 @@ def load_paper_trades_df():
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
 
 
-def load_paper_trades():
-    """Backward-compatible alias for older evidence-learning helpers."""
-    return load_paper_trades_df()
-
-
 def save_paper_trades_df(df):
     try:
         ensure_data_dir()
@@ -5016,13 +5359,6 @@ def build_paper_trade_file_diagnostics(df=None):
         "paper_equity_file_modified": safe_file_modified_text(PAPER_EQUITY_FILE),
         "paper_trading_enabled": BOT_PAPER_TRADING_ENABLED,
         "paper_trade_monitor_enabled": BOT_PAPER_TRADE_MONITOR_ENABLED,
-        "paper_trade_monitor_use_high_low": BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW,
-        "paper_trade_monitor_period": BOT_PAPER_TRADE_MONITOR_PERIOD,
-        "paper_trade_monitor_interval": BOT_PAPER_TRADE_MONITOR_INTERVAL,
-        "trade_closure_diagnostics_enabled": BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED,
-        "trade_closure_conflict_mode": BOT_TRADE_CLOSURE_CONFLICT_MODE,
-        "trade_closure_stale_days": BOT_TRADE_CLOSURE_STALE_DAYS,
-        "trade_closure_latest": LAST_TRADE_CLOSURE_DIAGNOSTICS,
         "paper_trade_max_open_total": BOT_PAPER_TRADE_MAX_OPEN_TOTAL,
         "paper_trade_max_open_per_ticker": BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER,
     }
@@ -5338,233 +5674,30 @@ def paper_trade_pnl(signal, entry, current, position_size):
     return round(pnl_percent, 2), round(pnl_dollars, 2)
 
 
-def paper_trade_monitor_frame_for_trade(data, trade):
-    """Return OHLC rows at/after the paper trade open time when possible."""
-    if data is None or data.empty:
-        return pd.DataFrame()
-
-    frame = data.copy()
-    opened = parse_trade_datetime(trade.get("date_opened", ""))
-    if opened is None or not isinstance(frame.index, pd.DatetimeIndex):
-        return frame.tail(1)
-
-    try:
-        index = frame.index
-        if index.tz is not None:
-            index = index.tz_convert(ZoneInfo(BOT_TIMEZONE)).tz_localize(None)
-        else:
-            index = index.tz_localize(None) if getattr(index, "tz", None) is not None else index
-        frame = frame.copy()
-        frame.index = index
-        filtered = frame[frame.index >= opened]
-        if filtered.empty:
-            # Daily candles can be timestamped at midnight even when the trade
-            # was opened during market hours, so fall back to the latest candle
-            # instead of losing monitoring coverage.
-            return frame.tail(1)
-        return filtered
-    except Exception as error:
-        log(f"Paper trade monitor frame filter skipped: {error}")
-        return frame.tail(1)
-
-
-def get_paper_trade_price_snapshot(ticker, trade):
-    """Fetch the latest price plus observed high/low since the trade opened."""
-    attempts = [
-        (BOT_PAPER_TRADE_MONITOR_PERIOD, BOT_PAPER_TRADE_MONITOR_INTERVAL, "intraday"),
-        ("5d", "1d", "daily_fallback"),
-    ]
-
-    seen = set()
-    for period, interval, source in attempts:
-        key = (str(period), str(interval))
-        if key in seen:
-            continue
-        seen.add(key)
-        data = get_price_data(ticker, period, interval)
-        if data is None or data.empty:
-            continue
-        frame = paper_trade_monitor_frame_for_trade(data, trade)
-        if frame is None or frame.empty or "Close" not in frame.columns:
-            continue
-        close = pd.to_numeric(frame["Close"], errors="coerce").dropna()
-        if close.empty:
-            continue
-        latest_close = float(close.iloc[-1])
-        high_source = pd.to_numeric(frame["High"], errors="coerce").dropna() if "High" in frame.columns else close
-        low_source = pd.to_numeric(frame["Low"], errors="coerce").dropna() if "Low" in frame.columns else close
-        high_price = float(high_source.max()) if not high_source.empty else latest_close
-        low_price = float(low_source.min()) if not low_source.empty else latest_close
-        return {
-            "current": latest_close,
-            "high": high_price if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else latest_close,
-            "low": low_price if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else latest_close,
-            "source": source,
-        }
-
-    return {"current": 0, "high": 0, "low": 0, "source": "unavailable"}
-
-
-def trade_direction_from_signal(signal):
-    signal = str(signal or "").upper()
-    if "SELL" in signal:
-        return "SHORT"
-    if "BUY" in signal:
-        return "LONG"
-    return "UNKNOWN"
-
-
-def pct_distance_to_level(current_price, level):
-    current = safe_float(current_price, 0)
-    level = safe_float(level, 0)
-    if current <= 0 or level <= 0:
-        return None
-    return round(abs((level - current) / current) * 100, 2)
-
-
-def paper_trade_valuation_price(trade, status, current_price):
-    """Return the exact price to use for P/L when a paper trade trigger is hit.
-
-    v32.26.6.1 runtime fix: v32.26.6 used this helper inside the monitor but
-    did not define it. Closed trades should be valued at the triggered level,
-    while still-open/TP1-only trades continue to use the latest current price.
-    """
-    status_text = str(status or "").upper()
-    current = safe_float(current_price, 0)
-    stop = safe_float(trade.get("stop_loss", 0), 0)
-    tp1 = safe_float(trade.get("tp1", 0), 0)
-    tp2 = safe_float(trade.get("tp2", 0), 0)
-
-    if status_text == "STOPPED" and stop > 0:
-        return stop
-    if status_text == "TP2_HIT" and tp2 > 0:
-        return tp2
-    if status_text == "TP1_HIT" and tp1 > 0:
-        return tp1
-
-    return current
-
-
-
-def classify_paper_trade_status_detail(trade, current_price, high_price=None, low_price=None):
-    """Return status, result, and an explainable closure decision.
-
-    v32.26.6 hardening keeps the original high/low trigger behavior but adds
-    diagnostics, nearest-trigger math, stale-open flags, and conservative
-    same-window conflict handling.
-    """
+def classify_paper_trade_status(trade, current_price):
     signal = str(trade.get("signal", ""))
-    old_status = str(trade.get("status", "OPEN"))
-    direction = trade_direction_from_signal(signal)
     stop = safe_float(trade.get("stop_loss", 0), 0)
     tp1 = safe_float(trade.get("tp1", 0), 0)
     tp2 = safe_float(trade.get("tp2", 0), 0)
     current = safe_float(current_price, 0)
-    high = safe_float(high_price if high_price is not None else current_price, current)
-    low = safe_float(low_price if low_price is not None else current_price, current)
-    opened = trade.get("date_opened", "")
-    hours_open = lifecycle_hours_between(opened) if opened else 0
-    days_open = round(hours_open / 24, 2) if hours_open else 0
-
-    detail = {
-        "ticker": str(trade.get("ticker", "")),
-        "signal": signal,
-        "direction": direction,
-        "old_status": old_status,
-        "current": round(current, 6) if current else 0,
-        "high": round(high, 6) if high else 0,
-        "low": round(low, 6) if low else 0,
-        "stop_loss": round(stop, 6) if stop else 0,
-        "tp1": round(tp1, 6) if tp1 else 0,
-        "tp2": round(tp2, 6) if tp2 else 0,
-        "hours_open": hours_open,
-        "days_open": days_open,
-        "stale_open": bool(days_open >= BOT_TRADE_CLOSURE_STALE_DAYS),
-        "triggered_stop": False,
-        "triggered_tp1": False,
-        "triggered_tp2": False,
-        "conflict": False,
-        "nearest_trigger": "N/A",
-        "nearest_trigger_pct": None,
-        "decision_reason": "No decision yet",
-    }
-
     if current <= 0:
-        detail["decision_reason"] = "No valid current price; keeping previous status."
-        return old_status, str(trade.get("result", "OPEN")), detail
-
-    if direction == "SHORT":
-        stop_hit = bool(stop > 0 and high >= stop)
-        tp2_hit = bool(tp2 > 0 and low <= tp2)
-        tp1_hit = bool(tp1 > 0 and low <= tp1)
-        detail.update({"triggered_stop": stop_hit, "triggered_tp1": tp1_hit, "triggered_tp2": tp2_hit})
-        detail["conflict"] = bool(stop_hit and (tp1_hit or tp2_hit))
-
-        candidates = []
-        if stop > 0:
-            candidates.append(("SL", pct_distance_to_level(high, stop)))
-        if tp2 > 0:
-            candidates.append(("TP2", pct_distance_to_level(low, tp2)))
-        if tp1 > 0:
-            candidates.append(("TP1", pct_distance_to_level(low, tp1)))
-        candidates = [(name, dist) for name, dist in candidates if dist is not None]
-        if candidates:
-            nearest = sorted(candidates, key=lambda item: item[1])[0]
-            detail["nearest_trigger"], detail["nearest_trigger_pct"] = nearest
-
-        if stop_hit and (BOT_TRADE_CLOSURE_CONFLICT_MODE == "conservative" or not (tp1_hit or tp2_hit)):
-            detail["decision_reason"] = "SHORT stop touched by candle high; conservative conflict handling applied." if detail["conflict"] else "SHORT stop touched by candle high."
-            return "STOPPED", "LOSS", detail
-        if tp2_hit:
-            detail["decision_reason"] = "SHORT TP2 touched by candle low."
-            return "TP2_HIT", "WIN", detail
-        if tp1_hit:
-            detail["decision_reason"] = "SHORT TP1 touched by candle low."
-            return "TP1_HIT", "PARTIAL WIN", detail
-
-    elif direction == "LONG":
-        stop_hit = bool(stop > 0 and low <= stop)
-        tp2_hit = bool(tp2 > 0 and high >= tp2)
-        tp1_hit = bool(tp1 > 0 and high >= tp1)
-        detail.update({"triggered_stop": stop_hit, "triggered_tp1": tp1_hit, "triggered_tp2": tp2_hit})
-        detail["conflict"] = bool(stop_hit and (tp1_hit or tp2_hit))
-
-        candidates = []
-        if stop > 0:
-            candidates.append(("SL", pct_distance_to_level(low, stop)))
-        if tp2 > 0:
-            candidates.append(("TP2", pct_distance_to_level(high, tp2)))
-        if tp1 > 0:
-            candidates.append(("TP1", pct_distance_to_level(high, tp1)))
-        candidates = [(name, dist) for name, dist in candidates if dist is not None]
-        if candidates:
-            nearest = sorted(candidates, key=lambda item: item[1])[0]
-            detail["nearest_trigger"], detail["nearest_trigger_pct"] = nearest
-
-        if stop_hit and (BOT_TRADE_CLOSURE_CONFLICT_MODE == "conservative" or not (tp1_hit or tp2_hit)):
-            detail["decision_reason"] = "LONG stop touched by candle low; conservative conflict handling applied." if detail["conflict"] else "LONG stop touched by candle low."
-            return "STOPPED", "LOSS", detail
-        if tp2_hit:
-            detail["decision_reason"] = "LONG TP2 touched by candle high."
-            return "TP2_HIT", "WIN", detail
-        if tp1_hit:
-            detail["decision_reason"] = "LONG TP1 touched by candle high."
-            return "TP1_HIT", "PARTIAL WIN", detail
-
+        return str(trade.get("status", "OPEN")), str(trade.get("result", "OPEN"))
+    if "SELL" in signal:
+        if stop > 0 and current >= stop:
+            return "STOPPED", "LOSS"
+        if tp2 > 0 and current <= tp2:
+            return "TP2_HIT", "WIN"
+        if tp1 > 0 and current <= tp1:
+            return "TP1_HIT", "PARTIAL WIN"
     else:
-        detail["decision_reason"] = "Unknown direction; keeping previous status."
-        return old_status, str(trade.get("result", "OPEN")), detail
+        if stop > 0 and current <= stop:
+            return "STOPPED", "LOSS"
+        if tp2 > 0 and current >= tp2:
+            return "TP2_HIT", "WIN"
+        if tp1 > 0 and current >= tp1:
+            return "TP1_HIT", "PARTIAL WIN"
+    return str(trade.get("status", "OPEN")) if str(trade.get("status", "OPEN")) == "TP1_HIT" else "OPEN", "OPEN"
 
-    if detail["stale_open"]:
-        detail["decision_reason"] = f"Still open; stale-open review flag because trade is {days_open} days old."
-    else:
-        detail["decision_reason"] = f"Still open; nearest trigger {detail['nearest_trigger']} is {detail['nearest_trigger_pct']}% away."
-    return old_status if old_status == "TP1_HIT" else "OPEN", "OPEN", detail
-
-
-def classify_paper_trade_status(trade, current_price, high_price=None, low_price=None):
-    status, result, _detail = classify_paper_trade_status_detail(trade, current_price, high_price, low_price)
-    return status, result
 
 
 def parse_trade_datetime(value):
@@ -5665,80 +5798,28 @@ def send_paper_trade_event(trade, event_type):
     return send_discord_embed(webhook_url, titles.get(event_type, "📌 PAPER TRADE UPDATE"), colors.get(event_type, 3447003), fields)
 
 
-def format_closure_diagnostic_line(detail, snapshot_source="unknown"):
-    ticker = detail.get("ticker", "")
-    signal = detail.get("signal", "")
-    nearest = detail.get("nearest_trigger", "N/A")
-    nearest_pct = detail.get("nearest_trigger_pct", None)
-    stale = " | STALE" if detail.get("stale_open") else ""
-    conflict = " | CONFLICT" if detail.get("conflict") else ""
-    nearest_text = f"{nearest} {nearest_pct}%" if nearest_pct is not None else str(nearest)
-    return (
-        f"{ticker} {signal} | src={snapshot_source} | current={detail.get('current')} | "
-        f"H={detail.get('high')} L={detail.get('low')} | SL={detail.get('stop_loss')} "
-        f"TP1={detail.get('tp1')} TP2={detail.get('tp2')} | nearest={nearest_text} | "
-        f"decision={detail.get('decision_reason')}{stale}{conflict}"
-    )
-
-
 def monitor_open_paper_trades():
-    global LAST_TRADE_CLOSURE_DIAGNOSTICS
     if not BOT_PAPER_TRADING_ENABLED or not BOT_PAPER_TRADE_MONITOR_ENABLED:
-        LAST_TRADE_CLOSURE_DIAGNOSTICS = {
-            "mode": "disabled",
-            "nearest_trigger": "N/A",
-            "rows": [],
-        }
-        return {"checked": 0, "updated": 0, "closed": 0, "nearest_trigger": "N/A"}
+        return {"checked": 0, "updated": 0, "closed": 0}
     df = load_paper_trades_df()
     if df.empty:
-        LAST_TRADE_CLOSURE_DIAGNOSTICS = {
-            "mode": "empty",
-            "nearest_trigger": "N/A",
-            "rows": [],
-        }
-        return {"checked": 0, "updated": 0, "closed": 0, "nearest_trigger": "N/A"}
+        return {"checked": 0, "updated": 0, "closed": 0}
     checked = updated = closed = 0
-    diagnostics = []
-    stale_open_count = 0
-    conflict_count = 0
-    nearest_candidates = []
     for index, trade in df.iterrows():
         if str(trade.get("status", "")) not in ["OPEN", "TP1_HIT"]:
             continue
         ticker = str(trade.get("ticker", ""))
-        snapshot = get_paper_trade_price_snapshot(ticker, trade)
-        current = safe_float(snapshot.get("current", 0), 0)
-        if current <= 0:
-            if BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED:
-                log(f"Trade closure diagnostic {ticker}: no usable price snapshot; source={snapshot.get('source', 'unavailable')}")
+        data = get_price_data(ticker, "5d", "1d")
+        if data.empty:
             continue
-        high = safe_float(snapshot.get("high", current), current)
-        low = safe_float(snapshot.get("low", current), current)
+        current = float(data["Close"].iloc[-1])
         checked += 1
-        status, result, detail = classify_paper_trade_status_detail(trade, current, high, low)
-        detail["source"] = snapshot.get("source", "unknown")
-        diagnostics.append(detail)
-        if detail.get("stale_open"):
-            stale_open_count += 1
-        if detail.get("conflict"):
-            conflict_count += 1
-        if detail.get("nearest_trigger_pct") is not None:
-            nearest_candidates.append(detail)
-        if BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED:
-            log("Trade closure diagnostic: " + format_closure_diagnostic_line(detail, snapshot.get("source", "unknown")))
-        valuation_price = paper_trade_valuation_price(trade, status, current)
-        pnl_percent, pnl_dollars = paper_trade_pnl(trade.get("signal", ""), trade.get("entry_price", 0), valuation_price, trade.get("position_size", 0))
-        df.at[index, "current_price"] = round(valuation_price if status in ["TP2_HIT", "STOPPED"] else current, 4)
+        status, result = classify_paper_trade_status(trade, current)
+        pnl_percent, pnl_dollars = paper_trade_pnl(trade.get("signal", ""), trade.get("entry_price", 0), current, trade.get("position_size", 0))
+        df.at[index, "current_price"] = round(current, 4)
         df.at[index, "pnl_percent"] = pnl_percent
         df.at[index, "pnl_dollars"] = pnl_dollars
         df.at[index, "last_updated"] = now_text()
-        notes = str(df.at[index, "notes"] if "notes" in df.columns else "")
-        monitor_note = f"closure v32.26.6 | {format_closure_diagnostic_line(detail, snapshot.get('source', 'unknown'))}"
-        if monitor_note not in notes:
-            df.at[index, "notes"] = compact_text(f"{notes} | {monitor_note}" if notes else monitor_note, 900)
-        if detail.get("stale_open") and status in ["OPEN", "TP1_HIT"]:
-            df.at[index, "lifecycle_stage"] = "STALE_OPEN"
         df = update_lifecycle_fields_for_trade(df, index, status)
         old_status = str(trade.get("status", "OPEN"))
         if status != old_status:
@@ -5767,32 +5848,7 @@ def monitor_open_paper_trades():
                 closed += 1
     save_paper_trades_df(df)
     update_paper_equity_curve(df)
-    nearest_trigger = "N/A"
-    if nearest_candidates:
-        nearest_detail = sorted(nearest_candidates, key=lambda item: safe_float(item.get("nearest_trigger_pct", 999999), 999999))[0]
-        nearest_trigger = f"{nearest_detail.get('ticker')} {nearest_detail.get('nearest_trigger')} {nearest_detail.get('nearest_trigger_pct')}%"
-    LAST_TRADE_CLOSURE_DIAGNOSTICS = {
-        "mode": "high_low" if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else "close_only",
-        "conflict_mode": BOT_TRADE_CLOSURE_CONFLICT_MODE,
-        "checked": checked,
-        "updated": updated,
-        "closed": closed,
-        "stale_open": stale_open_count,
-        "conflicts": conflict_count,
-        "nearest_trigger": nearest_trigger,
-        "rows": diagnostics[:BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS],
-    }
-    if BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER:
-        log(f"Trade closure nearest trigger: {nearest_trigger} | stale_open={stale_open_count} | conflicts={conflict_count}")
-    return {
-        "checked": checked,
-        "updated": updated,
-        "closed": closed,
-        "mode": LAST_TRADE_CLOSURE_DIAGNOSTICS.get("mode"),
-        "nearest_trigger": nearest_trigger,
-        "stale_open": stale_open_count,
-        "conflicts": conflict_count,
-    }
+    return {"checked": checked, "updated": updated, "closed": closed}
 
 
 def update_paper_equity_curve(df=None):
@@ -5912,84 +5968,6 @@ def send_paper_trade_summary_if_due():
 # ======================================================
 # NEWS NORMALIZATION
 # ======================================================
-
-
-CRYPTO_NEWS_SEARCH_TERMS = {
-    "BTC-USD": ["Bitcoin", "BTC"],
-    "ETH-USD": ["Ethereum", "Ether", "ETH"],
-    "SOL-USD": ["Solana", "SOL"],
-    "XRP-USD": ["XRP", "Ripple"],
-    "ADA-USD": ["Cardano", "ADA"],
-    "HBAR-USD": ["Hedera", "HBAR"],
-    "AVAX-USD": ["Avalanche", "AVAX"],
-    "VET-USD": ["VeChain", "VET"],
-    "ICP-USD": ["Internet Computer", "ICP"],
-    "ATOM-USD": ["Cosmos", "ATOM"],
-    "ALGO-USD": ["Algorand", "ALGO"],
-    "XLM-USD": ["Stellar", "XLM"],
-    "LINK-USD": ["Chainlink", "LINK"],
-    "ONDO-USD": ["Ondo Finance", "ONDO"],
-    "INJ-USD": ["Injective", "INJ"],
-    "SEI-USD": ["Sei", "SEI Network", "SEI crypto"],
-}
-
-
-def ticker_news_search_terms(ticker):
-    """Return provider-friendly search terms for ticker-level news lookups."""
-    ticker = str(ticker or "").strip().upper()
-    if ticker in CRYPTO_NEWS_SEARCH_TERMS:
-        return CRYPTO_NEWS_SEARCH_TERMS[ticker]
-
-    base = ticker.replace("-USD", "").replace(".X", "").strip()
-    terms = []
-    if base:
-        terms.append(base)
-    if ticker:
-        terms.append(ticker)
-    return terms or [ticker]
-
-
-def ticker_news_query(ticker, market):
-    terms = ticker_news_search_terms(ticker)
-    if market == "Crypto":
-        expanded = []
-        for term in terms[:3]:
-            expanded.append(term)
-            if "crypto" not in term.lower():
-                expanded.append(f"{term} crypto")
-        return " OR ".join(expanded[:6])
-    return " OR ".join(terms[:4])
-
-
-def news_cache_key(ticker):
-    return str(ticker or "").strip().upper()
-
-
-def get_cached_news_sentiment_context(ticker):
-    key = news_cache_key(ticker)
-    cached = NEWS_SENTIMENT_CONTEXT_CACHE.get(key)
-    if not cached:
-        return None
-    cached_at = cached.get("cached_at", 0)
-    ttl_seconds = BOT_NEWS_SENTIMENT_CACHE_MINUTES * 60
-    if cached_at and seconds_since(cached_at) <= ttl_seconds:
-        return cached.get("context")
-    try:
-        NEWS_SENTIMENT_CONTEXT_CACHE.pop(key, None)
-    except Exception:
-        pass
-    return None
-
-
-def set_cached_news_sentiment_context(ticker, context):
-    try:
-        NEWS_SENTIMENT_CONTEXT_CACHE[news_cache_key(ticker)] = {
-            "cached_at": time.time(),
-            "context": dict(context or {}),
-        }
-    except Exception:
-        pass
-
 
 def make_news_item(source, market, ticker, title, url="", publisher="", published_at=""):
     title = str(title or "").strip()
@@ -6146,10 +6124,7 @@ def fetch_yfinance_news_for_ticker(ticker, market):
 def fetch_yfinance_news(tickers, market):
     items = []
 
-    # v32.26.4: Scheduled news digests can use Yahoo Finance as a fallback even
-    # when ticker-level sentiment scoring has Yahoo disabled. This keeps Discord
-    # news updates flowing without changing the trading confidence engine.
-    if not BOT_NEWS_YFINANCE_ENABLED and not BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK:
+    if not BOT_NEWS_YFINANCE_ENABLED:
         return items
     limited_tickers = tickers[:YFINANCE_NEWS_MAX_TICKERS_PER_MARKET]
 
@@ -6167,50 +6142,6 @@ def fetch_yfinance_news(tickers, market):
 # ======================================================
 # NEWSAPI NEWS
 # ======================================================
-
-def fetch_newsapi_ticker_news(ticker, market):
-    """Ticker-aware NewsAPI lookup with crypto-name mapping.
-
-    This is used for sentiment scoring, not for scheduled digest spam.
-    It helps assets like SEI-USD, ONDO-USD, HBAR-USD, and VET-USD find
-    relevant headlines even when providers do not understand the Yahoo symbol.
-    """
-    if not NEWSAPI_KEY or not BOT_NEWS_SENTIMENT_USE_TICKER_NEWSAPI:
-        return []
-
-    query = ticker_news_query(ticker, market)
-
-    data = safe_get_json(
-        "https://newsapi.org/v2/everything",
-        params={
-            "q": query,
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": max(1, BOT_NEWS_SENTIMENT_MAX_ITEMS_PER_TICKER),
-            "apiKey": NEWSAPI_KEY
-        }
-    )
-
-    if not data or data.get("status") != "ok":
-        return []
-
-    items = []
-    for article in data.get("articles", []):
-        source = article.get("source", {})
-        publisher = source.get("name", "NewsAPI") if isinstance(source, dict) else "NewsAPI"
-        item = make_news_item(
-            source="NewsAPI-Ticker",
-            market=market,
-            ticker=ticker,
-            title=article.get("title", ""),
-            url=article.get("url", ""),
-            publisher=publisher,
-            published_at=article.get("publishedAt", "")
-        )
-        if item:
-            items.append(item)
-    return items
-
 
 def fetch_newsapi_news(market):
     if not NEWSAPI_KEY:
@@ -6463,18 +6394,14 @@ def build_news_sentiment_contexts(scan_started_at=None):
     try:
         market_items = {"Crypto": [], "Stock": []}
 
-        if BOT_NEWS_SENTIMENT_USE_MARKET_NEWS and NEWSAPI_KEY:
-            market_items["Crypto"] = fetch_newsapi_news("Crypto")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
-            market_items["Stock"] = fetch_newsapi_news("Stock")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
+        if BOT_NEWS_SENTIMENT_USE_MARKET_NEWS:
+            if NEWSAPI_KEY:
+                market_items["Crypto"] = fetch_newsapi_news("Crypto")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
+                market_items["Stock"] = fetch_newsapi_news("Stock")[:BOT_NEWS_SENTIMENT_MAX_MARKET_ITEMS]
 
         for ticker in ALL_TICKERS:
             if SHUTDOWN_REQUESTED:
                 break
-
-            cached = get_cached_news_sentiment_context(ticker)
-            if cached is not None:
-                contexts[ticker] = cached
-                continue
 
             if scan_started_at is not None:
                 elapsed = time.time() - scan_started_at
@@ -6483,74 +6410,32 @@ def build_news_sentiment_contexts(scan_started_at=None):
                     contexts[ticker] = {
                         **default,
                         "news_notes": "news sentiment skipped by time guard",
-                        "news_sources": "Skipped",
                     }
                     continue
 
             market = get_asset_type(ticker)
             items = []
-            diagnostics = {
-                "newsapi_ticker": 0,
-                "finnhub": 0,
-                "yfinance": 0,
-                "market": 0,
-            }
-
-            if NEWSAPI_KEY and BOT_NEWS_SENTIMENT_USE_TICKER_NEWSAPI:
-                ticker_newsapi_items = fetch_newsapi_ticker_news(ticker, market)
-                diagnostics["newsapi_ticker"] = len(ticker_newsapi_items)
-                items.extend(ticker_newsapi_items)
 
             if market == "Stock" and FINNHUB_API_KEY:
-                finnhub_items = fetch_finnhub_company_news(ticker)
-                diagnostics["finnhub"] = len(finnhub_items)
-                items.extend(finnhub_items)
+                items.extend(fetch_finnhub_company_news(ticker))
 
-            if BOT_NEWS_YFINANCE_ENABLED or BOT_NEWS_SENTIMENT_FORCE_YFINANCE_FALLBACK:
-                yfinance_items = fetch_yfinance_news_for_ticker(ticker, market)
-                diagnostics["yfinance"] = len(yfinance_items)
-                items.extend(yfinance_items)
+            if BOT_NEWS_YFINANCE_ENABLED:
+                items.extend(fetch_yfinance_news_for_ticker(ticker, market))
 
             if BOT_NEWS_SENTIMENT_USE_MARKET_NEWS:
-                market_news_items = market_items.get(market, [])
-                diagnostics["market"] = len(market_news_items)
-                items.extend(market_news_items)
+                items.extend(market_items.get(market, []))
 
-            context = summarize_news_sentiment(items)
-            context["news_sources"] = (
-                f"NewsAPI-Ticker {diagnostics['newsapi_ticker']} | "
-                f"Finnhub {diagnostics['finnhub']} | "
-                f"Yahoo {diagnostics['yfinance']} | "
-                f"Market {diagnostics['market']}"
-            )
-
-            if items and context.get("news_sentiment_label") == "Unavailable":
-                context["news_sentiment_label"] = "Neutral"
-                context["news_notes"] = "Neutral sentiment from available headlines"
-
-            if BOT_NEWS_SENTIMENT_LOG_DIAGNOSTICS:
-                log(
-                    f"News sentiment diagnostics {ticker}: "
-                    f"NewsAPI-Ticker={diagnostics['newsapi_ticker']} | "
-                    f"Finnhub={diagnostics['finnhub']} | "
-                    f"Yahoo={diagnostics['yfinance']} | "
-                    f"Market={diagnostics['market']} | "
-                    f"Result={context.get('news_sentiment_label', 'Unknown')}"
-                )
-
-            contexts[ticker] = context
-            set_cached_news_sentiment_context(ticker, context)
+            contexts[ticker] = summarize_news_sentiment(items)
 
             if FINNHUB_NEWS_DELAY_SECONDS > 0 and market == "Stock" and FINNHUB_API_KEY:
                 interruptible_sleep(FINNHUB_NEWS_DELAY_SECONDS)
-            elif YFINANCE_NEWS_DELAY_SECONDS > 0 and (BOT_NEWS_YFINANCE_ENABLED or BOT_NEWS_SENTIMENT_FORCE_YFINANCE_FALLBACK):
-                interruptible_sleep(YFINANCE_NEWS_DELAY_SECONDS)
 
         return contexts
 
     except Exception as error:
         log(f"News sentiment context build error: {error}")
         return contexts
+
 
 # ======================================================
 # NEWS DIGEST SENDING
@@ -6574,32 +6459,6 @@ def collect_news_items(tickers, market, digest_type="scheduled"):
     return dedupe_news_items(items, max_articles, breaking_only=breaking_only)
 
 
-def news_source_status_text(market):
-    sources = []
-    if NEWSAPI_KEY:
-        sources.append("NewsAPI")
-    if market == "Stock" and FINNHUB_API_KEY:
-        sources.append("Finnhub")
-    if BOT_NEWS_YFINANCE_ENABLED or BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK:
-        sources.append("Yahoo Finance")
-    return ", ".join(sources) if sources else "None configured"
-
-
-def send_empty_news_status(webhook_url, market, digest_type):
-    if digest_type == "breaking" and not BOT_NEWS_INCLUDE_EMPTY_BREAKING_STATUS:
-        return False
-    if digest_type != "breaking" and not BOT_NEWS_SEND_EMPTY_STATUS:
-        return False
-
-    title_prefix = "🚨 BREAKING" if digest_type == "breaking" else "📰"
-    message = f"{title_prefix} {market.upper()} MARKET NEWS CHECK\n"
-    message += f"Time: {now_text()}\n"
-    message += "Status: No new unsent articles found this cycle.\n"
-    message += f"Sources checked: {news_source_status_text(market)}\n"
-    message += f"Next scheduled check window: about {NEWS_INTERVAL_HOURS} hour(s)."
-    return send_discord_message(webhook_url, message)
-
-
 def send_news_digest(tickers, market, digest_type="scheduled"):
     webhook_url = get_news_webhook(market)
 
@@ -6611,8 +6470,6 @@ def send_news_digest(tickers, market, digest_type="scheduled"):
 
     if not digest_items:
         log(f"No new {market} {digest_type} news articles to send.")
-        if send_empty_news_status(webhook_url, market, digest_type):
-            return "sent_empty"
         return "none"
 
     title_prefix = "🚨 BREAKING" if digest_type == "breaking" else "📰"
@@ -6695,7 +6552,7 @@ def maybe_send_breaking_news():
     if not breaking_news_already_checked("Crypto"):
         crypto_status = send_news_digest(CRYPTO_TICKERS, "Crypto", digest_type="breaking")
 
-        if crypto_status in ["sent", "sent_empty", "none"]:
+        if crypto_status in ["sent", "none"]:
             mark_breaking_news_checked("Crypto")
 
     interruptible_sleep(1)
@@ -6703,7 +6560,7 @@ def maybe_send_breaking_news():
     if not breaking_news_already_checked("Stock"):
         stock_status = send_news_digest(STOCK_TICKERS, "Stock", digest_type="breaking")
 
-        if stock_status in ["sent", "sent_empty", "none"]:
+        if stock_status in ["sent", "none"]:
             mark_breaking_news_checked("Stock")
 
 
@@ -6714,7 +6571,7 @@ def maybe_send_scheduled_news():
     if not news_already_checked("Crypto"):
         crypto_status = send_news_digest(CRYPTO_TICKERS, "Crypto", digest_type="scheduled")
 
-        if crypto_status in ["sent", "sent_empty", "none"]:
+        if crypto_status in ["sent", "none"]:
             mark_news_checked("Crypto")
 
     interruptible_sleep(1)
@@ -6722,7 +6579,7 @@ def maybe_send_scheduled_news():
     if not news_already_checked("Stock"):
         stock_status = send_news_digest(STOCK_TICKERS, "Stock", digest_type="scheduled")
 
-        if stock_status in ["sent", "sent_empty", "none"]:
+        if stock_status in ["sent", "none"]:
             mark_news_checked("Stock")
 
 
@@ -6738,8 +6595,6 @@ def send_startup_message():
 
     if BOT_NEWS_YFINANCE_ENABLED:
         enabled_sources.append("Yahoo Finance")
-    elif BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK:
-        enabled_sources.append("Yahoo Finance fallback")
 
     if NEWSAPI_KEY:
         enabled_sources.append("NewsAPI")
@@ -6852,7 +6707,7 @@ def send_signal_alert(row):
         {"name": "Why This Alert", "value": compact_text(build_signal_reason_text(row), 1000), "inline": False},
         {"name": "Technical Snapshot", "value": compact_text(technical_text, 1000), "inline": False},
         {"name": "Confidence Breakdown", "value": compact_text(confidence_text, 1000), "inline": False},
-        {"name": "News Sentiment", "value": compact_text(f"{row.get('News Sentiment', 'N/A')} | Adj {row.get('News Score Adj', 0)} | {row.get('News Headlines', 'None')}\nSources: {row.get('News Sources Detail', 'N/A')}", 1000), "inline": False},
+        {"name": "News Sentiment", "value": compact_text(f"{row.get('News Sentiment', 'N/A')} | Adj {row.get('News Score Adj', 0)} | {row.get('News Headlines', 'None')}", 1000), "inline": False},
         {"name": "Approval", "value": f"{row.get('Alert Approved', 'N/A')} | {row.get('Exposure Notes', 'N/A')}", "inline": False},
         {"name": "Time", "value": now_text(), "inline": False},
     ]
@@ -7458,7 +7313,7 @@ LIVE_SCANNER_HEADERS = [
     "Trade Entry", "Stop Loss", "Take Profit 1", "Take Profit 2", "Risk/Reward 1", "Risk/Reward 2", "Trade Plan", "Trade Notes",
     "Account Size", "Risk %", "Risk Dollars", "Position Size", "Position Value", "Position Notes", "Trailing Stop", "Breakeven Trigger", "Trail Distance", "Trailing Notes",
     "Asset Category", "Signal Quality Score", "Signal Rank", "Alert Approved", "Exposure Notes",
-    "News Sentiment", "News Sentiment Score", "News Strength", "News Score Adj", "News Headlines", "News Notes", "News Sources Detail",
+    "News Sentiment", "News Sentiment Score", "News Strength", "News Score Adj", "News Headlines", "News Notes",
     "RSI Confidence", "MACD Confidence", "Trend Confidence", "Technical Confidence", "MTF Confidence",
     "Volume Confidence", "Market Confidence", "S/R Confidence", "News Confidence", "Risk/Reward Confidence",
     "Confidence Grade", "Confidence Engine", "Confidence Notes", "Legacy Confidence %",
@@ -9065,6 +8920,19 @@ def run_scan():
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Evidence Learning Discord report", send_evidence_learning_report_if_due)
     post_scan_errors += int(step_error)
+
+    # v32.28.2 wiring fix: run the v32.27/v32.28 certification layer every scan.
+    # These steps are read-only and do not change signal generation, trade creation,
+    # dynamic filtering, paper-trade monitoring, or automation behavior.
+    _, step_error = run_safe_step("Evidence Integrity v32.27", log_evidence_integrity_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Evidence Integrity Discord report", send_evidence_integrity_report_if_due)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Automation Readiness v32.28", log_automation_readiness_v32_28_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Automation Readiness v32.28 Discord report", send_automation_readiness_v32_28_report_if_due)
+    post_scan_errors += int(step_error)
+
     _, step_error = run_safe_step("Trade lifecycle Discord report", send_trade_lifecycle_report_if_due)
     post_scan_errors += int(step_error)
 
@@ -9144,8 +9012,6 @@ def main():
 
     if BOT_NEWS_YFINANCE_ENABLED:
         enabled_sources.append("Yahoo Finance")
-    elif BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK:
-        enabled_sources.append("Yahoo Finance fallback")
 
     if NEWSAPI_KEY:
         enabled_sources.append("NewsAPI")
@@ -9232,10 +9098,6 @@ def main():
     log(f"Breaking news enabled: {SEND_BREAKING_NEWS}")
     log(f"Breaking news interval: {BREAKING_NEWS_INTERVAL_MINUTES} minutes")
     log(f"News sources: {', '.join(enabled_sources) if enabled_sources else 'None configured'}")
-    log(f"News empty status enabled: {BOT_NEWS_SEND_EMPTY_STATUS}")
-    log(f"News Yahoo fallback for digests: {BOT_NEWS_DIGEST_FORCE_YFINANCE_FALLBACK}")
-    log(f"Crypto news webhook configured: {'YES' if bool(get_news_webhook('Crypto')) else 'NO'}")
-    log(f"Stock news webhook configured: {'YES' if bool(get_news_webhook('Stock')) else 'NO'}")
     log(f"Google Sheets enabled: {GOOGLE_SHEETS_ENABLED}")
     log(f"Google Sheets scan history logging: {GOOGLE_SHEETS_LOG_SCAN_HISTORY}")
     log(f"Google Sheets tracker only alerts: {GOOGLE_SHEETS_LOG_ONLY_ALERTS_TO_TRACKER}")
@@ -9264,9 +9126,6 @@ def main():
     log(f"Bot status file: {BOT_STATUS_FILE}")
     log(f"Paper trades file: {PAPER_TRADES_FILE}")
     log(f"Paper equity file: {PAPER_EQUITY_FILE}")
-    log(f"Trade closure diagnostics enabled: {BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED}")
-    log(f"Trade closure monitor mode: {'high_low' if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else 'close_only'} | period={BOT_PAPER_TRADE_MONITOR_PERIOD} | interval={BOT_PAPER_TRADE_MONITOR_INTERVAL}")
-    log(f"Trade closure conflict mode: {BOT_TRADE_CLOSURE_CONFLICT_MODE} | stale days={BOT_TRADE_CLOSURE_STALE_DAYS} | nearest trigger log={BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER}")
     log_paper_trade_file_diagnostics("Startup paper trade diagnostics")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
     log(f"Heartbeat interval hours: {BOT_HEARTBEAT_INTERVAL_HOURS}")

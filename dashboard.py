@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.26.6.1_trade_closure_diagnostics_runtime_fix_dashboard"
+APP_VERSION = "v32.28.2_evidence_integrity_readiness_wiring_fix_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -224,6 +224,14 @@ BOT_AUTOMATION_READINESS_TARGET_SCORE = get_env_float("BOT_AUTOMATION_READINESS_
 BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT = get_env_float("BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT", 20)
 BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES = get_env_int("BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES", 1)
 
+# v32.27 Evidence Integrity Monitor + v32.28 Automation Readiness Engine dashboard settings.
+BOT_EVIDENCE_INTEGRITY_ENABLED = get_env_bool("BOT_EVIDENCE_INTEGRITY_ENABLED", True)
+BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES = get_env_int("BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES", 100)
+BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE = get_env_float("BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE", 95)
+BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS = get_env_float("BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS", 10)
+BOT_AUTOMATION_READINESS_V32_28_ENABLED = get_env_bool("BOT_AUTOMATION_READINESS_V32_28_ENABLED", True)
+BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE = get_env_float("BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE", 80)
+
 # v32.13 Trade Lifecycle Analytics dashboard settings.
 BOT_TRADE_LIFECYCLE_MIN_SAMPLE = get_env_int("BOT_TRADE_LIFECYCLE_MIN_SAMPLE", 5)
 BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS = get_env_float("BOT_TRADE_LIFECYCLE_FAST_TP1_HOURS", 24)
@@ -251,10 +259,6 @@ BOT_DYNAMIC_TRADE_FILTER_WEAK_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_
 BOT_DYNAMIC_TRADE_FILTER_WEAK_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_WR", 45)
 BOT_DYNAMIC_TRADE_FILTER_STRONG_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_PF", 1.5)
 BOT_DYNAMIC_TRADE_FILTER_STRONG_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_WR", 55)
-
-# v32.26.6 Trade Closure Diagnostics dashboard settings.
-BOT_TRADE_CLOSURE_STALE_DAYS = get_env_float("BOT_TRADE_CLOSURE_STALE_DAYS", 10)
-BOT_TRADE_CLOSURE_CONFLICT_MODE = os.getenv("BOT_TRADE_CLOSURE_CONFLICT_MODE", "conservative")
 
 
 def now_dt():
@@ -3208,11 +3212,222 @@ def add_dynamic_actions(df):
     out["Dynamic Action"] = out.apply(dashboard_dynamic_action, axis=1)
     return out
 
+
+# ======================================================
+# v32.27 EVIDENCE INTEGRITY + v32.28 AUTOMATION READINESS DASHBOARD HELPERS
+# ======================================================
+
+def dashboard_present(value):
+    text = str(value or "").strip()
+    return bool(text and text.lower() not in ["nan", "none", "null", "n/a", "unknown"])
+
+
+def dashboard_trade_age_days(row):
+    opened = str(row.get("date_opened", "") or "").strip()
+    if not opened:
+        return 0
+    try:
+        parsed = pd.to_datetime(opened, errors="coerce")
+        if pd.isna(parsed):
+            return 0
+        if getattr(parsed, "tzinfo", None) is not None:
+            parsed = parsed.tz_convert(None)
+        return round(max(0, (pd.Timestamp.now() - parsed).total_seconds() / 86400), 2)
+    except Exception:
+        return 0
+
+
+def build_dashboard_evidence_integrity_report(trades_df):
+    if not BOT_EVIDENCE_INTEGRITY_ENABLED:
+        return {
+            "summary": {"health_score": 0, "confidence": "DISABLED", "status": "DISABLED", "recommendation": "Evidence Integrity Monitor is disabled.", "issue_count": 0, "closed_trades": 0, "open_trades": 0, "wins": 0, "losses": 0, "setups": 0},
+            "issues_df": pd.DataFrame(),
+        }
+
+    df = normalize_paper_trade_df(trades_df)
+    if df.empty:
+        return {
+            "summary": {"health_score": 0, "confidence": "LOW", "status": "WAITING_FOR_EVIDENCE", "recommendation": "No paper-trade evidence yet. Let the bot collect open and closed trades.", "issue_count": 0, "closed_trades": 0, "open_trades": 0, "wins": 0, "losses": 0, "setups": 0},
+            "issues_df": pd.DataFrame(),
+        }
+
+    statuses = df.get("status", pd.Series(dtype=str)).astype(str).str.upper()
+    closed = df[statuses.isin(["TP2_HIT", "STOPPED", "CLOSED"])].copy()
+    open_df = df[statuses.isin(["OPEN", "TP1_HIT"])].copy()
+    issues = []
+
+    def add_issue(severity, issue_type, detail, ticker="", trade_id=""):
+        issues.append({"Severity": severity, "Issue": issue_type, "Ticker": str(ticker or ""), "Trade ID": str(trade_id or ""), "Detail": str(detail or "")[:500]})
+
+    if "trade_id" in df.columns:
+        duplicated = df[df["trade_id"].astype(str).duplicated(keep=False)]
+        for _, row in duplicated.head(20).iterrows():
+            add_issue("HIGH", "Duplicate Trade ID", "Same trade_id appears more than once.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    required_closed_fields = ["trade_id", "ticker", "signal", "entry_price", "stop_loss", "tp1", "tp2", "confidence", "status", "pnl_dollars", "pnl_percent", "setup_name", "confidence_bucket", "regime_bucket"]
+    for _, row in closed.iterrows():
+        for field in required_closed_fields:
+            if field not in closed.columns or not dashboard_present(row.get(field, "")):
+                add_issue("MEDIUM", f"Missing {field}", "Closed trade is missing a field needed for learning/automation readiness.", row.get("ticker", ""), row.get("trade_id", ""))
+        status = str(row.get("status", "")).upper()
+        pnl = safe_float_dashboard(row.get("pnl_dollars", 0), 0)
+        if status == "TP2_HIT" and pnl < 0:
+            add_issue("HIGH", "Outcome/PnL Conflict", "TP2_HIT trade has negative P&L.", row.get("ticker", ""), row.get("trade_id", ""))
+        if status == "STOPPED" and pnl > 0:
+            add_issue("HIGH", "Outcome/PnL Conflict", "STOPPED trade has positive P&L.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    for _, row in open_df.iterrows():
+        for field in ["trade_id", "ticker", "signal", "entry_price", "stop_loss", "tp1", "tp2", "status"]:
+            if field not in open_df.columns or not dashboard_present(row.get(field, "")):
+                add_issue("MEDIUM", f"Missing {field}", "Open trade is missing a field needed for monitoring.", row.get("ticker", ""), row.get("trade_id", ""))
+        age_days = dashboard_trade_age_days(row)
+        if age_days >= BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS:
+            add_issue("LOW", "Stale Open Trade", f"Open trade age is {age_days} days; review if it should still be active.", row.get("ticker", ""), row.get("trade_id", ""))
+
+    pnl = pd.to_numeric(closed.get("pnl_dollars", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    wins = int((pnl > 0).sum()) if not closed.empty else 0
+    losses = int((pnl < 0).sum()) if not closed.empty else 0
+    setups = int(closed.get("setup_name", pd.Series(dtype=str)).astype(str).replace("", pd.NA).dropna().nunique()) if not closed.empty and "setup_name" in closed.columns else 0
+
+    high = sum(1 for issue in issues if issue["Severity"] == "HIGH")
+    medium = sum(1 for issue in issues if issue["Severity"] == "MEDIUM")
+    low = sum(1 for issue in issues if issue["Severity"] == "LOW")
+    health_score = 100 - high * 12 - medium * 5 - low * 2
+    if len(closed) < BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES:
+        health_score -= min(25, round((BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES - len(closed)) / BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES * 25, 2))
+    if wins == 0 and len(closed) > 0:
+        health_score -= 5
+    if losses == 0 and len(closed) > 0:
+        health_score -= 5
+    health_score = round(max(0, min(100, health_score)), 2)
+
+    if len(closed) >= BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES and health_score >= BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE and high == 0:
+        confidence, status, recommendation = "VERIFIED", "HEALTHY", "Evidence is clean enough to support v33 readiness review."
+    elif len(closed) >= 10 and health_score >= 70:
+        confidence, status, recommendation = "MEDIUM", "BUILDING", "Evidence is usable for monitoring, but not enough for automation decisions."
+    else:
+        confidence, status, recommendation = "LOW", "INSUFFICIENT_EVIDENCE", "Continue collecting closed paper trades. Do not enable v33 automation yet."
+
+    return {
+        "summary": {
+            "health_score": health_score,
+            "confidence": confidence,
+            "status": status,
+            "recommendation": recommendation,
+            "issue_count": len(issues),
+            "high_issues": high,
+            "medium_issues": medium,
+            "low_issues": low,
+            "total_trades": int(len(df)),
+            "closed_trades": int(len(closed)),
+            "open_trades": int(len(open_df)),
+            "wins": wins,
+            "losses": losses,
+            "setups": setups,
+        },
+        "issues_df": pd.DataFrame(issues),
+    }
+
+
+def dashboard_readiness_points(value, target, max_points, higher_is_better=True):
+    value = safe_float_dashboard(value, 0)
+    target = safe_float_dashboard(target, 0)
+    max_points = safe_float_dashboard(max_points, 0)
+    if max_points <= 0:
+        return 0
+    if target <= 0:
+        return max_points if value > 0 else 0
+    if higher_is_better:
+        return round(max(0, min(max_points, (value / target) * max_points)), 2)
+    if value <= target:
+        return max_points
+    if value <= 0:
+        return max_points
+    return round(max(0, min(max_points, (target / value) * max_points)), 2)
+
+
+def build_dashboard_automation_readiness_v32_28_report(trades_df, equity_df):
+    trades = normalize_paper_trade_df(trades_df)
+    metrics = paper_trade_metrics(trades)
+    equity = calculate_equity_curve_stats(equity_df)
+    integrity = build_dashboard_evidence_integrity_report(trades)
+    integrity_summary = integrity.get("summary", {})
+    setup_tables = build_setup_performance_tables(trades)
+    setup_perf = setup_tables.get("setup_perf", pd.DataFrame())
+
+    if setup_perf is None or setup_perf.empty:
+        strong_count = 0
+        weak_count = 0
+    else:
+        reliable = setup_perf[pd.to_numeric(setup_perf.get("Trades", 0), errors="coerce").fillna(0) >= BOT_SETUP_ANALYTICS_MIN_SAMPLE].copy()
+        strong_count = len(reliable[(reliable["Profit Factor"] >= BOT_SETUP_ANALYTICS_STRONG_PF) & (reliable["Win Rate %"] >= BOT_SETUP_ANALYTICS_STRONG_WR)]) if not reliable.empty else 0
+        weak_count = len(reliable[(reliable["Profit Factor"] <= BOT_DYNAMIC_TRADE_FILTER_WEAK_PF) | (reliable["Win Rate %"] <= BOT_DYNAMIC_TRADE_FILTER_WEAK_WR)]) if not reliable.empty else 0
+
+    performance_score = round(
+        dashboard_readiness_points(metrics.get("total_closed", 0), BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, 25)
+        + dashboard_readiness_points(metrics.get("win_rate", 0), BOT_AUTOMATION_READINESS_TARGET_WR, 25)
+        + dashboard_readiness_points(metrics.get("profit_factor", 0), BOT_AUTOMATION_READINESS_TARGET_PF, 25)
+        + (15 if equity.get("positive_equity") else 0)
+        + dashboard_readiness_points(equity.get("max_drawdown_pct", 0), BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT, 10, higher_is_better=False),
+        2
+    )
+    evidence_score = round(safe_float_dashboard(integrity_summary.get("health_score", 0), 0), 2)
+    stability_score = round(min(100, (20 if strong_count else 0) + (40 if weak_count == 0 else 15) + dashboard_readiness_points(len(setup_perf) if setup_perf is not None else 0, max(1, BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES), 40)), 2)
+    operations_score = 100
+
+    score = round(performance_score * 0.40 + evidence_score * 0.30 + stability_score * 0.20 + operations_score * 0.10, 2)
+
+    blockers = []
+    if metrics.get("total_closed", 0) < BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES:
+        blockers.append(f"Need {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES - metrics.get('total_closed', 0)} more closed trades.")
+    if metrics.get("win_rate", 0) < BOT_AUTOMATION_READINESS_TARGET_WR:
+        blockers.append("Win rate is below target.")
+    if metrics.get("profit_factor", 0) < BOT_AUTOMATION_READINESS_TARGET_PF:
+        blockers.append("Profit factor is below target.")
+    if not equity.get("positive_equity"):
+        blockers.append("Equity curve is not positive yet.")
+    if evidence_score < BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE:
+        blockers.append("Evidence health score is below target.")
+    if weak_count:
+        blockers.append(f"{weak_count} weak setup(s) should not be automated.")
+
+    if score >= BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE and not blockers:
+        status = "READY FOR v33 PAPER AUTOMATION"
+        recommendation = "Proceed to v33 planning only if evidence count and stability remain strong."
+    elif score >= 60:
+        status = "NEARLY READY - KEEP TESTING"
+        recommendation = "Continue collecting evidence. Do not enable v33 yet. " + " ".join(blockers[:4])
+    else:
+        status = "NOT READY - COLLECT MORE DATA"
+        recommendation = "Do not build v33 automation yet. " + (" ".join(blockers[:4]) if blockers else "Continue collecting paper-trade evidence.")
+
+    rows = pd.DataFrame([
+        {"Category": "Performance", "Score": performance_score, "Status": "PASS" if performance_score >= 80 else "WAIT", "Details": f"Closed {metrics.get('total_closed', 0)} | WR {metrics.get('win_rate', 0)}% | PF {metrics.get('profit_factor', 0)}"},
+        {"Category": "Evidence Integrity", "Score": evidence_score, "Status": integrity_summary.get("confidence", "N/A"), "Details": f"Issues {integrity_summary.get('issue_count', 0)} | Health {evidence_score}/100"},
+        {"Category": "Strategy Stability", "Score": stability_score, "Status": "PASS" if stability_score >= 80 else "WAIT", "Details": f"Strong setups {strong_count} | Weak setups {weak_count}"},
+        {"Category": "Operations", "Score": operations_score, "Status": "PASS", "Details": "Read-only dashboard layer. Bot still controls scanning/trading."},
+    ])
+
+    return {
+        "score": score,
+        "performance_score": performance_score,
+        "evidence_score": evidence_score,
+        "stability_score": stability_score,
+        "operations_score": operations_score,
+        "status": status,
+        "recommendation": recommendation,
+        "blockers": blockers,
+        "rows": rows,
+        "integrity": integrity,
+    }
+
+
+
 # ======================================================
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, evidence_integrity_tab, automation_readiness_v32_28_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -3220,6 +3435,8 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Decision Dashboard",
     "Performance Gate",
     "Automation Readiness",
+    "Evidence Integrity",
+    "Automation Readiness v32.28",
     "Trade Lifecycle",
     "Evidence Center",
     "Trade Journal",
@@ -3940,6 +4157,74 @@ with automation_readiness_tab:
 # ======================================================
 # v32.13 TRADE LIFECYCLE ANALYTICS TAB
 # ======================================================
+
+# ======================================================
+# v32.27 EVIDENCE INTEGRITY MONITOR TAB
+# ======================================================
+
+with evidence_integrity_tab:
+    st.header("v32.27 Evidence Integrity Monitor")
+    st.caption("Read-only audit. Checks whether paper-trade evidence is clean enough for learning and future automation.")
+
+    paper_trades_df = load_paper_trades_df()
+    report = build_dashboard_evidence_integrity_report(paper_trades_df)
+    summary = report.get("summary", {})
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Evidence Health", f"{summary.get('health_score', 0)}/100")
+    col2.metric("Evidence Confidence", summary.get("confidence", "N/A"))
+    col3.metric("Closed Trades", f"{summary.get('closed_trades', 0)}/{BOT_EVIDENCE_INTEGRITY_MIN_CLOSED_TRADES}")
+    col4.metric("Issues Found", summary.get("issue_count", 0))
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Open Trades", summary.get("open_trades", 0))
+    col6.metric("Wins", summary.get("wins", 0))
+    col7.metric("Losses", summary.get("losses", 0))
+    col8.metric("Setups", summary.get("setups", 0))
+
+    st.info(summary.get("recommendation", "Evidence integrity recommendation unavailable."))
+    st.subheader("Integrity Issues")
+    issues_df = report.get("issues_df", pd.DataFrame())
+    if issues_df is None or issues_df.empty:
+        st.success("No evidence integrity issues found.")
+    else:
+        st.dataframe(issues_df, width="stretch")
+
+
+# ======================================================
+# v32.28 AUTOMATION READINESS ENGINE TAB
+# ======================================================
+
+with automation_readiness_v32_28_tab:
+    st.header("v32.28 Automation Readiness Engine")
+    st.caption("Read-only v33 certification layer. It does not enable automation or change trade logic.")
+
+    paper_trades_df = load_paper_trades_df()
+    equity_curve_df = load_paper_equity_df()
+    report = build_dashboard_automation_readiness_v32_28_report(paper_trades_df, equity_curve_df)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Final Readiness", f"{report.get('score', 0)}/100")
+    col2.metric("Performance", f"{report.get('performance_score', 0)}/100")
+    col3.metric("Evidence", f"{report.get('evidence_score', 0)}/100")
+    col4.metric("Stability", f"{report.get('stability_score', 0)}/100")
+
+    col5, col6 = st.columns(2)
+    col5.metric("Operations", f"{report.get('operations_score', 0)}/100")
+    col6.metric("Status", report.get("status", "N/A"))
+
+    st.info(report.get("recommendation", "Automation readiness recommendation unavailable."))
+    st.subheader("Readiness Categories")
+    st.dataframe(report.get("rows", pd.DataFrame()), width="stretch")
+
+    st.subheader("Evidence Integrity Detail")
+    detail = report.get("integrity", {}).get("issues_df", pd.DataFrame())
+    if detail is None or detail.empty:
+        st.success("No evidence integrity issues found.")
+    else:
+        st.dataframe(detail, width="stretch")
+
+
 
 with trade_lifecycle_tab:
     st.header("v32.13 Trade Lifecycle Analytics")
@@ -4901,21 +5186,6 @@ with bot_status_tab:
         dcol6.metric("Closed Trades", diag_summary.get("Bot Closed Rows", 0))
         dcol7.metric("TP1 Trades", diag_summary.get("Bot TP1 Rows", 0))
         dcol8.metric("Open Tickers", diag_summary.get("Bot Open Tickers", "None"))
-
-        closure_diag = (bot_diag or {}).get("trade_closure_latest", {}) or {}
-        if closure_diag:
-            st.subheader("v32.26.6 Trade Closure Diagnostics")
-            ccol1, ccol2, ccol3, ccol4 = st.columns(4)
-            ccol1.metric("Closure Mode", closure_diag.get("mode", "N/A"))
-            ccol2.metric("Nearest Trigger", closure_diag.get("nearest_trigger", "N/A"))
-            ccol3.metric("Stale Open", closure_diag.get("stale_open", 0))
-            ccol4.metric("Conflicts", closure_diag.get("conflicts", 0))
-            st.caption(f"Conflict mode: {closure_diag.get('conflict_mode', BOT_TRADE_CLOSURE_CONFLICT_MODE)} | Stale threshold: {BOT_TRADE_CLOSURE_STALE_DAYS} days")
-            closure_rows = closure_diag.get("rows", [])
-            if closure_rows:
-                st.dataframe(pd.DataFrame(closure_rows), width="stretch")
-            else:
-                st.info("Closure diagnostics will populate after the bot completes one paper-trade monitor cycle.")
 
         if diag_warnings:
             for warning in diag_warnings:
