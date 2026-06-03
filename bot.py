@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.28.3-runtime-stability-loader-fix"
+BOT_VERSION = "google-sheets-100-production-v32.28.4-dashboard-readiness-cleanup"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -564,7 +564,7 @@ BOT_AUTOMATION_READINESS_TARGET_PF = max(0, get_env_float("BOT_AUTOMATION_READIN
 BOT_AUTOMATION_READINESS_TARGET_SCORE = max(0, min(get_env_float("BOT_AUTOMATION_READINESS_TARGET_SCORE", 80), 100))
 BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT = max(0, get_env_float("BOT_AUTOMATION_READINESS_MAX_DRAWDOWN_PCT", 20))
 BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES = max(0, get_env_int("BOT_AUTOMATION_READINESS_MIN_STRONG_STRATEGIES", 1))
-BOT_SEND_AUTOMATION_READINESS_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_REPORT", True)
+BOT_SEND_AUTOMATION_READINESS_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_REPORT", False)
 BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_AUTOMATION_READINESS_REPORT_INTERVAL_HOURS", 24))
 
 # v32.13 Trade Lifecycle Analytics.
@@ -8920,10 +8920,10 @@ def run_scan():
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Strategy ranking engine", log_strategy_ranking_report)
     post_scan_errors += int(step_error)
-    _, step_error = run_safe_step("Automation readiness center", log_automation_readiness_report, backtest_results)
-    post_scan_errors += int(step_error)
-    _, step_error = run_safe_step("Automation readiness Discord report", send_automation_readiness_report_if_due, backtest_results)
-    post_scan_errors += int(step_error)
+    # v32.28.4 cleanup:
+    # Legacy v32.12 Automation Readiness Center is retired from the active scan/report flow.
+    # v32.28 Automation Readiness Engine below is now the single source of truth.
+    log("Automation readiness center v32.12 retired: using v32.28 engine as source of truth.")
     _, step_error = run_safe_step("Trade lifecycle analytics", log_trade_lifecycle_report)
     post_scan_errors += int(step_error)
 

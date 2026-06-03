@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.28.3_runtime_stability_loader_fix_dashboard"
+APP_VERSION = "v32.28.4_dashboard_readiness_cleanup"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -3427,7 +3427,7 @@ def build_dashboard_automation_readiness_v32_28_report(trades_df, equity_df):
 # TABS
 # ======================================================
 
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_tab, evidence_integrity_tab, automation_readiness_v32_28_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_v32_28_tab, evidence_integrity_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -3436,7 +3436,6 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Performance Gate",
     "Automation Readiness",
     "Evidence Integrity",
-    "Automation Readiness v32.28",
     "Trade Lifecycle",
     "Evidence Center",
     "Trade Journal",
@@ -4098,70 +4097,6 @@ with adaptive_filters_tab:
 # v32.12 AUTOMATION READINESS TAB
 # ======================================================
 
-with automation_readiness_tab:
-    st.header("v32.12 Automation Readiness Center")
-    st.caption("This tells you whether the paper-trading system has enough evidence to move toward v33 3Commas paper automation.")
-
-    paper_trades_df = load_paper_trades_df()
-    paper_equity_df = load_paper_equity_df()
-    readiness = build_automation_readiness_dashboard_report(paper_trades_df, paper_equity_df)
-
-    score = readiness.get("score", 0)
-    status = readiness.get("status", "N/A")
-    metrics = readiness.get("metrics", {})
-    equity = readiness.get("equity", {})
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Readiness Score", f"{score}/100")
-    col2.metric("Closed Trades", metrics.get("total_closed", 0))
-    col3.metric("Win Rate", f"{metrics.get('win_rate', 0)}%")
-    col4.metric("Profit Factor", metrics.get("profit_factor", 0))
-
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Equity Return", f"{equity.get('equity_return_pct', 0)}%")
-    col6.metric("Max Drawdown", f"{equity.get('max_drawdown_pct', 0)}%")
-    col7.metric("Strong Setups", readiness.get("strong_count", 0))
-    col8.metric("Weak Setups", readiness.get("weak_count", 0))
-
-    if score >= BOT_AUTOMATION_READINESS_TARGET_SCORE:
-        st.success(status)
-    elif score >= 60:
-        st.warning(status)
-    else:
-        st.error(status)
-
-    st.subheader("Deploy Recommendation")
-    st.write(readiness.get("recommendation", "N/A"))
-
-    st.subheader("Automation Readiness Gates")
-    checks = readiness.get("checks", pd.DataFrame())
-    if checks.empty:
-        st.info("No readiness data yet.")
-    else:
-        st.dataframe(arrow_safe_df(checks), width="stretch")
-
-    st.subheader("Strategy Automation Notes")
-    st.write("Best strategy:", readiness.get("best_strategy", "N/A"))
-    st.write("Weak strategy:", readiness.get("weak_strategy", "N/A"))
-    st.write("Dynamic confidence:", readiness.get("confidence_recommendation", "N/A"))
-
-    st.subheader("v33 Rule")
-    st.info(
-        f"Do not start v33 3Commas paper automation until readiness score is {BOT_AUTOMATION_READINESS_TARGET_SCORE}+ "
-        f"with {BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES}+ closed paper trades, PF >= {BOT_AUTOMATION_READINESS_TARGET_PF}, "
-        f"WR >= {BOT_AUTOMATION_READINESS_TARGET_WR}%, and a positive equity curve."
-    )
-
-
-
-# ======================================================
-# v32.13 TRADE LIFECYCLE ANALYTICS TAB
-# ======================================================
-
-# ======================================================
-# v32.27 EVIDENCE INTEGRITY MONITOR TAB
-# ======================================================
-
 with evidence_integrity_tab:
     st.header("v32.27 Evidence Integrity Monitor")
     st.caption("Read-only audit. Checks whether paper-trade evidence is clean enough for learning and future automation.")
@@ -4196,8 +4131,8 @@ with evidence_integrity_tab:
 # ======================================================
 
 with automation_readiness_v32_28_tab:
-    st.header("v32.28 Automation Readiness Engine")
-    st.caption("Read-only v33 certification layer. It does not enable automation or change trade logic.")
+    st.header("Automation Readiness")
+    st.caption("v32.28 read-only v33 certification layer. It does not enable automation or change trade logic.")
 
     paper_trades_df = load_paper_trades_df()
     equity_curve_df = load_paper_equity_df()
