@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.26.2_evidence_learning_loader_fix_dashboard"
+APP_VERSION = "v32.26.5_news_sentiment_hardening_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
