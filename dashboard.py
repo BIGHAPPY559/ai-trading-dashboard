@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.26.5_news_sentiment_hardening_dashboard"
+APP_VERSION = "v32.26.6.1_trade_closure_diagnostics_runtime_fix_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -251,6 +251,10 @@ BOT_DYNAMIC_TRADE_FILTER_WEAK_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_
 BOT_DYNAMIC_TRADE_FILTER_WEAK_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_WEAK_WR", 45)
 BOT_DYNAMIC_TRADE_FILTER_STRONG_PF = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_PF", 1.5)
 BOT_DYNAMIC_TRADE_FILTER_STRONG_WR = get_env_float("BOT_DYNAMIC_TRADE_FILTER_STRONG_WR", 55)
+
+# v32.26.6 Trade Closure Diagnostics dashboard settings.
+BOT_TRADE_CLOSURE_STALE_DAYS = get_env_float("BOT_TRADE_CLOSURE_STALE_DAYS", 10)
+BOT_TRADE_CLOSURE_CONFLICT_MODE = os.getenv("BOT_TRADE_CLOSURE_CONFLICT_MODE", "conservative")
 
 
 def now_dt():
@@ -4897,6 +4901,21 @@ with bot_status_tab:
         dcol6.metric("Closed Trades", diag_summary.get("Bot Closed Rows", 0))
         dcol7.metric("TP1 Trades", diag_summary.get("Bot TP1 Rows", 0))
         dcol8.metric("Open Tickers", diag_summary.get("Bot Open Tickers", "None"))
+
+        closure_diag = (bot_diag or {}).get("trade_closure_latest", {}) or {}
+        if closure_diag:
+            st.subheader("v32.26.6 Trade Closure Diagnostics")
+            ccol1, ccol2, ccol3, ccol4 = st.columns(4)
+            ccol1.metric("Closure Mode", closure_diag.get("mode", "N/A"))
+            ccol2.metric("Nearest Trigger", closure_diag.get("nearest_trigger", "N/A"))
+            ccol3.metric("Stale Open", closure_diag.get("stale_open", 0))
+            ccol4.metric("Conflicts", closure_diag.get("conflicts", 0))
+            st.caption(f"Conflict mode: {closure_diag.get('conflict_mode', BOT_TRADE_CLOSURE_CONFLICT_MODE)} | Stale threshold: {BOT_TRADE_CLOSURE_STALE_DAYS} days")
+            closure_rows = closure_diag.get("rows", [])
+            if closure_rows:
+                st.dataframe(pd.DataFrame(closure_rows), width="stretch")
+            else:
+                st.info("Closure diagnostics will populate after the bot completes one paper-trade monitor cycle.")
 
         if diag_warnings:
             for warning in diag_warnings:

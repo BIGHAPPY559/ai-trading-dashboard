@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.26.5-news-sentiment-hardening"
+BOT_VERSION = "google-sheets-100-production-v32.26.6.1-trade-closure-diagnostics-runtime-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -500,6 +500,16 @@ YFINANCE_USE_HISTORY_FALLBACK = get_env_bool("YFINANCE_USE_HISTORY_FALLBACK", Fa
 BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW = get_env_bool("BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW", True)
 BOT_PAPER_TRADE_MONITOR_PERIOD = os.getenv("BOT_PAPER_TRADE_MONITOR_PERIOD", "15d")
 BOT_PAPER_TRADE_MONITOR_INTERVAL = os.getenv("BOT_PAPER_TRADE_MONITOR_INTERVAL", "1h")
+
+# v32.26.6 Trade Closure Diagnostics + Forced Reconciliation.
+# These keep paper-trade closure logic observable without forcing premature
+# automation. Conservative conflict mode counts a stop first when TP and SL
+# are both touched inside the same unknown candle/window.
+BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED = get_env_bool("BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED", True)
+BOT_TRADE_CLOSURE_CONFLICT_MODE = os.getenv("BOT_TRADE_CLOSURE_CONFLICT_MODE", "conservative").strip().lower() or "conservative"
+BOT_TRADE_CLOSURE_STALE_DAYS = max(1, get_env_float("BOT_TRADE_CLOSURE_STALE_DAYS", 10))
+BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER = get_env_bool("BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER", True)
+BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS = max(1, get_env_int("BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS", 8))
 BOT_SLEEP_CHUNK_SECONDS = max(5, get_env_int("BOT_SLEEP_CHUNK_SECONDS", 30))
 LOG_MAX_ITEMS = max(100, get_env_int("BOT_LOG_MAX_ITEMS", 5000))
 BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
@@ -677,6 +687,13 @@ GOOGLE_WORKSHEET_CREATE_RETRY_CACHE = set()
 # v32.26.5 in-memory cache for ticker-level news sentiment lookups.
 # This reduces API pressure while still refreshing throughout the day.
 NEWS_SENTIMENT_CONTEXT_CACHE = {}
+
+# v32.26.6 latest trade-closure diagnostics for logs/status/dashboard.
+LAST_TRADE_CLOSURE_DIAGNOSTICS = {
+    "mode": "high_low" if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else "close_only",
+    "nearest_trigger": "N/A",
+    "rows": [],
+}
 
 
 def request_shutdown(signum=None, frame=None):
@@ -4999,6 +5016,13 @@ def build_paper_trade_file_diagnostics(df=None):
         "paper_equity_file_modified": safe_file_modified_text(PAPER_EQUITY_FILE),
         "paper_trading_enabled": BOT_PAPER_TRADING_ENABLED,
         "paper_trade_monitor_enabled": BOT_PAPER_TRADE_MONITOR_ENABLED,
+        "paper_trade_monitor_use_high_low": BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW,
+        "paper_trade_monitor_period": BOT_PAPER_TRADE_MONITOR_PERIOD,
+        "paper_trade_monitor_interval": BOT_PAPER_TRADE_MONITOR_INTERVAL,
+        "trade_closure_diagnostics_enabled": BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED,
+        "trade_closure_conflict_mode": BOT_TRADE_CLOSURE_CONFLICT_MODE,
+        "trade_closure_stale_days": BOT_TRADE_CLOSURE_STALE_DAYS,
+        "trade_closure_latest": LAST_TRADE_CLOSURE_DIAGNOSTICS,
         "paper_trade_max_open_total": BOT_PAPER_TRADE_MAX_OPEN_TOTAL,
         "paper_trade_max_open_per_ticker": BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER,
     }
@@ -5381,50 +5405,166 @@ def get_paper_trade_price_snapshot(ticker, trade):
     return {"current": 0, "high": 0, "low": 0, "source": "unavailable"}
 
 
-def classify_paper_trade_status(trade, current_price, high_price=None, low_price=None):
+def trade_direction_from_signal(signal):
+    signal = str(signal or "").upper()
+    if "SELL" in signal:
+        return "SHORT"
+    if "BUY" in signal:
+        return "LONG"
+    return "UNKNOWN"
+
+
+def pct_distance_to_level(current_price, level):
+    current = safe_float(current_price, 0)
+    level = safe_float(level, 0)
+    if current <= 0 or level <= 0:
+        return None
+    return round(abs((level - current) / current) * 100, 2)
+
+
+def paper_trade_valuation_price(trade, status, current_price):
+    """Return the exact price to use for P/L when a paper trade trigger is hit.
+
+    v32.26.6.1 runtime fix: v32.26.6 used this helper inside the monitor but
+    did not define it. Closed trades should be valued at the triggered level,
+    while still-open/TP1-only trades continue to use the latest current price.
+    """
+    status_text = str(status or "").upper()
+    current = safe_float(current_price, 0)
+    stop = safe_float(trade.get("stop_loss", 0), 0)
+    tp1 = safe_float(trade.get("tp1", 0), 0)
+    tp2 = safe_float(trade.get("tp2", 0), 0)
+
+    if status_text == "STOPPED" and stop > 0:
+        return stop
+    if status_text == "TP2_HIT" and tp2 > 0:
+        return tp2
+    if status_text == "TP1_HIT" and tp1 > 0:
+        return tp1
+
+    return current
+
+
+
+def classify_paper_trade_status_detail(trade, current_price, high_price=None, low_price=None):
+    """Return status, result, and an explainable closure decision.
+
+    v32.26.6 hardening keeps the original high/low trigger behavior but adds
+    diagnostics, nearest-trigger math, stale-open flags, and conservative
+    same-window conflict handling.
+    """
     signal = str(trade.get("signal", ""))
     old_status = str(trade.get("status", "OPEN"))
+    direction = trade_direction_from_signal(signal)
     stop = safe_float(trade.get("stop_loss", 0), 0)
     tp1 = safe_float(trade.get("tp1", 0), 0)
     tp2 = safe_float(trade.get("tp2", 0), 0)
     current = safe_float(current_price, 0)
     high = safe_float(high_price if high_price is not None else current_price, current)
     low = safe_float(low_price if low_price is not None else current_price, current)
+    opened = trade.get("date_opened", "")
+    hours_open = lifecycle_hours_between(opened) if opened else 0
+    days_open = round(hours_open / 24, 2) if hours_open else 0
+
+    detail = {
+        "ticker": str(trade.get("ticker", "")),
+        "signal": signal,
+        "direction": direction,
+        "old_status": old_status,
+        "current": round(current, 6) if current else 0,
+        "high": round(high, 6) if high else 0,
+        "low": round(low, 6) if low else 0,
+        "stop_loss": round(stop, 6) if stop else 0,
+        "tp1": round(tp1, 6) if tp1 else 0,
+        "tp2": round(tp2, 6) if tp2 else 0,
+        "hours_open": hours_open,
+        "days_open": days_open,
+        "stale_open": bool(days_open >= BOT_TRADE_CLOSURE_STALE_DAYS),
+        "triggered_stop": False,
+        "triggered_tp1": False,
+        "triggered_tp2": False,
+        "conflict": False,
+        "nearest_trigger": "N/A",
+        "nearest_trigger_pct": None,
+        "decision_reason": "No decision yet",
+    }
 
     if current <= 0:
-        return old_status, str(trade.get("result", "OPEN"))
+        detail["decision_reason"] = "No valid current price; keeping previous status."
+        return old_status, str(trade.get("result", "OPEN")), detail
 
-    if "SELL" in signal:
-        # Conservative ordering: if stop and target are both touched inside the
-        # same monitoring window, count the stop first because candle order is unknown.
-        if stop > 0 and high >= stop:
-            return "STOPPED", "LOSS"
-        if tp2 > 0 and low <= tp2:
-            return "TP2_HIT", "WIN"
-        if tp1 > 0 and low <= tp1:
-            return "TP1_HIT", "PARTIAL WIN"
+    if direction == "SHORT":
+        stop_hit = bool(stop > 0 and high >= stop)
+        tp2_hit = bool(tp2 > 0 and low <= tp2)
+        tp1_hit = bool(tp1 > 0 and low <= tp1)
+        detail.update({"triggered_stop": stop_hit, "triggered_tp1": tp1_hit, "triggered_tp2": tp2_hit})
+        detail["conflict"] = bool(stop_hit and (tp1_hit or tp2_hit))
+
+        candidates = []
+        if stop > 0:
+            candidates.append(("SL", pct_distance_to_level(high, stop)))
+        if tp2 > 0:
+            candidates.append(("TP2", pct_distance_to_level(low, tp2)))
+        if tp1 > 0:
+            candidates.append(("TP1", pct_distance_to_level(low, tp1)))
+        candidates = [(name, dist) for name, dist in candidates if dist is not None]
+        if candidates:
+            nearest = sorted(candidates, key=lambda item: item[1])[0]
+            detail["nearest_trigger"], detail["nearest_trigger_pct"] = nearest
+
+        if stop_hit and (BOT_TRADE_CLOSURE_CONFLICT_MODE == "conservative" or not (tp1_hit or tp2_hit)):
+            detail["decision_reason"] = "SHORT stop touched by candle high; conservative conflict handling applied." if detail["conflict"] else "SHORT stop touched by candle high."
+            return "STOPPED", "LOSS", detail
+        if tp2_hit:
+            detail["decision_reason"] = "SHORT TP2 touched by candle low."
+            return "TP2_HIT", "WIN", detail
+        if tp1_hit:
+            detail["decision_reason"] = "SHORT TP1 touched by candle low."
+            return "TP1_HIT", "PARTIAL WIN", detail
+
+    elif direction == "LONG":
+        stop_hit = bool(stop > 0 and low <= stop)
+        tp2_hit = bool(tp2 > 0 and high >= tp2)
+        tp1_hit = bool(tp1 > 0 and high >= tp1)
+        detail.update({"triggered_stop": stop_hit, "triggered_tp1": tp1_hit, "triggered_tp2": tp2_hit})
+        detail["conflict"] = bool(stop_hit and (tp1_hit or tp2_hit))
+
+        candidates = []
+        if stop > 0:
+            candidates.append(("SL", pct_distance_to_level(low, stop)))
+        if tp2 > 0:
+            candidates.append(("TP2", pct_distance_to_level(high, tp2)))
+        if tp1 > 0:
+            candidates.append(("TP1", pct_distance_to_level(high, tp1)))
+        candidates = [(name, dist) for name, dist in candidates if dist is not None]
+        if candidates:
+            nearest = sorted(candidates, key=lambda item: item[1])[0]
+            detail["nearest_trigger"], detail["nearest_trigger_pct"] = nearest
+
+        if stop_hit and (BOT_TRADE_CLOSURE_CONFLICT_MODE == "conservative" or not (tp1_hit or tp2_hit)):
+            detail["decision_reason"] = "LONG stop touched by candle low; conservative conflict handling applied." if detail["conflict"] else "LONG stop touched by candle low."
+            return "STOPPED", "LOSS", detail
+        if tp2_hit:
+            detail["decision_reason"] = "LONG TP2 touched by candle high."
+            return "TP2_HIT", "WIN", detail
+        if tp1_hit:
+            detail["decision_reason"] = "LONG TP1 touched by candle high."
+            return "TP1_HIT", "PARTIAL WIN", detail
+
     else:
-        if stop > 0 and low <= stop:
-            return "STOPPED", "LOSS"
-        if tp2 > 0 and high >= tp2:
-            return "TP2_HIT", "WIN"
-        if tp1 > 0 and high >= tp1:
-            return "TP1_HIT", "PARTIAL WIN"
+        detail["decision_reason"] = "Unknown direction; keeping previous status."
+        return old_status, str(trade.get("result", "OPEN")), detail
 
-    return "TP1_HIT" if old_status == "TP1_HIT" else "OPEN", "OPEN"
+    if detail["stale_open"]:
+        detail["decision_reason"] = f"Still open; stale-open review flag because trade is {days_open} days old."
+    else:
+        detail["decision_reason"] = f"Still open; nearest trigger {detail['nearest_trigger']} is {detail['nearest_trigger_pct']}% away."
+    return old_status if old_status == "TP1_HIT" else "OPEN", "OPEN", detail
 
 
-def paper_trade_valuation_price(trade, status, current_price):
-    """Use the actual trigger level for realized P/L when a trade closes."""
-    current = safe_float(current_price, 0)
-    if status == "STOPPED":
-        stop = safe_float(trade.get("stop_loss", 0), 0)
-        return stop if stop > 0 else current
-    if status == "TP2_HIT":
-        tp2 = safe_float(trade.get("tp2", 0), 0)
-        return tp2 if tp2 > 0 else current
-    return current
-
+def classify_paper_trade_status(trade, current_price, high_price=None, low_price=None):
+    status, result, _detail = classify_paper_trade_status_detail(trade, current_price, high_price, low_price)
+    return status, result
 
 
 def parse_trade_datetime(value):
@@ -5525,13 +5665,44 @@ def send_paper_trade_event(trade, event_type):
     return send_discord_embed(webhook_url, titles.get(event_type, "📌 PAPER TRADE UPDATE"), colors.get(event_type, 3447003), fields)
 
 
+def format_closure_diagnostic_line(detail, snapshot_source="unknown"):
+    ticker = detail.get("ticker", "")
+    signal = detail.get("signal", "")
+    nearest = detail.get("nearest_trigger", "N/A")
+    nearest_pct = detail.get("nearest_trigger_pct", None)
+    stale = " | STALE" if detail.get("stale_open") else ""
+    conflict = " | CONFLICT" if detail.get("conflict") else ""
+    nearest_text = f"{nearest} {nearest_pct}%" if nearest_pct is not None else str(nearest)
+    return (
+        f"{ticker} {signal} | src={snapshot_source} | current={detail.get('current')} | "
+        f"H={detail.get('high')} L={detail.get('low')} | SL={detail.get('stop_loss')} "
+        f"TP1={detail.get('tp1')} TP2={detail.get('tp2')} | nearest={nearest_text} | "
+        f"decision={detail.get('decision_reason')}{stale}{conflict}"
+    )
+
+
 def monitor_open_paper_trades():
+    global LAST_TRADE_CLOSURE_DIAGNOSTICS
     if not BOT_PAPER_TRADING_ENABLED or not BOT_PAPER_TRADE_MONITOR_ENABLED:
-        return {"checked": 0, "updated": 0, "closed": 0}
+        LAST_TRADE_CLOSURE_DIAGNOSTICS = {
+            "mode": "disabled",
+            "nearest_trigger": "N/A",
+            "rows": [],
+        }
+        return {"checked": 0, "updated": 0, "closed": 0, "nearest_trigger": "N/A"}
     df = load_paper_trades_df()
     if df.empty:
-        return {"checked": 0, "updated": 0, "closed": 0}
+        LAST_TRADE_CLOSURE_DIAGNOSTICS = {
+            "mode": "empty",
+            "nearest_trigger": "N/A",
+            "rows": [],
+        }
+        return {"checked": 0, "updated": 0, "closed": 0, "nearest_trigger": "N/A"}
     checked = updated = closed = 0
+    diagnostics = []
+    stale_open_count = 0
+    conflict_count = 0
+    nearest_candidates = []
     for index, trade in df.iterrows():
         if str(trade.get("status", "")) not in ["OPEN", "TP1_HIT"]:
             continue
@@ -5539,11 +5710,23 @@ def monitor_open_paper_trades():
         snapshot = get_paper_trade_price_snapshot(ticker, trade)
         current = safe_float(snapshot.get("current", 0), 0)
         if current <= 0:
+            if BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED:
+                log(f"Trade closure diagnostic {ticker}: no usable price snapshot; source={snapshot.get('source', 'unavailable')}")
             continue
         high = safe_float(snapshot.get("high", current), current)
         low = safe_float(snapshot.get("low", current), current)
         checked += 1
-        status, result = classify_paper_trade_status(trade, current, high, low)
+        status, result, detail = classify_paper_trade_status_detail(trade, current, high, low)
+        detail["source"] = snapshot.get("source", "unknown")
+        diagnostics.append(detail)
+        if detail.get("stale_open"):
+            stale_open_count += 1
+        if detail.get("conflict"):
+            conflict_count += 1
+        if detail.get("nearest_trigger_pct") is not None:
+            nearest_candidates.append(detail)
+        if BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED:
+            log("Trade closure diagnostic: " + format_closure_diagnostic_line(detail, snapshot.get("source", "unknown")))
         valuation_price = paper_trade_valuation_price(trade, status, current)
         pnl_percent, pnl_dollars = paper_trade_pnl(trade.get("signal", ""), trade.get("entry_price", 0), valuation_price, trade.get("position_size", 0))
         df.at[index, "current_price"] = round(valuation_price if status in ["TP2_HIT", "STOPPED"] else current, 4)
@@ -5551,9 +5734,11 @@ def monitor_open_paper_trades():
         df.at[index, "pnl_dollars"] = pnl_dollars
         df.at[index, "last_updated"] = now_text()
         notes = str(df.at[index, "notes"] if "notes" in df.columns else "")
-        monitor_note = f"monitor {snapshot.get('source', 'unknown')} | close {round(current, 4)} | high {round(high, 4)} | low {round(low, 4)}"
+        monitor_note = f"closure v32.26.6 | {format_closure_diagnostic_line(detail, snapshot.get('source', 'unknown'))}"
         if monitor_note not in notes:
-            df.at[index, "notes"] = f"{notes} | {monitor_note}" if notes else monitor_note
+            df.at[index, "notes"] = compact_text(f"{notes} | {monitor_note}" if notes else monitor_note, 900)
+        if detail.get("stale_open") and status in ["OPEN", "TP1_HIT"]:
+            df.at[index, "lifecycle_stage"] = "STALE_OPEN"
         df = update_lifecycle_fields_for_trade(df, index, status)
         old_status = str(trade.get("status", "OPEN"))
         if status != old_status:
@@ -5582,7 +5767,32 @@ def monitor_open_paper_trades():
                 closed += 1
     save_paper_trades_df(df)
     update_paper_equity_curve(df)
-    return {"checked": checked, "updated": updated, "closed": closed}
+    nearest_trigger = "N/A"
+    if nearest_candidates:
+        nearest_detail = sorted(nearest_candidates, key=lambda item: safe_float(item.get("nearest_trigger_pct", 999999), 999999))[0]
+        nearest_trigger = f"{nearest_detail.get('ticker')} {nearest_detail.get('nearest_trigger')} {nearest_detail.get('nearest_trigger_pct')}%"
+    LAST_TRADE_CLOSURE_DIAGNOSTICS = {
+        "mode": "high_low" if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else "close_only",
+        "conflict_mode": BOT_TRADE_CLOSURE_CONFLICT_MODE,
+        "checked": checked,
+        "updated": updated,
+        "closed": closed,
+        "stale_open": stale_open_count,
+        "conflicts": conflict_count,
+        "nearest_trigger": nearest_trigger,
+        "rows": diagnostics[:BOT_TRADE_CLOSURE_MAX_DIAGNOSTIC_ROWS],
+    }
+    if BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER:
+        log(f"Trade closure nearest trigger: {nearest_trigger} | stale_open={stale_open_count} | conflicts={conflict_count}")
+    return {
+        "checked": checked,
+        "updated": updated,
+        "closed": closed,
+        "mode": LAST_TRADE_CLOSURE_DIAGNOSTICS.get("mode"),
+        "nearest_trigger": nearest_trigger,
+        "stale_open": stale_open_count,
+        "conflicts": conflict_count,
+    }
 
 
 def update_paper_equity_curve(df=None):
@@ -9054,6 +9264,9 @@ def main():
     log(f"Bot status file: {BOT_STATUS_FILE}")
     log(f"Paper trades file: {PAPER_TRADES_FILE}")
     log(f"Paper equity file: {PAPER_EQUITY_FILE}")
+    log(f"Trade closure diagnostics enabled: {BOT_TRADE_CLOSURE_DIAGNOSTICS_ENABLED}")
+    log(f"Trade closure monitor mode: {'high_low' if BOT_PAPER_TRADE_MONITOR_USE_HIGH_LOW else 'close_only'} | period={BOT_PAPER_TRADE_MONITOR_PERIOD} | interval={BOT_PAPER_TRADE_MONITOR_INTERVAL}")
+    log(f"Trade closure conflict mode: {BOT_TRADE_CLOSURE_CONFLICT_MODE} | stale days={BOT_TRADE_CLOSURE_STALE_DAYS} | nearest trigger log={BOT_TRADE_CLOSURE_LOG_NEAREST_TRIGGER}")
     log_paper_trade_file_diagnostics("Startup paper trade diagnostics")
     log(f"Heartbeat enabled: {BOT_HEARTBEAT_ENABLED}")
     log(f"Heartbeat interval hours: {BOT_HEARTBEAT_INTERVAL_HOURS}")
