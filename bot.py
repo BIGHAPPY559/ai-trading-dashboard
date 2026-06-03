@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.28.2-evidence-integrity-readiness-wiring-fix"
+BOT_VERSION = "google-sheets-100-production-v32.28.3-runtime-stability-loader-fix"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -5307,6 +5307,19 @@ def load_paper_trades_df():
     except Exception as error:
         log(f"Paper trades load error: {error}")
         return pd.DataFrame(columns=PAPER_TRADE_HEADERS)
+
+
+
+def load_paper_trades():
+    """
+    v32.28.3 runtime compatibility shim.
+
+    Older evidence/learning helpers still call load_paper_trades(), while the
+    current paper-trade storage layer uses load_paper_trades_df(). Keeping this
+    alias prevents post-scan evidence reports from throwing
+    `name 'load_paper_trades' is not defined` after the trade monitor completes.
+    """
+    return load_paper_trades_df()
 
 
 def save_paper_trades_df(df):

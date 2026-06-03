@@ -123,7 +123,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.28.2_evidence_integrity_readiness_wiring_fix_dashboard"
+APP_VERSION = "v32.28.3_runtime_stability_loader_fix_dashboard"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
