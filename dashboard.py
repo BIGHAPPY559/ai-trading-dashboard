@@ -2,6 +2,8 @@ import os
 import json
 import random
 import time
+import contextlib
+import io
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -124,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.1_streamlit_width_compatibility_cleanup"
+APP_VERSION = "v32.29.1.2_yfinance_connection_hardening"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -159,6 +161,7 @@ AUTO_NEWS_MAX_ARTICLES_PER_MARKET = get_env_int("AUTO_NEWS_MAX_ARTICLES_PER_MARK
 DASHBOARD_NEWS_SCORE_ENABLED = get_env_bool("DASHBOARD_NEWS_SCORE_ENABLED", False)
 DASHBOARD_YFINANCE_NEWS_ENABLED = get_env_bool("DASHBOARD_YFINANCE_NEWS_ENABLED", False)
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
+DASHBOARD_YFINANCE_SUPPRESS_STDERR = get_env_bool("DASHBOARD_YFINANCE_SUPPRESS_STDERR", True)
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
 
@@ -433,13 +436,23 @@ BEARISH_WORDS = [
 # DATA FUNCTIONS
 # ======================================================
 
+def _run_dashboard_yfinance_quietly(function, *args, **kwargs):
+    """Hide noisy yfinance/curl stderr output from temporary hosted-feed resets."""
+    if not DASHBOARD_YFINANCE_SUPPRESS_STDERR:
+        return function(*args, **kwargs)
+    stderr_buffer = io.StringIO()
+    with contextlib.redirect_stderr(stderr_buffer):
+        return function(*args, **kwargs)
+
+
 @st.cache_data(ttl=60)
 def get_price_data(ticker, period="6mo"):
     if is_yfinance_disabled_ticker(ticker):
         return pd.DataFrame()
 
     try:
-        data = yf.download(
+        data = _run_dashboard_yfinance_quietly(
+            yf.download,
             ticker,
             period=period,
             auto_adjust=False,
