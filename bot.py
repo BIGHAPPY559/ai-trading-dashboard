@@ -241,7 +241,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.28.4-dashboard-readiness-cleanup"
+BOT_VERSION = "google-sheets-100-production-v32.29.1-evidence-milestone-alerts"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -632,6 +632,31 @@ BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE = max(0, min(get_env_float("BOT_AUT
 BOT_SEND_AUTOMATION_READINESS_V32_28_REPORT = get_env_bool("BOT_SEND_AUTOMATION_READINESS_V32_28_REPORT", True)
 BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_AUTOMATION_READINESS_V32_28_REPORT_INTERVAL_HOURS", 24))
 
+# v32.29 Pre-v33 Evidence Lock & Automation Gate.
+# Safety-only layer. This does not place trades or enable 3Commas. It blocks/logs
+# any accidental automation attempt until the evidence gate is fully passed.
+BOT_PRE_V33_EVIDENCE_LOCK_ENABLED = get_env_bool("BOT_PRE_V33_EVIDENCE_LOCK_ENABLED", True)
+BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK = get_env_bool("BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK", True)
+BOT_PRE_V33_MANUAL_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_MANUAL_UNLOCK_PHRASE", "")
+BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE", "I_UNDERSTAND_V33_RISK_ENABLE_PAPER_ONLY")
+BOT_SEND_PRE_V33_GATE_REPORT = get_env_bool("BOT_SEND_PRE_V33_GATE_REPORT", True)
+BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS", 24))
+
+# v32.29.1 Evidence Milestone Alerts.
+# Notification-only layer. It sends one Discord/checkpoint alert when closed paper trades
+# reach configured evidence milestones. It does not change scoring, paper trading, or automation.
+BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED = get_env_bool("BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED", True)
+BOT_SEND_EVIDENCE_MILESTONE_ALERTS = get_env_bool("BOT_SEND_EVIDENCE_MILESTONE_ALERTS", True)
+BOT_EVIDENCE_MILESTONES = sorted(set([max(1, int(str(item).strip())) for item in get_env_list("BOT_EVIDENCE_MILESTONES", ["25", "50", "75", "100"]) if str(item).strip().isdigit()]))
+
+# Future/accidental automation toggles are intentionally treated as unsafe until
+# the v32.29 gate passes. They are defined now so a mistaken Railway variable
+# cannot silently activate anything in a later merge.
+BOT_V33_AUTOMATION_ENABLED = get_env_bool("BOT_V33_AUTOMATION_ENABLED", False)
+BOT_3COMMAS_PAPER_AUTOMATION_ENABLED = get_env_bool("BOT_3COMMAS_PAPER_AUTOMATION_ENABLED", False)
+BOT_LIVE_AUTOMATION_ENABLED = get_env_bool("BOT_LIVE_AUTOMATION_ENABLED", False)
+BOT_REAL_AUTOMATION_ENABLED = get_env_bool("BOT_REAL_AUTOMATION_ENABLED", False)
+
 PAPER_TRADES_FILE = os.path.join(BOT_DATA_DIR, "paper_trades.csv")
 PAPER_EQUITY_FILE = os.path.join(BOT_DATA_DIR, "paper_trade_equity_curve.csv")
 PAPER_TRADE_SUMMARY_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_paper_trade_summary_log.txt")
@@ -641,6 +666,9 @@ OUTCOME_INTELLIGENCE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_outc
 EVIDENCE_LEARNING_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_learning_report_log.txt")
 EVIDENCE_INTEGRITY_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_integrity_report_log.txt")
 AUTOMATION_READINESS_V32_28_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_automation_readiness_v32_28_report_log.txt")
+PRE_V33_GATE_REPORT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_pre_v33_gate_report_log.txt")
+PRE_V33_GATE_AUDIT_LOG_FILE = os.path.join(BOT_DATA_DIR, "pre_v33_gate_audit_log.jsonl")
+EVIDENCE_MILESTONE_ALERT_LOG_FILE = os.path.join(BOT_DATA_DIR, "bot_sent_evidence_milestone_alerts_log.txt")
 
 PAPER_TRADE_HEADERS = [
     "trade_id", "ticker", "market", "signal", "entry_price", "current_price",
@@ -2200,6 +2228,336 @@ def send_automation_readiness_v32_28_report_if_due():
         mark_automation_readiness_v32_28_report_sent()
     return sent
 
+
+
+
+# ======================================================
+# v32.29 PRE-v33 EVIDENCE LOCK & AUTOMATION GATE
+# ======================================================
+
+def pre_v33_gate_report_key():
+    bucket_seconds = max(1, int(BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS * 3600))
+    bucket = int(time.time() // bucket_seconds)
+    return f"pre_v33_gate_{now_dt().strftime('%Y-%m-%d')}_{bucket}"
+
+
+def pre_v33_gate_report_already_sent():
+    return pre_v33_gate_report_key() in load_log(PRE_V33_GATE_REPORT_LOG_FILE)
+
+
+def mark_pre_v33_gate_report_sent():
+    items = load_log(PRE_V33_GATE_REPORT_LOG_FILE)
+    items.add(pre_v33_gate_report_key())
+    save_log(PRE_V33_GATE_REPORT_LOG_FILE, items)
+
+
+def pre_v33_manual_unlock_ok():
+    if not BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK:
+        return True
+    return str(BOT_PRE_V33_MANUAL_UNLOCK_PHRASE or "").strip() == str(BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE or "").strip()
+
+
+def pre_v33_accidental_automation_requested():
+    requested = []
+    for name, enabled in [
+        ("BOT_V33_AUTOMATION_ENABLED", BOT_V33_AUTOMATION_ENABLED),
+        ("BOT_3COMMAS_PAPER_AUTOMATION_ENABLED", BOT_3COMMAS_PAPER_AUTOMATION_ENABLED),
+        ("BOT_LIVE_AUTOMATION_ENABLED", BOT_LIVE_AUTOMATION_ENABLED),
+        ("BOT_REAL_AUTOMATION_ENABLED", BOT_REAL_AUTOMATION_ENABLED),
+    ]:
+        if enabled:
+            requested.append(name)
+    return requested
+
+
+def build_pre_v33_evidence_lock_report():
+    readiness = build_automation_readiness_v32_28_report()
+    integrity = readiness.get("integrity", build_evidence_integrity_report())
+    integrity_summary = integrity.get("summary", {})
+    stats = readiness.get("stats", {})
+    equity = readiness.get("equity", {})
+    blockers = list(readiness.get("blockers", []) or [])
+    requested_automation = pre_v33_accidental_automation_requested()
+    manual_unlock = pre_v33_manual_unlock_ok()
+
+    checks = [
+        {
+            "Gate": "100+ Closed Paper Trades",
+            "Current": stats.get("trades", 0),
+            "Required": BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES,
+            "Passed": stats.get("trades", 0) >= BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES,
+            "Why It Matters": "Prevents automation decisions from tiny samples.",
+        },
+        {
+            "Gate": "Win Rate",
+            "Current": f"{stats.get('win_rate', 0)}%",
+            "Required": f">= {BOT_AUTOMATION_READINESS_TARGET_WR}%",
+            "Passed": stats.get("win_rate", 0) >= BOT_AUTOMATION_READINESS_TARGET_WR,
+            "Why It Matters": "Confirms the system wins enough paper trades before execution automation.",
+        },
+        {
+            "Gate": "Profit Factor",
+            "Current": stats.get("profit_factor", 0),
+            "Required": f">= {BOT_AUTOMATION_READINESS_TARGET_PF}",
+            "Passed": stats.get("profit_factor", 0) >= BOT_AUTOMATION_READINESS_TARGET_PF,
+            "Why It Matters": "Winners must meaningfully exceed losers.",
+        },
+        {
+            "Gate": "Positive Equity Curve",
+            "Current": "YES" if equity.get("positive_equity") else "NO",
+            "Required": "YES",
+            "Passed": bool(equity.get("positive_equity")),
+            "Why It Matters": "The paper strategy must be net profitable before automation.",
+        },
+        {
+            "Gate": "Automation Readiness Score",
+            "Current": readiness.get("score", 0),
+            "Required": f">= {BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE}",
+            "Passed": readiness.get("score", 0) >= BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE,
+            "Why It Matters": "Uses the v32.28 source-of-truth readiness engine.",
+        },
+        {
+            "Gate": "Evidence Health Score",
+            "Current": integrity_summary.get("health_score", 0),
+            "Required": f">= {BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE}",
+            "Passed": integrity_summary.get("health_score", 0) >= BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE,
+            "Why It Matters": "Evidence must be clean, not just profitable.",
+        },
+        {
+            "Gate": "High Integrity Issues",
+            "Current": integrity_summary.get("high_issues", 0),
+            "Required": "0",
+            "Passed": int(integrity_summary.get("high_issues", 0) or 0) == 0,
+            "Why It Matters": "Prevents automation from using corrupted trade records.",
+        },
+        {
+            "Gate": "Manual Unlock Phrase",
+            "Current": "SET" if BOT_PRE_V33_MANUAL_UNLOCK_PHRASE else "NOT SET",
+            "Required": "SET" if BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK else "OPTIONAL",
+            "Passed": manual_unlock,
+            "Why It Matters": "Prevents accidental v33 activation from an environment-variable mistake.",
+        },
+    ]
+
+    for check in checks:
+        if not check["Passed"]:
+            blockers.append(f"{check['Gate']} not passed.")
+
+    evidence_passed = all(check["Passed"] for check in checks[:-1])
+    gate_unlocked = bool(BOT_PRE_V33_EVIDENCE_LOCK_ENABLED and evidence_passed and manual_unlock and not blockers)
+    automation_blocked = bool(requested_automation and not gate_unlocked)
+
+    if not BOT_PRE_V33_EVIDENCE_LOCK_ENABLED:
+        status = "DISABLED"
+        recommendation = "Pre-v33 Evidence Lock is disabled. Re-enable before any automation work."
+    elif gate_unlocked:
+        status = "UNLOCKED_FOR_V33_PAPER_PLANNING"
+        recommendation = "Evidence gate passed and manual unlock is present. You may plan v33 paper automation, but do not enable live automation."
+    elif automation_blocked:
+        status = "BLOCKING_ACCIDENTAL_AUTOMATION"
+        recommendation = "Automation variable detected but the pre-v33 evidence gate is locked. Remove the automation variable and keep collecting evidence."
+    else:
+        status = "LOCKED_COLLECT_EVIDENCE"
+        recommendation = "Do not build or enable v33 yet. Keep collecting closed paper trades until every gate passes."
+
+    return {
+        "status": status,
+        "locked": BOT_PRE_V33_EVIDENCE_LOCK_ENABLED and not gate_unlocked,
+        "gate_unlocked": gate_unlocked,
+        "automation_blocked": automation_blocked,
+        "requested_automation": requested_automation,
+        "manual_unlock_ok": manual_unlock,
+        "checks": checks,
+        "passed_checks": sum(1 for check in checks if check["Passed"]),
+        "total_checks": len(checks),
+        "readiness_score": readiness.get("score", 0),
+        "evidence_health": integrity_summary.get("health_score", 0),
+        "closed_trades": stats.get("trades", 0),
+        "win_rate": stats.get("win_rate", 0),
+        "profit_factor": stats.get("profit_factor", 0),
+        "positive_equity": bool(equity.get("positive_equity")),
+        "blockers": list(dict.fromkeys(blockers))[:12],
+        "recommendation": recommendation,
+    }
+
+
+def append_pre_v33_gate_audit(report):
+    try:
+        ensure_data_dir()
+        record = {
+            "time": now_text(),
+            "version": BOT_VERSION,
+            "status": report.get("status"),
+            "locked": report.get("locked"),
+            "gate_unlocked": report.get("gate_unlocked"),
+            "automation_blocked": report.get("automation_blocked"),
+            "requested_automation": report.get("requested_automation", []),
+            "passed_checks": report.get("passed_checks"),
+            "total_checks": report.get("total_checks"),
+            "readiness_score": report.get("readiness_score"),
+            "evidence_health": report.get("evidence_health"),
+            "closed_trades": report.get("closed_trades"),
+            "blockers": report.get("blockers", []),
+        }
+        with open(PRE_V33_GATE_AUDIT_LOG_FILE, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record, sort_keys=True) + "\n")
+    except Exception as error:
+        log(f"Pre-v33 gate audit log error: {error}")
+
+
+def log_pre_v33_evidence_lock_report():
+    report = build_pre_v33_evidence_lock_report()
+    log(
+        f"Pre-v33 Evidence Lock v32.29: status {report.get('status')} | "
+        f"passed {report.get('passed_checks')}/{report.get('total_checks')} | "
+        f"readiness {report.get('readiness_score')}/100 | closed {report.get('closed_trades')} | "
+        f"blocked={report.get('automation_blocked')}"
+    )
+    if report.get("requested_automation"):
+        log("Pre-v33 automation request detected: " + ", ".join(report.get("requested_automation", [])))
+    for blocker in report.get("blockers", [])[:6]:
+        log(f"Pre-v33 gate blocker: {blocker}")
+    append_pre_v33_gate_audit(report)
+    return report
+
+
+def send_pre_v33_gate_report_if_due():
+    if not BOT_SEND_PRE_V33_GATE_REPORT:
+        return False
+    if pre_v33_gate_report_already_sent():
+        log(f"Pre-v33 gate report skipped: cooldown active for {BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS} hours.")
+        return False
+    webhook_url = get_top_signals_webhook() or get_backtest_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Pre-v33 gate report skipped: no scorecard/heartbeat webhook available.")
+        return False
+    report = build_pre_v33_evidence_lock_report()
+    checks_text = "\n".join([f"{'✅' if row['Passed'] else '❌'} {row['Gate']}: {row['Current']} / {row['Required']}" for row in report.get("checks", [])])
+    fields = [
+        {"name": "Gate Status", "value": f"{report.get('status')} | Passed {report.get('passed_checks')}/{report.get('total_checks')}", "inline": False},
+        {"name": "Key Metrics", "value": f"Closed {report.get('closed_trades')} | WR {report.get('win_rate')}% | PF {report.get('profit_factor')} | Readiness {report.get('readiness_score')}/100 | Health {report.get('evidence_health')}/100", "inline": False},
+        {"name": "Checklist", "value": compact_text(checks_text or "No checklist rows.", 1000), "inline": False},
+        {"name": "Automation Request", "value": ", ".join(report.get("requested_automation", [])) if report.get("requested_automation") else "None detected", "inline": False},
+        {"name": "Recommendation", "value": compact_text(report.get("recommendation", "Keep collecting evidence."), 1000), "inline": False},
+        {"name": "Time", "value": now_text(), "inline": False},
+    ]
+    color = 65280 if report.get("gate_unlocked") else 16711680 if report.get("automation_blocked") else 16776960
+    sent = send_discord_embed(webhook_url, "🔒 v32.29 Pre-v33 Evidence Lock", color, fields)
+    if sent:
+        mark_pre_v33_gate_report_sent()
+    return sent
+
+
+def assert_pre_v33_automation_allowed(source="unknown"):
+    """Future v33 code should call this before creating any 3Commas/paper automation orders."""
+    report = build_pre_v33_evidence_lock_report()
+    if report.get("gate_unlocked"):
+        return True, "pre-v33 gate unlocked"
+    log(f"Pre-v33 gate blocked automation from {source}: {report.get('recommendation')}")
+    append_pre_v33_gate_audit(report)
+    return False, report.get("recommendation", "pre-v33 gate locked")
+
+
+# ======================================================
+# v32.29.1 EVIDENCE MILESTONE ALERTS
+# ======================================================
+
+def evidence_milestone_alert_key(milestone):
+    return f"evidence_milestone_closed_{int(milestone)}"
+
+
+def evidence_milestone_alert_already_sent(milestone):
+    return evidence_milestone_alert_key(milestone) in load_log(EVIDENCE_MILESTONE_ALERT_LOG_FILE)
+
+
+def mark_evidence_milestone_alert_sent(milestone):
+    items = load_log(EVIDENCE_MILESTONE_ALERT_LOG_FILE)
+    items.add(evidence_milestone_alert_key(milestone))
+    save_log(EVIDENCE_MILESTONE_ALERT_LOG_FILE, items)
+
+
+def build_evidence_milestone_snapshot():
+    readiness = build_automation_readiness_v32_28_report()
+    integrity = readiness.get("integrity", build_evidence_integrity_report())
+    stats = readiness.get("stats", {})
+    equity = readiness.get("equity", {})
+    closed_trades = int(safe_float(stats.get("trades", 0), 0))
+    milestones = [int(item) for item in BOT_EVIDENCE_MILESTONES if int(item) > 0]
+    reached = [item for item in milestones if closed_trades >= item]
+    pending = [item for item in milestones if closed_trades < item]
+    next_milestone = pending[0] if pending else None
+    return {
+        "closed_trades": closed_trades,
+        "win_rate": stats.get("win_rate", 0),
+        "profit_factor": stats.get("profit_factor", 0),
+        "total_pnl": stats.get("total_pnl", 0),
+        "readiness_score": readiness.get("score", 0),
+        "readiness_status": readiness.get("status", "N/A"),
+        "evidence_health": integrity.get("summary", {}).get("health_score", 0),
+        "evidence_confidence": integrity.get("summary", {}).get("confidence", "N/A"),
+        "positive_equity": bool(equity.get("positive_equity")),
+        "equity_return_pct": equity.get("return_pct", equity.get("equity_return_pct", 0)),
+        "milestones": milestones,
+        "reached": reached,
+        "pending": pending,
+        "next_milestone": next_milestone,
+        "remaining_to_next": max(0, next_milestone - closed_trades) if next_milestone else 0,
+    }
+
+
+def log_evidence_milestone_status():
+    if not BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED:
+        log("Evidence milestone alerts v32.29.1 disabled.")
+        return None
+    snapshot = build_evidence_milestone_snapshot()
+    next_milestone = snapshot.get("next_milestone")
+    if next_milestone:
+        log(
+            f"Evidence Milestones v32.29.1: closed {snapshot.get('closed_trades')} | "
+            f"next {next_milestone} | remaining {snapshot.get('remaining_to_next')} | "
+            f"WR {snapshot.get('win_rate')}% | PF {snapshot.get('profit_factor')} | "
+            f"readiness {snapshot.get('readiness_score')}/100"
+        )
+    else:
+        log(
+            f"Evidence Milestones v32.29.1: all configured milestones reached | "
+            f"closed {snapshot.get('closed_trades')} | WR {snapshot.get('win_rate')}% | "
+            f"PF {snapshot.get('profit_factor')} | readiness {snapshot.get('readiness_score')}/100"
+        )
+    return snapshot
+
+
+def send_evidence_milestone_alerts_if_due():
+    if not (BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED and BOT_SEND_EVIDENCE_MILESTONE_ALERTS):
+        return False
+    webhook_url = get_top_signals_webhook() or get_backtest_webhook() or get_heartbeat_webhook()
+    if not webhook_url:
+        log("Evidence milestone alert skipped: no scorecard/heartbeat webhook available.")
+        return False
+
+    snapshot = build_evidence_milestone_snapshot()
+    sent_any = False
+    for milestone in snapshot.get("reached", []):
+        if evidence_milestone_alert_already_sent(milestone):
+            continue
+        next_text = "All configured milestones reached" if not snapshot.get("next_milestone") else f"Next: {snapshot.get('next_milestone')} closed trades | Remaining: {snapshot.get('remaining_to_next')}"
+        fields = [
+            {"name": "Milestone Reached", "value": f"{milestone} closed paper trades", "inline": False},
+            {"name": "Performance", "value": f"Closed {snapshot.get('closed_trades')} | WR {snapshot.get('win_rate')}% | PF {snapshot.get('profit_factor')} | P/L ${snapshot.get('total_pnl')}", "inline": False},
+            {"name": "Evidence / Readiness", "value": f"Readiness {snapshot.get('readiness_score')}/100 ({snapshot.get('readiness_status')}) | Health {snapshot.get('evidence_health')}/100 ({snapshot.get('evidence_confidence')})", "inline": False},
+            {"name": "Equity", "value": f"Positive Equity: {'YES' if snapshot.get('positive_equity') else 'NO'} | Return {snapshot.get('equity_return_pct')}%", "inline": False},
+            {"name": "Next Step", "value": next_text, "inline": False},
+            {"name": "Mode", "value": "Notification-only. No trade logic changed and v33 remains locked until the evidence gate passes.", "inline": False},
+            {"name": "Time", "value": now_text(), "inline": False},
+        ]
+        color = 65280 if milestone >= BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES else 16776960
+        sent = send_discord_embed(webhook_url, f"🏁 v32.29.1 Evidence Milestone Reached: {milestone} Closed Trades", color, fields)
+        if sent:
+            mark_evidence_milestone_alert_sent(milestone)
+            sent_any = True
+    if not sent_any:
+        log("Evidence milestone alerts: no new milestone crossed.")
+    return sent_any
 
 
 def send_daily_performance_report(scanned_rows, alerted_rows, candidates=0, sent_count=0, skipped_duplicates=0, ticker_errors=0, post_scan_errors=0, backtest_results=None):
@@ -8944,6 +9302,16 @@ def run_scan():
     _, step_error = run_safe_step("Automation Readiness v32.28", log_automation_readiness_v32_28_report)
     post_scan_errors += int(step_error)
     _, step_error = run_safe_step("Automation Readiness v32.28 Discord report", send_automation_readiness_v32_28_report_if_due)
+    post_scan_errors += int(step_error)
+
+    _, step_error = run_safe_step("Pre-v33 Evidence Lock v32.29", log_pre_v33_evidence_lock_report)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Pre-v33 Evidence Lock Discord report", send_pre_v33_gate_report_if_due)
+    post_scan_errors += int(step_error)
+
+    _, step_error = run_safe_step("Evidence Milestone status v32.29.1", log_evidence_milestone_status)
+    post_scan_errors += int(step_error)
+    _, step_error = run_safe_step("Evidence Milestone Discord alerts v32.29.1", send_evidence_milestone_alerts_if_due)
     post_scan_errors += int(step_error)
 
     _, step_error = run_safe_step("Trade lifecycle Discord report", send_trade_lifecycle_report_if_due)
