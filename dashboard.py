@@ -126,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.2_yfinance_connection_hardening"
+APP_VERSION = "v32.29.1.3_balanced_stock_watchlist"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -367,7 +367,7 @@ CRYPTO_TICKERS = [
 
 STOCK_TICKERS = [
     "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD",
-    "PLTR", "SPY", "QQQ"
+    "PLTR", "SPY", "QQQ", "NFLX", "CRWD", "PANW", "ARM", "SMCI"
 ]
 
 # v32.21.2 Yahoo Finance symbol guard. Mirrors bot.py so dashboard scans
@@ -436,11 +436,10 @@ BEARISH_WORDS = [
 # DATA FUNCTIONS
 # ======================================================
 
-def run_dashboard_yfinance_quietly(function, *args, **kwargs):
+def _run_dashboard_yfinance_quietly(function, *args, **kwargs):
     """Hide noisy yfinance/curl stderr output from temporary hosted-feed resets."""
     if not DASHBOARD_YFINANCE_SUPPRESS_STDERR:
         return function(*args, **kwargs)
-
     stderr_buffer = io.StringIO()
     with contextlib.redirect_stderr(stderr_buffer):
         return function(*args, **kwargs)
@@ -452,7 +451,7 @@ def get_price_data(ticker, period="6mo"):
         return pd.DataFrame()
 
     try:
-        data = run_dashboard_yfinance_quietly(
+        data = _run_dashboard_yfinance_quietly(
             yf.download,
             ticker,
             period=period,

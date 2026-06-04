@@ -52,7 +52,7 @@ CRYPTO_TICKERS = [
 
 STOCK_TICKERS = [
     "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD",
-    "PLTR", "SPY", "QQQ"
+    "PLTR", "SPY", "QQQ", "NFLX", "CRWD", "PANW", "ARM", "SMCI"
 ]
 
 ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
@@ -244,7 +244,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.29.1.2-yfinance-connection-hardening"
+BOT_VERSION = "google-sheets-100-production-v32.29.1.3-balanced-stock-watchlist"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -479,12 +479,6 @@ YFINANCE_TICKER_DELAY_SECONDS = max(0, get_env_float("YFINANCE_TICKER_DELAY_SECO
 YFINANCE_HISTORY_RETRIES = max(0, get_env_int("YFINANCE_HISTORY_RETRIES", 2))
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
 YFINANCE_USE_HISTORY_FALLBACK = get_env_bool("YFINANCE_USE_HISTORY_FALLBACK", False)
-
-# v32.29.1.2 yfinance connection hardening.
-# Suppresses noisy yfinance/curl stderr lines for temporary hosted-feed resets while preserving real bot error handling.
-BOT_YFINANCE_SUPPRESS_STDERR = get_env_bool("BOT_YFINANCE_SUPPRESS_STDERR", True)
-BOT_YFINANCE_BACKOFF_SECONDS = max(0, get_env_float("BOT_YFINANCE_BACKOFF_SECONDS", 1.5))
-
 BOT_SLEEP_CHUNK_SECONDS = max(5, get_env_int("BOT_SLEEP_CHUNK_SECONDS", 30))
 LOG_MAX_ITEMS = max(100, get_env_int("BOT_LOG_MAX_ITEMS", 5000))
 BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
@@ -650,6 +644,11 @@ BOT_PRE_V33_MANUAL_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_MANUAL_UNLOCK_PHRASE",
 BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE", "I_UNDERSTAND_V33_RISK_ENABLE_PAPER_ONLY")
 BOT_SEND_PRE_V33_GATE_REPORT = get_env_bool("BOT_SEND_PRE_V33_GATE_REPORT", True)
 BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS = max(1, get_env_float("BOT_PRE_V33_GATE_REPORT_INTERVAL_HOURS", 24))
+
+# v32.29.1.2 yfinance connection hardening.
+# Suppresses noisy yfinance/curl stderr lines for temporary connection resets while preserving real bot error handling.
+BOT_YFINANCE_SUPPRESS_STDERR = get_env_bool("BOT_YFINANCE_SUPPRESS_STDERR", True)
+BOT_YFINANCE_BACKOFF_SECONDS = max(0, get_env_float("BOT_YFINANCE_BACKOFF_SECONDS", 1.5))
 
 # v32.29.1 Evidence Milestone Alerts.
 # Notification-only layer. It sends one Discord/checkpoint alert when closed paper trades
@@ -2695,12 +2694,10 @@ def normalize_price_data(data):
     return normalize_numeric_ohlcv(data)
 
 
-
-def run_yfinance_quietly(function, *args, **kwargs):
-    """Run yfinance calls while hiding noisy curl stderr from temporary hosted-feed resets."""
+def _run_yfinance_quietly(function, *args, **kwargs):
+    """Run yfinance calls while hiding noisy curl stderr lines from temporary feed resets."""
     if not BOT_YFINANCE_SUPPRESS_STDERR:
         return function(*args, **kwargs)
-
     stderr_buffer = io.StringIO()
     with contextlib.redirect_stderr(stderr_buffer):
         return function(*args, **kwargs)
@@ -2718,7 +2715,7 @@ def get_price_data(ticker, period="1y", interval="1d"):
     # some hosted environments, so it is used only as a fallback.
     for attempt in range(YFINANCE_HISTORY_RETRIES + 1):
         try:
-            data = run_yfinance_quietly(
+            data = _run_yfinance_quietly(
                 yf.download,
                 ticker,
                 period=period,
@@ -2731,6 +2728,8 @@ def get_price_data(ticker, period="1y", interval="1d"):
             data = normalize_price_data(data)
 
             if not data.empty:
+                if attempt > 0:
+                    log(f"{ticker}: price data recovered on download attempt {attempt + 1}.")
                 return data
 
             log(f"{ticker}: no price data returned on download attempt {attempt + 1}.")
@@ -2740,10 +2739,16 @@ def get_price_data(ticker, period="1y", interval="1d"):
 
         if YFINANCE_USE_HISTORY_FALLBACK and not SHUTDOWN_REQUESTED:
             try:
-                data = run_yfinance_quietly(yf.Ticker(ticker).history, period=period, interval=interval, auto_adjust=False)
+                data = _run_yfinance_quietly(
+                    yf.Ticker(ticker).history,
+                    period=period,
+                    interval=interval,
+                    auto_adjust=False
+                )
                 data = normalize_price_data(data)
 
                 if not data.empty:
+                    log(f"{ticker}: price data recovered through history fallback attempt {attempt + 1}.")
                     return data
 
                 log(f"{ticker}: no price data returned on history fallback attempt {attempt + 1}.")
@@ -2752,7 +2757,8 @@ def get_price_data(ticker, period="1y", interval="1d"):
                 log(f"Price data history fallback error for {ticker} attempt {attempt + 1}: {error}")
 
         if attempt < YFINANCE_HISTORY_RETRIES and not SHUTDOWN_REQUESTED:
-            interruptible_sleep(BOT_YFINANCE_BACKOFF_SECONDS)
+            backoff = BOT_YFINANCE_BACKOFF_SECONDS * (attempt + 1)
+            interruptible_sleep(backoff)
 
     return pd.DataFrame()
 
@@ -9517,6 +9523,8 @@ def main():
     log(f"YFinance history retries: {YFINANCE_HISTORY_RETRIES}")
     log(f"YFinance timeout seconds: {YFINANCE_TIMEOUT_SECONDS}")
     log(f"YFinance history fallback: {YFINANCE_USE_HISTORY_FALLBACK}")
+    log(f"YFinance stderr suppression: {BOT_YFINANCE_SUPPRESS_STDERR}")
+    log(f"YFinance retry backoff seconds: {BOT_YFINANCE_BACKOFF_SECONDS}")
     log(f"Finnhub news max tickers per scan: {FINNHUB_NEWS_MAX_TICKERS_PER_SCAN}")
     log(f"Finnhub news delay seconds: {FINNHUB_NEWS_DELAY_SECONDS}")
     log(f"Error alerts enabled: {BOT_SEND_ERROR_ALERTS}")
