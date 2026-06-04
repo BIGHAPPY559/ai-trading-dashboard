@@ -436,10 +436,11 @@ BEARISH_WORDS = [
 # DATA FUNCTIONS
 # ======================================================
 
-def _run_dashboard_yfinance_quietly(function, *args, **kwargs):
+def run_dashboard_yfinance_quietly(function, *args, **kwargs):
     """Hide noisy yfinance/curl stderr output from temporary hosted-feed resets."""
     if not DASHBOARD_YFINANCE_SUPPRESS_STDERR:
         return function(*args, **kwargs)
+
     stderr_buffer = io.StringIO()
     with contextlib.redirect_stderr(stderr_buffer):
         return function(*args, **kwargs)
@@ -451,7 +452,7 @@ def get_price_data(ticker, period="6mo"):
         return pd.DataFrame()
 
     try:
-        data = _run_dashboard_yfinance_quietly(
+        data = run_dashboard_yfinance_quietly(
             yf.download,
             ticker,
             period=period,
@@ -5406,4 +5407,3 @@ with settings_tab:
 
 st.divider()
 st.caption("AI Trading Dashboard | Stocks and Crypto Only | For education and paper trading, not financial advice.")
-sqa
