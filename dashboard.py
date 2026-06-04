@@ -89,6 +89,7 @@ st.dataframe = safe_streamlit_dataframe
 
 # ======================================================
 # PAGE SETUP
+# v32.29.1.1 Streamlit Width Compatibility Cleanup: all dataframe/table calls use width= instead of the deprecated container-width argument.
 # ======================================================
 
 st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
@@ -123,7 +124,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1_evidence_milestone_alerts"
+APP_VERSION = "v32.29.1.1_streamlit_width_compatibility_cleanup"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -231,21 +232,6 @@ BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE = get_env_float("BOT_EVIDENCE_INTEGRI
 BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS = get_env_float("BOT_EVIDENCE_INTEGRITY_STALE_OPEN_DAYS", 10)
 BOT_AUTOMATION_READINESS_V32_28_ENABLED = get_env_bool("BOT_AUTOMATION_READINESS_V32_28_ENABLED", True)
 BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE = get_env_float("BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE", 80)
-
-# v32.29 Pre-v33 Evidence Lock & Automation Gate dashboard settings.
-BOT_PRE_V33_EVIDENCE_LOCK_ENABLED = get_env_bool("BOT_PRE_V33_EVIDENCE_LOCK_ENABLED", True)
-BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK = get_env_bool("BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK", True)
-BOT_PRE_V33_MANUAL_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_MANUAL_UNLOCK_PHRASE", "")
-BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE = os.getenv("BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE", "I_UNDERSTAND_V33_RISK_ENABLE_PAPER_ONLY")
-BOT_V33_AUTOMATION_ENABLED = get_env_bool("BOT_V33_AUTOMATION_ENABLED", False)
-BOT_3COMMAS_PAPER_AUTOMATION_ENABLED = get_env_bool("BOT_3COMMAS_PAPER_AUTOMATION_ENABLED", False)
-BOT_LIVE_AUTOMATION_ENABLED = get_env_bool("BOT_LIVE_AUTOMATION_ENABLED", False)
-BOT_REAL_AUTOMATION_ENABLED = get_env_bool("BOT_REAL_AUTOMATION_ENABLED", False)
-
-# v32.29.1 Evidence Milestone Alerts dashboard settings.
-BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED = get_env_bool("BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED", True)
-BOT_SEND_EVIDENCE_MILESTONE_ALERTS = get_env_bool("BOT_SEND_EVIDENCE_MILESTONE_ALERTS", True)
-BOT_EVIDENCE_MILESTONES = sorted(set([max(1, int(str(item).strip())) for item in get_env_list("BOT_EVIDENCE_MILESTONES", ["25", "50", "75", "100"]) if str(item).strip().isdigit()]))
 
 # v32.13 Trade Lifecycle Analytics dashboard settings.
 BOT_TRADE_LIFECYCLE_MIN_SAMPLE = get_env_int("BOT_TRADE_LIFECYCLE_MIN_SAMPLE", 5)
@@ -3439,132 +3425,10 @@ def build_dashboard_automation_readiness_v32_28_report(trades_df, equity_df):
 
 
 # ======================================================
-# v32.29 PRE-v33 EVIDENCE LOCK DASHBOARD HELPERS
-# ======================================================
-
-def dashboard_pre_v33_manual_unlock_ok():
-    if not BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK:
-        return True
-    return str(BOT_PRE_V33_MANUAL_UNLOCK_PHRASE or "").strip() == str(BOT_PRE_V33_REQUIRED_UNLOCK_PHRASE or "").strip()
-
-
-def dashboard_pre_v33_requested_automation():
-    requested = []
-    for name, enabled in [
-        ("BOT_V33_AUTOMATION_ENABLED", BOT_V33_AUTOMATION_ENABLED),
-        ("BOT_3COMMAS_PAPER_AUTOMATION_ENABLED", BOT_3COMMAS_PAPER_AUTOMATION_ENABLED),
-        ("BOT_LIVE_AUTOMATION_ENABLED", BOT_LIVE_AUTOMATION_ENABLED),
-        ("BOT_REAL_AUTOMATION_ENABLED", BOT_REAL_AUTOMATION_ENABLED),
-    ]:
-        if enabled:
-            requested.append(name)
-    return requested
-
-
-def build_dashboard_pre_v33_evidence_lock_report(trades_df, equity_df):
-    readiness = build_dashboard_automation_readiness_v32_28_report(trades_df, equity_df)
-    integrity = readiness.get("integrity", build_dashboard_evidence_integrity_report(trades_df))
-    integrity_summary = integrity.get("summary", {})
-    metrics = paper_trade_metrics(trades_df)
-    equity = calculate_equity_curve_stats(equity_df)
-    requested_automation = dashboard_pre_v33_requested_automation()
-    manual_unlock = dashboard_pre_v33_manual_unlock_ok()
-
-    rows = [
-        {"Gate": "100+ Closed Paper Trades", "Current": metrics.get("total_closed", 0), "Required": BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, "Passed": metrics.get("total_closed", 0) >= BOT_AUTOMATION_READINESS_MIN_CLOSED_TRADES, "Why It Matters": "Prevents v33 from relying on tiny samples."},
-        {"Gate": "Win Rate", "Current": f"{metrics.get('win_rate', 0)}%", "Required": f">= {BOT_AUTOMATION_READINESS_TARGET_WR}%", "Passed": metrics.get("win_rate", 0) >= BOT_AUTOMATION_READINESS_TARGET_WR, "Why It Matters": "Paper-trade win rate must meet the roadmap target."},
-        {"Gate": "Profit Factor", "Current": metrics.get("profit_factor", 0), "Required": f">= {BOT_AUTOMATION_READINESS_TARGET_PF}", "Passed": metrics.get("profit_factor", 0) >= BOT_AUTOMATION_READINESS_TARGET_PF, "Why It Matters": "Gross winners must exceed losers enough to justify automation."},
-        {"Gate": "Positive Equity Curve", "Current": "YES" if equity.get("positive_equity") else "NO", "Required": "YES", "Passed": bool(equity.get("positive_equity")), "Why It Matters": "The paper system must be net profitable."},
-        {"Gate": "Automation Readiness Score", "Current": readiness.get("score", 0), "Required": f">= {BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE}", "Passed": readiness.get("score", 0) >= BOT_AUTOMATION_READINESS_V32_28_TARGET_SCORE, "Why It Matters": "Uses the v32.28 readiness engine as source of truth."},
-        {"Gate": "Evidence Health Score", "Current": integrity_summary.get("health_score", 0), "Required": f">= {BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE}", "Passed": integrity_summary.get("health_score", 0) >= BOT_EVIDENCE_INTEGRITY_TARGET_HEALTH_SCORE, "Why It Matters": "Evidence must be clean before execution automation."},
-        {"Gate": "High Integrity Issues", "Current": integrity_summary.get("high_issues", 0), "Required": "0", "Passed": int(integrity_summary.get("high_issues", 0) or 0) == 0, "Why It Matters": "Blocks automation if trade records are corrupted."},
-        {"Gate": "Manual Unlock Phrase", "Current": "SET" if BOT_PRE_V33_MANUAL_UNLOCK_PHRASE else "NOT SET", "Required": "SET" if BOT_PRE_V33_REQUIRE_MANUAL_UNLOCK else "OPTIONAL", "Passed": manual_unlock, "Why It Matters": "Prevents accidental v33 activation from a Railway variable mistake."},
-    ]
-
-    blockers = [f"{row['Gate']} not passed." for row in rows if not row["Passed"]]
-    gate_unlocked = bool(BOT_PRE_V33_EVIDENCE_LOCK_ENABLED and all(row["Passed"] for row in rows) and not blockers)
-    automation_blocked = bool(requested_automation and not gate_unlocked)
-
-    if not BOT_PRE_V33_EVIDENCE_LOCK_ENABLED:
-        status = "DISABLED"
-        recommendation = "Re-enable BOT_PRE_V33_EVIDENCE_LOCK_ENABLED before any v33 work."
-    elif gate_unlocked:
-        status = "UNLOCKED FOR v33 PAPER PLANNING"
-        recommendation = "Gate passed. You can plan v33 paper automation, but live automation remains out of scope."
-    elif automation_blocked:
-        status = "BLOCKING ACCIDENTAL AUTOMATION"
-        recommendation = "Automation variable detected while gate is locked. Remove it and keep collecting evidence."
-    else:
-        status = "LOCKED - COLLECT EVIDENCE"
-        recommendation = "Do not build or enable v33 yet. Keep collecting closed paper trades until every gate passes."
-
-    return {
-        "status": status,
-        "locked": BOT_PRE_V33_EVIDENCE_LOCK_ENABLED and not gate_unlocked,
-        "gate_unlocked": gate_unlocked,
-        "automation_blocked": automation_blocked,
-        "requested_automation": requested_automation,
-        "passed_checks": sum(1 for row in rows if row["Passed"]),
-        "total_checks": len(rows),
-        "readiness_score": readiness.get("score", 0),
-        "evidence_health": integrity_summary.get("health_score", 0),
-        "closed_trades": metrics.get("total_closed", 0),
-        "win_rate": metrics.get("win_rate", 0),
-        "profit_factor": metrics.get("profit_factor", 0),
-        "positive_equity": bool(equity.get("positive_equity")),
-        "recommendation": recommendation,
-        "blockers": blockers[:12],
-        "rows": pd.DataFrame(rows),
-    }
-
-
-# ======================================================
 # TABS
 # ======================================================
 
-def build_dashboard_evidence_milestone_report(trades_df, equity_df):
-    trades_df = normalize_paper_trade_df(trades_df)
-    metrics = paper_trade_metrics(trades_df)
-    readiness = build_dashboard_automation_readiness_v32_28_report(trades_df, equity_df)
-    integrity = build_dashboard_evidence_integrity_report(trades_df)
-    equity = calculate_equity_curve_stats(equity_df)
-    closed_trades = int(metrics.get("total_closed", 0))
-    milestones = [int(item) for item in BOT_EVIDENCE_MILESTONES if int(item) > 0]
-    reached = [item for item in milestones if closed_trades >= item]
-    pending = [item for item in milestones if closed_trades < item]
-    next_milestone = pending[0] if pending else None
-    rows = []
-    for milestone in milestones:
-        rows.append({
-            "Milestone": f"{milestone} closed trades",
-            "Status": "Reached" if closed_trades >= milestone else "Pending",
-            "Current Closed": closed_trades,
-            "Remaining": max(0, milestone - closed_trades),
-            "Win Rate %": metrics.get("win_rate", 0),
-            "Profit Factor": metrics.get("profit_factor", 0),
-            "Readiness Score": readiness.get("score", 0),
-            "Evidence Health": integrity.get("summary", {}).get("health_score", 0),
-        })
-    return {
-        "closed_trades": closed_trades,
-        "win_rate": metrics.get("win_rate", 0),
-        "profit_factor": metrics.get("profit_factor", 0),
-        "total_pnl": metrics.get("total_pnl", 0),
-        "readiness_score": readiness.get("score", 0),
-        "readiness_status": readiness.get("status", "N/A"),
-        "evidence_health": integrity.get("summary", {}).get("health_score", 0),
-        "evidence_confidence": integrity.get("summary", {}).get("confidence", "N/A"),
-        "positive_equity": equity.get("positive_equity", False),
-        "equity_return_pct": equity.get("equity_return_pct", 0),
-        "next_milestone": next_milestone,
-        "remaining_to_next": max(0, next_milestone - closed_trades) if next_milestone else 0,
-        "reached": reached,
-        "pending": pending,
-        "rows": pd.DataFrame(rows),
-    }
-
-
-account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_v32_28_tab, pre_v33_gate_tab, evidence_milestone_tab, evidence_integrity_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
+account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab, performance_gate_tab, automation_readiness_v32_28_tab, evidence_integrity_tab, trade_lifecycle_tab, evidence_center_tab, trade_journal_tab, smart_alert_filter_tab, auto_learning_tab, dynamic_filtering_tab, outcome_attribution_tab, setup_db_tab, regime_performance_tab, confidence_calibration_tab, signal_intelligence_tab, trade_intelligence_tab, adaptive_filters_tab, setup_intelligence_tab, crypto_tab, stock_tab, scanner_tab, alerts_tab, backtest_tab, bot_status_tab, settings_tab = st.tabs([
     "Paper Account",
     "Open Trades",
     "Closed Trades",
@@ -3572,8 +3436,6 @@ account_tab, open_trades_tab, closed_trades_tab, paper_quality_tab, decision_tab
     "Decision Dashboard",
     "Performance Gate",
     "Automation Readiness",
-    "Pre-v33 Gate",
-    "Evidence Milestones",
     "Evidence Integrity",
     "Trade Lifecycle",
     "Evidence Center",
@@ -4236,44 +4098,6 @@ with adaptive_filters_tab:
 # v32.12 AUTOMATION READINESS TAB
 # ======================================================
 
-with evidence_milestone_tab:
-    st.header("v32.29.1 Evidence Milestone Alerts")
-    st.caption("Notification-only checkpoint tracker for 25 / 50 / 75 / 100 closed paper trades. This does not change trade logic or enable v33.")
-
-    milestone_report = build_dashboard_evidence_milestone_report(paper_trades_df, equity_curve_df)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Closed Trades", milestone_report.get("closed_trades", 0))
-    col2.metric("Next Milestone", milestone_report.get("next_milestone") or "Complete")
-    col3.metric("Remaining", milestone_report.get("remaining_to_next", 0))
-    col4.metric("Milestones Reached", f"{len(milestone_report.get('reached', []))}/{len(BOT_EVIDENCE_MILESTONES)}")
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Win Rate", f"{milestone_report.get('win_rate', 0)}%")
-    col2.metric("Profit Factor", milestone_report.get("profit_factor", 0))
-    col3.metric("Readiness", f"{milestone_report.get('readiness_score', 0)}/100")
-    col4.metric("Evidence Health", f"{milestone_report.get('evidence_health', 0)}/100")
-
-    if milestone_report.get("next_milestone"):
-        st.info(f"Next checkpoint: {milestone_report.get('next_milestone')} closed trades. Remaining: {milestone_report.get('remaining_to_next')}.")
-    else:
-        st.success("All configured evidence milestones have been reached. Keep using the v32.29 gate before v33.")
-
-    st.subheader("Milestone Checklist")
-    milestone_rows = milestone_report.get("rows", pd.DataFrame())
-    if milestone_rows is not None and not milestone_rows.empty:
-        st.dataframe(milestone_rows, use_container_width=True)
-    else:
-        st.info("No milestone rows available yet.")
-
-    st.subheader("Active Alert Settings")
-    st.dataframe(pd.DataFrame([
-        {"Setting": "BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED", "Value": BOT_EVIDENCE_MILESTONE_ALERTS_ENABLED},
-        {"Setting": "BOT_SEND_EVIDENCE_MILESTONE_ALERTS", "Value": BOT_SEND_EVIDENCE_MILESTONE_ALERTS},
-        {"Setting": "BOT_EVIDENCE_MILESTONES", "Value": ", ".join(str(item) for item in BOT_EVIDENCE_MILESTONES)},
-    ]), use_container_width=True)
-
-
 with evidence_integrity_tab:
     st.header("v32.27 Evidence Integrity Monitor")
     st.caption("Read-only audit. Checks whether paper-trade evidence is clean enough for learning and future automation.")
@@ -4336,61 +4160,6 @@ with automation_readiness_v32_28_tab:
     else:
         st.dataframe(detail, width="stretch")
 
-
-
-# ======================================================
-# v32.29 PRE-v33 EVIDENCE LOCK TAB
-# ======================================================
-
-with pre_v33_gate_tab:
-    st.header("v32.29 Pre-v33 Evidence Lock")
-    st.caption("Final safety gate before v33. This does not enable automation; it shows whether v33 paper automation is still locked.")
-
-    paper_trades_df = load_paper_trades_df()
-    equity_curve_df = load_paper_equity_df()
-    gate = build_dashboard_pre_v33_evidence_lock_report(paper_trades_df, equity_curve_df)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Gate Status", gate.get("status", "N/A"))
-    col2.metric("Checklist", f"{gate.get('passed_checks', 0)}/{gate.get('total_checks', 0)}")
-    col3.metric("Readiness", f"{gate.get('readiness_score', 0)}/100")
-    col4.metric("Evidence Health", f"{gate.get('evidence_health', 0)}/100")
-
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Closed Trades", gate.get("closed_trades", 0))
-    col6.metric("Win Rate", f"{gate.get('win_rate', 0)}%")
-    col7.metric("Profit Factor", gate.get("profit_factor", 0))
-    col8.metric("Automation Blocked", "YES" if gate.get("automation_blocked") else "NO")
-
-    if gate.get("gate_unlocked"):
-        st.success(gate.get("recommendation", "Gate unlocked."))
-    elif gate.get("automation_blocked"):
-        st.error(gate.get("recommendation", "Automation attempt blocked."))
-    else:
-        st.warning(gate.get("recommendation", "Gate locked."))
-
-    requested = gate.get("requested_automation", [])
-    st.subheader("Accidental Automation Kill Switch")
-    if requested:
-        st.error("Automation variable detected: " + ", ".join(requested))
-    else:
-        st.success("No v33/3Commas/live automation variables are enabled.")
-
-    st.subheader("v33 Checklist")
-    st.dataframe(gate.get("rows", pd.DataFrame()), width="stretch")
-
-    st.subheader("Current Blockers")
-    blockers = gate.get("blockers", [])
-    if blockers:
-        for blocker in blockers:
-            st.write(f"- {blocker}")
-    else:
-        st.success("No blockers detected.")
-
-    with st.expander("Manual Unlock Phrase"):
-        st.write("Only use this after the evidence gate passes and you are intentionally preparing v33 paper automation.")
-        st.code("BOT_PRE_V33_MANUAL_UNLOCK_PHRASE=I_UNDERSTAND_V33_RISK_ENABLE_PAPER_ONLY")
-        st.write("Do not add this while closed trades, WR, PF, equity, readiness, or evidence health are still below target.")
 
 
 with trade_lifecycle_tab:
@@ -5624,3 +5393,4 @@ with settings_tab:
 
 st.divider()
 st.caption("AI Trading Dashboard | Stocks and Crypto Only | For education and paper trading, not financial advice.")
+sqa

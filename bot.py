@@ -168,6 +168,7 @@ ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 
 # ======================================================
 # ENVIRONMENT VARIABLES
+# v32.29.1.1 Streamlit Width Compatibility Cleanup: bot logic unchanged; version aligned with dashboard cleanup deploy.
 # ======================================================
 
 TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL", "")
@@ -241,7 +242,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.29.1-evidence-milestone-alerts"
+BOT_VERSION = "google-sheets-100-production-v32.29.1.1-streamlit-width-compatibility-cleanup"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
