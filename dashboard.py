@@ -126,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.3_balanced_stock_watchlist"
+APP_VERSION = "v32.29.1.4_evidence_acceleration_watchlist"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -161,6 +161,7 @@ AUTO_NEWS_MAX_ARTICLES_PER_MARKET = get_env_int("AUTO_NEWS_MAX_ARTICLES_PER_MARK
 DASHBOARD_NEWS_SCORE_ENABLED = get_env_bool("DASHBOARD_NEWS_SCORE_ENABLED", False)
 DASHBOARD_YFINANCE_NEWS_ENABLED = get_env_bool("DASHBOARD_YFINANCE_NEWS_ENABLED", False)
 YFINANCE_TIMEOUT_SECONDS = max(5, get_env_int("YFINANCE_TIMEOUT_SECONDS", 20))
+# v32.29.1.2+ dashboard yfinance connection hardening.
 DASHBOARD_YFINANCE_SUPPRESS_STDERR = get_env_bool("DASHBOARD_YFINANCE_SUPPRESS_STDERR", True)
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "America/Los_Angeles")
 DISCORD_MESSAGE_LIMIT = max(500, min(get_env_int("DISCORD_MESSAGE_LIMIT", 1900), 2000))
@@ -360,17 +361,26 @@ def get_stock_market_status(current_dt):
 
 # Add or remove tickers here
 CRYPTO_TICKERS = [
-    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "HBAR-USD",
-    "AVAX-USD", "VET-USD", "ICP-USD", "ATOM-USD", "ALGO-USD", "XLM-USD",
-    "LINK-USD", "ONDO-USD", "INJ-USD", "SEI-USD"
+    'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD',
+    'ADA-USD', 'HBAR-USD', 'AVAX-USD', 'VET-USD',
+    'ICP-USD', 'ATOM-USD', 'ALGO-USD', 'XLM-USD',
+    'LINK-USD', 'ONDO-USD', 'INJ-USD', 'SEI-USD',
+    'DOGE-USD', 'NEAR-USD', 'FET-USD', 'RENDER-USD',
+    'SUI20947-USD'
 ]
 
 STOCK_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD",
-    "PLTR", "SPY", "QQQ", "NFLX", "CRWD", "PANW", "ARM", "SMCI"
+    'AAPL', 'MSFT', 'NVDA', 'TSLA',
+    'AMZN', 'GOOGL', 'META', 'AMD',
+    'PLTR', 'SPY', 'QQQ', 'NFLX',
+    'CRWD', 'PANW', 'ARM', 'SMCI',
+    'COIN', 'HOOD', 'RDDT', 'TSM',
+    'MU'
 ]
 
 # v32.21.2 Yahoo Finance symbol guard. Mirrors bot.py so dashboard scans
+# Note: Yahoo Finance uses SUI20947-USD for Sui. SUI-USD maps to a different/unsupported asset.
+# Note: RENDER-USD is used for Render; RNDR-USD remains disabled because it was historically noisy in logs.
 # do not waste time on tickers that repeatedly returned no yfinance data.
 BOT_SKIP_UNSUPPORTED_TICKERS = get_env_bool("BOT_SKIP_UNSUPPORTED_TICKERS", True)
 BOT_YFINANCE_DISABLED_TICKERS = get_env_list("BOT_YFINANCE_DISABLED_TICKERS", [
@@ -479,7 +489,7 @@ def get_news(ticker):
     if not DASHBOARD_YFINANCE_NEWS_ENABLED:
         return []
     try:
-        news = yf.Ticker(ticker).news
+        news = _run_dashboard_yfinance_quietly(lambda: yf.Ticker(ticker).news)
         if news is None:
             return []
         return news
