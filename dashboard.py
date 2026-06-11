@@ -126,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.4_evidence_acceleration_watchlist"
+APP_VERSION = "v32.29.1.5_evidence_throughput_cap"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -176,8 +176,9 @@ DASHBOARD_SHARED_STATUS_SYNC_ENABLED = get_env_bool("DASHBOARD_SHARED_STATUS_SYN
 DASHBOARD_SHARED_STATUS_PREFER_GOOGLE = get_env_bool("DASHBOARD_SHARED_STATUS_PREFER_GOOGLE", True)
 
 # v32.3 Paper Trade Quality dashboard settings.
+# v32.29.1.5: dashboard default mirrors bot max open paper trades increase from 10 to 15.
 # These mirror the v32.2 bot variables so the dashboard can show the active guardrails.
-BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10)
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 15)
 BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED = get_env_bool("BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED", True)
 BOT_PAPER_TRADE_MIN_BACKTEST_PF = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_PF", 1.0)
 BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE", 50)

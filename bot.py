@@ -253,7 +253,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.29.1.4-evidence-acceleration-watchlist"
+BOT_VERSION = "google-sheets-100-production-v32.29.1.5-evidence-throughput-cap"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -499,12 +499,14 @@ BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
 
 # ======================================================
 # v32 PAPER TRADE TRACKING SYSTEM
+# v32.29.1.5 Evidence Throughput Cap: default max open paper trades increased from 10 to 15.
+# Strategy, scoring, TP/SL, and v33 lock logic unchanged.
 # ======================================================
 
 BOT_PAPER_TRADING_ENABLED = get_env_bool("BOT_PAPER_TRADING_ENABLED", True)
 BOT_PAPER_TRADE_MONITOR_ENABLED = get_env_bool("BOT_PAPER_TRADE_MONITOR_ENABLED", True)
 BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER", 1))
-BOT_PAPER_TRADE_MAX_OPEN_TOTAL = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10))
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 15))
 BOT_PAPER_TRADE_STARTING_EQUITY = max(100, get_env_float("BOT_PAPER_TRADE_STARTING_EQUITY", BOT_ACCOUNT_SIZE))
 
 # v32.2 quality gate: paper trades should collect useful data without opening
