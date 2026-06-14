@@ -91,7 +91,7 @@ st.dataframe = safe_streamlit_dataframe
 
 # ======================================================
 # PAGE SETUP
-# v32.29.1.1 Streamlit Width Compatibility Cleanup: all dataframe/table calls use width= instead of the deprecated container-width argument.
+# v32.29.1.6 Confidence Floor Safety: dashboard default confidence floor raised from 75 to 78; Streamlit width cleanup preserved.
 # ======================================================
 
 st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
@@ -126,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.5_evidence_throughput_cap"
+APP_VERSION = "v32.29.1.6_confidence_floor_78"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -143,7 +143,7 @@ DASHBOARD_AUTO_SUMMARIES_ENABLED = get_env_bool("DASHBOARD_AUTO_SUMMARIES_ENABLE
 # Keep dashboard auto-alerts OFF by default because bot.py handles background alerts.
 # You can still use the dashboard's manual test/send buttons.
 AUTO_SIGNAL_ALERTS_ENABLED = get_env_bool("DASHBOARD_AUTO_SIGNAL_ALERTS_ENABLED", False)
-AUTO_SIGNAL_MIN_CONFIDENCE = get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75)
+AUTO_SIGNAL_MIN_CONFIDENCE = get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 78)
 AUTO_SIGNAL_CHECK_INTERVAL_MINUTES = get_env_int("AUTO_SIGNAL_CHECK_INTERVAL_MINUTES", 15)
 
 # Automatic market news newsletter.
@@ -176,7 +176,6 @@ DASHBOARD_SHARED_STATUS_SYNC_ENABLED = get_env_bool("DASHBOARD_SHARED_STATUS_SYN
 DASHBOARD_SHARED_STATUS_PREFER_GOOGLE = get_env_bool("DASHBOARD_SHARED_STATUS_PREFER_GOOGLE", True)
 
 # v32.3 Paper Trade Quality dashboard settings.
-# v32.29.1.5: dashboard default mirrors bot max open paper trades increase from 10 to 15.
 # These mirror the v32.2 bot variables so the dashboard can show the active guardrails.
 BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 15)
 BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED = get_env_bool("BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED", True)

@@ -179,7 +179,7 @@ ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 
 # ======================================================
 # ENVIRONMENT VARIABLES
-# v32.29.1.1 Streamlit Width Compatibility Cleanup: bot logic unchanged; version aligned with dashboard cleanup deploy.
+# v32.29.1.6 Confidence Floor Safety: default signal confidence floor raised from 75 to 78; evidence cap preserved at 15.
 # ======================================================
 
 TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL", "")
@@ -253,7 +253,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.29.1.5-evidence-throughput-cap"
+BOT_VERSION = "google-sheets-100-production-v32.29.1.6-confidence-floor-78"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -304,7 +304,7 @@ MIN_CONFIDENCE = max(
     min(
         get_env_float(
             "BOT_SIGNAL_MIN_CONFIDENCE",
-            get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75)
+            get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 78)
         ),
         100
     )
@@ -499,8 +499,6 @@ BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
 
 # ======================================================
 # v32 PAPER TRADE TRACKING SYSTEM
-# v32.29.1.5 Evidence Throughput Cap: default max open paper trades increased from 10 to 15.
-# Strategy, scoring, TP/SL, and v33 lock logic unchanged.
 # ======================================================
 
 BOT_PAPER_TRADING_ENABLED = get_env_bool("BOT_PAPER_TRADING_ENABLED", True)
