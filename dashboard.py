@@ -91,7 +91,7 @@ st.dataframe = safe_streamlit_dataframe
 
 # ======================================================
 # PAGE SETUP
-# v32.29.1.6 Confidence Floor Safety: dashboard default confidence floor raised from 75 to 78; Streamlit width cleanup preserved.
+# v32.29.1.1 Streamlit Width Compatibility Cleanup: all dataframe/table calls use width= instead of the deprecated container-width argument.
 # ======================================================
 
 st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
@@ -126,7 +126,7 @@ PAPER_EQUITY_FILE = os.path.join(DATA_DIR, "paper_trade_equity_curve.csv")
 # SETTINGS
 # ======================================================
 
-APP_VERSION = "v32.29.1.6_confidence_floor_78"
+APP_VERSION = "v32.29.1.7_evidence_watchlist_expansion"
 
 STARTING_BALANCE = 10000
 STOP_LOSS_PERCENT = 5
@@ -143,7 +143,7 @@ DASHBOARD_AUTO_SUMMARIES_ENABLED = get_env_bool("DASHBOARD_AUTO_SUMMARIES_ENABLE
 # Keep dashboard auto-alerts OFF by default because bot.py handles background alerts.
 # You can still use the dashboard's manual test/send buttons.
 AUTO_SIGNAL_ALERTS_ENABLED = get_env_bool("DASHBOARD_AUTO_SIGNAL_ALERTS_ENABLED", False)
-AUTO_SIGNAL_MIN_CONFIDENCE = get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 78)
+AUTO_SIGNAL_MIN_CONFIDENCE = get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75)
 AUTO_SIGNAL_CHECK_INTERVAL_MINUTES = get_env_int("AUTO_SIGNAL_CHECK_INTERVAL_MINUTES", 15)
 
 # Automatic market news newsletter.
@@ -177,7 +177,7 @@ DASHBOARD_SHARED_STATUS_PREFER_GOOGLE = get_env_bool("DASHBOARD_SHARED_STATUS_PR
 
 # v32.3 Paper Trade Quality dashboard settings.
 # These mirror the v32.2 bot variables so the dashboard can show the active guardrails.
-BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 15)
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10)
 BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED = get_env_bool("BOT_PAPER_TRADE_QUALITY_FILTER_ENABLED", True)
 BOT_PAPER_TRADE_MIN_BACKTEST_PF = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_PF", 1.0)
 BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE = get_env_float("BOT_PAPER_TRADE_MIN_BACKTEST_WIN_RATE", 50)
@@ -366,7 +366,14 @@ CRYPTO_TICKERS = [
     'ICP-USD', 'ATOM-USD', 'ALGO-USD', 'XLM-USD',
     'LINK-USD', 'ONDO-USD', 'INJ-USD', 'SEI-USD',
     'DOGE-USD', 'NEAR-USD', 'FET-USD', 'RENDER-USD',
-    'SUI20947-USD'
+    'SUI20947-USD',
+
+    # v32.29.1.7 Evidence Watchlist Expansion
+    # Added only liquid, yfinance-compatible crypto tickers so the bot can
+    # collect more paper-trade evidence without changing strategy logic.
+    'AAVE-USD', 'ARB-USD', 'OP-USD', 'FIL-USD',
+    'DOT-USD', 'LTC-USD', 'BCH-USD', 'ETC-USD',
+    'PYTH-USD', 'JUP-USD', 'ENA-USD', 'BONK-USD'
 ]
 
 STOCK_TICKERS = [
@@ -375,7 +382,14 @@ STOCK_TICKERS = [
     'PLTR', 'SPY', 'QQQ', 'NFLX',
     'CRWD', 'PANW', 'ARM', 'SMCI',
     'COIN', 'HOOD', 'RDDT', 'TSM',
-    'MU'
+    'MU',
+
+    # v32.29.1.7 Evidence Watchlist Expansion
+    # Added high-liquidity stocks/ETFs across banks, mega-cap retail,
+    # enterprise software, growth, and semiconductors.
+    'JPM', 'BAC', 'GS', 'COST', 'WMT',
+    'ORCL', 'CRM', 'UBER', 'SHOP', 'SNOW',
+    'AVGO', 'NET', 'SOFI', 'MSTR'
 ]
 
 # v32.21.2 Yahoo Finance symbol guard. Mirrors bot.py so dashboard scans

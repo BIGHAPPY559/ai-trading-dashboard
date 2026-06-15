@@ -50,7 +50,14 @@ CRYPTO_TICKERS = [
     'ICP-USD', 'ATOM-USD', 'ALGO-USD', 'XLM-USD',
     'LINK-USD', 'ONDO-USD', 'INJ-USD', 'SEI-USD',
     'DOGE-USD', 'NEAR-USD', 'FET-USD', 'RENDER-USD',
-    'SUI20947-USD'
+    'SUI20947-USD',
+
+    # v32.29.1.7 Evidence Watchlist Expansion
+    # Added only liquid, yfinance-compatible crypto tickers so the bot can
+    # collect more paper-trade evidence without changing strategy logic.
+    'AAVE-USD', 'ARB-USD', 'OP-USD', 'FIL-USD',
+    'DOT-USD', 'LTC-USD', 'BCH-USD', 'ETC-USD',
+    'PYTH-USD', 'JUP-USD', 'ENA-USD', 'BONK-USD'
 ]
 
 STOCK_TICKERS = [
@@ -59,7 +66,14 @@ STOCK_TICKERS = [
     'PLTR', 'SPY', 'QQQ', 'NFLX',
     'CRWD', 'PANW', 'ARM', 'SMCI',
     'COIN', 'HOOD', 'RDDT', 'TSM',
-    'MU'
+    'MU',
+
+    # v32.29.1.7 Evidence Watchlist Expansion
+    # Added high-liquidity stocks/ETFs across banks, mega-cap retail,
+    # enterprise software, growth, and semiconductors.
+    'JPM', 'BAC', 'GS', 'COST', 'WMT',
+    'ORCL', 'CRM', 'UBER', 'SHOP', 'SNOW',
+    'AVGO', 'NET', 'SOFI', 'MSTR'
 ]
 
 ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
@@ -179,7 +193,7 @@ ALL_TICKERS = CRYPTO_TICKERS + STOCK_TICKERS
 
 # ======================================================
 # ENVIRONMENT VARIABLES
-# v32.29.1.6 Confidence Floor Safety: default signal confidence floor raised from 75 to 78; evidence cap preserved at 15.
+# v32.29.1.1 Streamlit Width Compatibility Cleanup: bot logic unchanged; version aligned with dashboard cleanup deploy.
 # ======================================================
 
 TRADE_WEBHOOK_URL = os.getenv("TRADE_WEBHOOK_URL", "")
@@ -253,7 +267,7 @@ BOT_SEND_ERROR_ALERTS = get_env_bool("BOT_SEND_ERROR_ALERTS", True)
 BOT_ERROR_ALERT_COOLDOWN_MINUTES = max(5, get_env_int("BOT_ERROR_ALERT_COOLDOWN_MINUTES", 30))
 ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 HEARTBEAT_WEBHOOK_URL = os.getenv("HEARTBEAT_WEBHOOK_URL", "")
-BOT_VERSION = "google-sheets-100-production-v32.29.1.6-confidence-floor-78"
+BOT_VERSION = "google-sheets-100-production-v32.29.1.7-evidence-watchlist-expansion"
 BOT_START_TIME = time.time()
 
 BOT_RUN_ONCE = get_env_bool("BOT_RUN_ONCE", False)
@@ -304,7 +318,7 @@ MIN_CONFIDENCE = max(
     min(
         get_env_float(
             "BOT_SIGNAL_MIN_CONFIDENCE",
-            get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 78)
+            get_env_float("AUTO_SIGNAL_MIN_CONFIDENCE", 75)
         ),
         100
     )
@@ -504,7 +518,7 @@ BOT_STATUS_FILE = os.path.join(BOT_DATA_DIR, "bot_last_status.json")
 BOT_PAPER_TRADING_ENABLED = get_env_bool("BOT_PAPER_TRADING_ENABLED", True)
 BOT_PAPER_TRADE_MONITOR_ENABLED = get_env_bool("BOT_PAPER_TRADE_MONITOR_ENABLED", True)
 BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_PER_TICKER", 1))
-BOT_PAPER_TRADE_MAX_OPEN_TOTAL = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 15))
+BOT_PAPER_TRADE_MAX_OPEN_TOTAL = max(1, get_env_int("BOT_PAPER_TRADE_MAX_OPEN_TOTAL", 10))
 BOT_PAPER_TRADE_STARTING_EQUITY = max(100, get_env_float("BOT_PAPER_TRADE_STARTING_EQUITY", BOT_ACCOUNT_SIZE))
 
 # v32.2 quality gate: paper trades should collect useful data without opening
